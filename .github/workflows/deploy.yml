@@ -1,0 +1,90 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Railway staging deploy
+      - name: Deploy API to Railway (staging)
+        uses: railwayapp/railway-action@v1
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN_STAGING }}
+          service: api
+
+      # Vercel preview is automatic on PR — no action needed here
+      # Vercel GitHub integration handles frontend preview deployments
+
+      - name: Smoke test staging
+        run: |
+          sleep 10
+          curl --fail "${{ vars.STAGING_API_URL }}/api/health" || exit 1
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    needs: []
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Run migrations before deploying new code
+      - name: Run database migrations
+        run: npm run migration:run --workspace=apps/api
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Deploy API to Railway (production)
+        uses: railwayapp/railway-action@v1
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN_PRODUCTION }}
+          service: api
+
+      # Vercel production deploy triggers automatically on push to main
+      # via Vercel GitHub integration
+
+      - name: Post-deploy health check
+        run: |
+          sleep 15
+          curl --fail "${{ vars.PRODUCTION_API_URL }}/api/health" || exit 1
+
+      - name: Notify Sentry of release
+        run: |
+          curl -sS https://sentry.io/api/0/organizations/${{ secrets.SENTRY_ORG }}/releases/ \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.SENTRY_AUTH_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"version\": \"${{ github.sha }}\", \"projects\": [\"cvpilot-api\", \"cvpilot-web\"]}"

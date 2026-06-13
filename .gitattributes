@@ -1,0 +1,14 @@
+# Enforce LF line endings for all text files in the repository.
+# This matches the "endOfLine": "lf" setting in .prettierrc and
+# prevents CRLF/LF conflicts between Windows and Unix contributors.
+* text=auto eol=lf
+
+# Explicitly mark binary files so Git never tries to convert them.
+*.docx binary
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.woff binary
+*.woff2 binary

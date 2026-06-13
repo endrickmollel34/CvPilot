@@ -1,0 +1,9 @@
+{
+  "extends": "@cvpilot/typescript-config/nestjs.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "permissions": {
+    "allow": ["PowerShell(npm *)", "PowerShell(Get-Content *)"]
+  }
+}
