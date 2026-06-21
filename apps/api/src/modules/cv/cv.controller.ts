@@ -3,6 +3,8 @@ import { Controller, Post, Body, Get, Param, UseGuards } from '@nestjs/common';
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { CvService } from './cv.service';
+import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
+import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
 
 @Controller('cvs')
 @UseGuards(ClerkGuard)
@@ -10,20 +12,13 @@ export class CvController {
   constructor(private readonly cvService: CvService) {}
 
   @Post('upload-url')
-  getUploadUrl(
-    @CurrentUser() user: { clerkId: string },
-    @Body() body: { fileName: string; mimeType: string; fileSizeBytes: number },
-  ) {
-    return this.cvService.generateUploadUrl(user.clerkId, body);
+  getUploadUrl(@CurrentUser() user: { clerkId: string }, @Body() dto: GenerateUploadUrlDto) {
+    return this.cvService.generateUploadUrl(user.clerkId, dto);
   }
 
   @Post('confirm')
-  confirmUpload(
-    @CurrentUser() user: { clerkId: string },
-    @Body()
-    body: { r2ObjectKey: string; fileName: string; fileSizeBytes: number; mimeType: string },
-  ) {
-    return this.cvService.confirmUpload(user.clerkId, body);
+  confirmUpload(@CurrentUser() user: { clerkId: string }, @Body() dto: ConfirmUploadDto) {
+    return this.cvService.confirmUpload(user.clerkId, dto);
   }
 
   @Get()

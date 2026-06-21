@@ -1,65 +1,103 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { randomUUID } from 'crypto';
+
+import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { type Repository } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
+import type { ConfigService } from '@nestjs/config';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 import { CvEntity } from '../../entities/cv.entity';
+import type { UserService } from '../user/user.service';
+import type { BillingService } from '../billing/billing.service';
+import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
+import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
 
-const ALLOWED_MIME_TYPES = [
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-];
-const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+const PRESIGNED_URL_TTL_SECONDS = 900; // 15 minutes
 
 @Injectable()
 export class CvService {
+  private readonly s3: S3Client;
+  private readonly bucket: string;
+
   constructor(
     @InjectRepository(CvEntity)
     private readonly cvRepo: Repository<CvEntity>,
     @InjectQueue('cv-parsing')
     private readonly parsingQueue: Queue,
-  ) {}
-
-  async generateUploadUrl(
-    clerkId: string,
-    body: { fileName: string; mimeType: string; fileSizeBytes: number },
+    private readonly config: ConfigService,
+    private readonly userService: UserService,
+    private readonly billingService: BillingService,
   ) {
-    if (!ALLOWED_MIME_TYPES.includes(body.mimeType)) {
-      throw new BadRequestException('Only PDF and DOCX files are accepted');
-    }
-    if (body.fileSizeBytes > MAX_FILE_SIZE_BYTES) {
-      throw new BadRequestException('File must be under 5 MB');
-    }
-    // TODO: generate presigned R2 PUT URL via S3Client + getSignedUrl (15-min TTL)
-    // TODO: verify clerkId maps to a user and check subscription limits via BillingService
-    return { uploadUrl: 'TODO', r2ObjectKey: 'TODO' };
+    this.s3 = new S3Client({
+      region: 'auto',
+      endpoint: this.config.getOrThrow<string>('CLOUDFLARE_R2_ENDPOINT'),
+      credentials: {
+        accessKeyId: this.config.getOrThrow<string>('CLOUDFLARE_R2_ACCESS_KEY_ID'),
+        secretAccessKey: this.config.getOrThrow<string>('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
+      },
+    });
+    this.bucket = this.config.getOrThrow<string>('CLOUDFLARE_R2_BUCKET_NAME');
   }
 
-  async confirmUpload(
-    clerkId: string,
-    body: { r2ObjectKey: string; fileName: string; fileSizeBytes: number; mimeType: string },
-  ) {
-    // TODO: resolve clerkId → userId
+  async generateUploadUrl(clerkId: string, dto: GenerateUploadUrlDto) {
+    const user = await this.userService.findByClerkId(clerkId);
+
+    const canProceed = await this.billingService.canPerformAction(user.id, 'analyse');
+    if (!canProceed) {
+      throw new ForbiddenException(
+        'Monthly analysis limit reached. Upgrade your plan to continue.',
+      );
+    }
+
+    const safeFileName = dto.fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const r2ObjectKey = `cvs/${user.id}/${randomUUID()}-${safeFileName}`;
+
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: r2ObjectKey,
+      ContentType: dto.mimeType,
+      ContentLength: dto.fileSizeBytes,
+    });
+
+    const uploadUrl = await getSignedUrl(this.s3, command, {
+      expiresIn: PRESIGNED_URL_TTL_SECONDS,
+    });
+
+    return { uploadUrl, r2ObjectKey };
+  }
+
+  async confirmUpload(clerkId: string, dto: ConfirmUploadDto) {
+    const user = await this.userService.findByClerkId(clerkId);
+
     const cv = this.cvRepo.create({
-      fileName: body.fileName,
-      r2ObjectKey: body.r2ObjectKey,
-      fileSizeBytes: body.fileSizeBytes,
-      mimeType: body.mimeType,
+      userId: user.id,
+      fileName: dto.fileName,
+      r2ObjectKey: dto.r2ObjectKey,
+      fileSizeBytes: dto.fileSizeBytes,
+      mimeType: dto.mimeType,
       parseStatus: 'pending',
     });
+
     const saved = await this.cvRepo.save(cv);
     await this.parsingQueue.add('parse-cv', { cvId: saved.id });
     return saved;
   }
 
-  async listForUser(_clerkId: string) {
-    // TODO: resolve clerkId → userId, then filter
-    return this.cvRepo.find({ where: { isActive: true } });
+  async listForUser(clerkId: string) {
+    const user = await this.userService.findByClerkId(clerkId);
+    return this.cvRepo.find({
+      where: { userId: user.id, isActive: true },
+      order: { createdAt: 'DESC' },
+    });
   }
 
-  async findOneForUser(_clerkId: string, cvId: string) {
-    // TODO: enforce user_id scoping
-    return this.cvRepo.findOneByOrFail({ id: cvId });
+  async findOneForUser(clerkId: string, cvId: string) {
+    const user = await this.userService.findByClerkId(clerkId);
+    const cv = await this.cvRepo.findOne({ where: { id: cvId, userId: user.id } });
+    if (!cv) throw new NotFoundException(`CV ${cvId} not found`);
+    return cv;
   }
 }
