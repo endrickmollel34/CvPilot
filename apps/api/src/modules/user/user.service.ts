@@ -14,13 +14,17 @@ export class UserService {
     private readonly profileRepo: Repository<ProfileEntity>,
   ) {}
 
-  async upsertFromClerk(clerkId: string, email: string): Promise<UserEntity> {
-    let user = await this.userRepo.findOneBy({ clerkId });
-    if (!user) {
-      user = this.userRepo.create({ clerkId, email });
-      await this.userRepo.save(user);
-    }
-    return user;
+  /**
+   * Atomically insert-or-update a user from a Clerk webhook event.
+   * Uses PostgreSQL ON CONFLICT to eliminate the TOCTOU race that would occur
+   * if two concurrent Clerk webhook deliveries both tried to create the same user.
+   */
+  async findOrCreateByClerkId(clerkId: string, email: string): Promise<UserEntity> {
+    await this.userRepo.upsert(
+      { clerkId, email },
+      { conflictPaths: ['clerkId'], skipUpdateIfNoValuesChanged: true },
+    );
+    return this.userRepo.findOneByOrFail({ clerkId });
   }
 
   async findByClerkId(clerkId: string): Promise<UserEntity> {
@@ -33,7 +37,6 @@ export class UserService {
   }
 
   async deleteByClerkId(clerkId: string): Promise<void> {
-    // Soft-delete: sets deleted_at via TypeORM @DeleteDateColumn
     const user = await this.findByClerkId(clerkId);
     await this.userRepo.softDelete(user.id);
     // TODO: schedule R2 CV file deletion, emit gdpr.erasure.requested event

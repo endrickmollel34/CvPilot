@@ -13,7 +13,8 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "migration:run": "typeorm migration:run -d dist/data-source.js",
     "migration:revert": "typeorm migration:revert -d dist/data-source.js",
-    "migration:generate": "typeorm migration:generate -d dist/data-source.js"
+    "migration:generate": "typeorm migration:generate -d dist/data-source.js",
+    "migration:create": "typeorm migration:create"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
@@ -37,6 +38,7 @@
     "resend": "^4.0.1",
     "rxjs": "^7.8.1",
     "stripe": "^17.4.0",
+    "svix": "^1.45.0",
     "typeorm": "^0.3.20",
     "zod": "^3.24.1"
   },

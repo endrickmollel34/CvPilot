@@ -3,6 +3,7 @@ import {
   PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
+  DeleteDateColumn,
   ManyToOne,
   JoinColumn,
   OneToOne,
@@ -55,6 +56,9 @@ export class AnalysisEntity {
 
   @Column({ name: 'completed_at', type: 'timestamptz', nullable: true })
   completedAt?: Date;
+
+  @DeleteDateColumn({ name: 'deleted_at', type: 'timestamptz', nullable: true })
+  deletedAt?: Date;
 
   @ManyToOne('UserEntity')
   @JoinColumn({ name: 'user_id' })

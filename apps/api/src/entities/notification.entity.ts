@@ -1,4 +1,13 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
+
+import type { UserEntity } from './user.entity';
 
 @Entity('notifications')
 export class NotificationEntity {
@@ -19,4 +28,8 @@ export class NotificationEntity {
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
+
+  @ManyToOne('UserEntity')
+  @JoinColumn({ name: 'user_id' })
+  user?: UserEntity;
 }

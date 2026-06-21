@@ -1,17 +1,15 @@
 import type { CanActivate, ExecutionContext } from '@nestjs/common';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
-import { createClerkClient } from '@clerk/backend';
+import { verifyToken } from '@clerk/backend';
 import type { Request } from 'express';
 
 @Injectable()
 export class ClerkGuard implements CanActivate {
-  private readonly clerk;
+  private readonly secretKey: string;
 
   constructor(private readonly config: ConfigService) {
-    this.clerk = createClerkClient({
-      secretKey: this.config.getOrThrow<string>('CLERK_SECRET_KEY'),
-    });
+    this.secretKey = this.config.getOrThrow<string>('CLERK_SECRET_KEY');
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -21,7 +19,7 @@ export class ClerkGuard implements CanActivate {
     if (!token) throw new UnauthorizedException('Missing authentication token');
 
     try {
-      const payload = await this.clerk.verifyToken(token);
+      const payload = await verifyToken(token, { secretKey: this.secretKey });
       request.user = { clerkId: payload.sub };
       return true;
     } catch {

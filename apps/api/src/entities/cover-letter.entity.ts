@@ -10,6 +10,8 @@ import {
 } from 'typeorm';
 
 import type { UserEntity } from './user.entity';
+import type { CvEntity } from './cv.entity';
+import type { AnalysisEntity } from './analysis.entity';
 
 export type CoverLetterStatus = 'draft' | 'generated' | 'downloaded';
 
@@ -60,4 +62,12 @@ export class CoverLetterEntity {
   @ManyToOne('UserEntity')
   @JoinColumn({ name: 'user_id' })
   user?: UserEntity;
+
+  @ManyToOne('CvEntity')
+  @JoinColumn({ name: 'cv_id' })
+  cv?: CvEntity;
+
+  @ManyToOne('AnalysisEntity')
+  @JoinColumn({ name: 'analysis_id' })
+  analysis?: AnalysisEntity;
 }
