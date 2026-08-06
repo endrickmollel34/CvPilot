@@ -20,6 +20,7 @@ function SourceBadge({ source }: { source: CvDto['source'] }) {
     upload: { label: 'Uploaded', cls: 'bg-blue-100 text-blue-700' },
     builder: { label: 'Built', cls: 'bg-purple-100 text-purple-700' },
     prefill: { label: 'Prefilled', cls: 'bg-amber-100 text-amber-700' },
+    tailored: { label: 'Tailored', cls: 'bg-green-100 text-green-700' },
   };
   const { label, cls } = map[source];
   return (
@@ -123,6 +124,14 @@ export function CvCard({ cv }: { cv: CvDto }) {
                 className="flex-1 rounded bg-indigo-600 px-3 py-1.5 text-center text-sm font-medium text-white hover:bg-indigo-700"
               >
                 Edit
+              </Link>
+            )}
+            {cv.source !== 'upload' && (
+              <Link
+                href={`/cvs/${cv.id}/tailor`}
+                className="flex-1 rounded border border-indigo-500 px-3 py-1.5 text-center text-sm font-medium text-indigo-600 hover:bg-indigo-50"
+              >
+                Tailor for job
               </Link>
             )}
             <button

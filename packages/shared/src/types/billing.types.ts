@@ -34,13 +34,24 @@ export interface UserPlan {
 
 export const PLAN_LIMITS: Record<
   Plan,
-  { analysesPerMonth: number; coverLettersPerMonth: number; builderCvsTotal: number }
+  {
+    analysesPerMonth: number;
+    coverLettersPerMonth: number;
+    builderCvsTotal: number;
+    tailoringsPerMonth: number;
+  }
 > = {
-  free: { analysesPerMonth: 2, coverLettersPerMonth: 1, builderCvsTotal: 1 },
-  pro: { analysesPerMonth: Infinity, coverLettersPerMonth: Infinity, builderCvsTotal: Infinity },
+  free: { analysesPerMonth: 2, coverLettersPerMonth: 1, builderCvsTotal: 1, tailoringsPerMonth: 0 },
+  pro: {
+    analysesPerMonth: Infinity,
+    coverLettersPerMonth: Infinity,
+    builderCvsTotal: Infinity,
+    tailoringsPerMonth: Infinity,
+  },
   student: {
     analysesPerMonth: Infinity,
     coverLettersPerMonth: Infinity,
     builderCvsTotal: Infinity,
+    tailoringsPerMonth: Infinity,
   },
 };

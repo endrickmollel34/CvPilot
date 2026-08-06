@@ -6,7 +6,7 @@ export type CvSection =
   | 'languages'
   | 'certifications';
 
-export type CvSource = 'upload' | 'builder' | 'prefill';
+export type CvSource = 'upload' | 'builder' | 'prefill' | 'tailored';
 
 export interface CvPersonalDetails {
   fullName: string;

@@ -15,6 +15,7 @@ import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 import { PLAN_LIMITS } from '@cvpilot/shared';
+import type { CvContent } from '@cvpilot/shared';
 import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
@@ -233,6 +234,19 @@ export class CvService {
     const stream = this.pdfService.generateStream(cv.content, cv.title ?? 'CV');
     const safe = (cv.title ?? 'cv').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
     return { stream, filename: `${safe}.pdf` };
+  }
+
+  async createTailored(userId: string, content: CvContent, jobTitle?: string): Promise<CvEntity> {
+    const title = jobTitle ? `Tailored CV — ${jobTitle}` : 'Tailored CV';
+    const cv = this.cvRepo.create({
+      userId,
+      title,
+      source: 'tailored',
+      parseStatus: 'done',
+      isActive: true,
+      content,
+    });
+    return this.cvRepo.save(cv);
   }
 
   private async checkBuilderCvLimit(userId: string): Promise<void> {
