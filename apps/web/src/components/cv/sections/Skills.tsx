@@ -1,3 +1,6 @@
+'use client';
+
+import { useState } from 'react';
 import type { CvSkillEntry } from '@cvpilot/shared';
 
 interface Props {
@@ -6,46 +9,59 @@ interface Props {
 }
 
 export function Skills({ entries, onChange }: Props) {
-  function addEntry() {
-    onChange([...entries, { id: crypto.randomUUID(), name: '' }]);
+  const [draft, setDraft] = useState('');
+
+  function add() {
+    const name = draft.trim();
+    if (!name) return;
+    onChange([...entries, { id: crypto.randomUUID(), name }]);
+    setDraft('');
   }
 
-  function update(id: string, field: keyof CvSkillEntry, value: string) {
-    onChange(entries.map((e) => (e.id === id ? { ...e, [field]: value || undefined } : e)));
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      add();
+    }
+  }
+
+  function remove(id: string) {
+    onChange(entries.filter((e) => e.id !== id));
   }
 
   return (
-    <div className="flex flex-col gap-2">
-      {entries.map((e) => (
-        <div key={e.id} className="flex gap-2">
-          <input
-            type="text"
-            placeholder="Skill name"
-            value={e.name}
-            onChange={(ev) => update(e.id, 'name', ev.target.value)}
-            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-indigo-500 focus:outline-none"
-          />
-          <input
-            type="text"
-            placeholder="Level (optional)"
-            value={e.level ?? ''}
-            onChange={(ev) => update(e.id, 'level', ev.target.value)}
-            className="w-32 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-indigo-500 focus:outline-none"
-          />
-          <button
-            onClick={() => onChange(entries.filter((x) => x.id !== e.id))}
-            className="text-xs text-gray-400 hover:text-red-500"
-          >
-            ✕
-          </button>
+    <div className="flex flex-col gap-3">
+      {entries.length > 0 && (
+        <div className="flex flex-wrap gap-2" role="list" aria-label="Skills">
+          {entries.map((e) => (
+            <span
+              key={e.id}
+              role="listitem"
+              className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-3 py-1 text-sm text-indigo-800"
+            >
+              {e.name}
+              {e.level && <span className="text-indigo-500"> · {e.level}</span>}
+              <button
+                type="button"
+                onClick={() => remove(e.id)}
+                aria-label={`Remove ${e.name}`}
+                className="ml-0.5 rounded-full text-indigo-400 hover:text-indigo-700 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                ×
+              </button>
+            </span>
+          ))}
         </div>
-      ))}
-      <button
-        onClick={addEntry}
-        className="mt-1 rounded-md border border-dashed border-indigo-300 py-2 text-sm text-indigo-600 hover:bg-indigo-50"
-      >
-        + Add skill
-      </button>
+      )}
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Type a skill and press Enter…"
+        aria-label="Add skill"
+        className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+      />
     </div>
   );
 }

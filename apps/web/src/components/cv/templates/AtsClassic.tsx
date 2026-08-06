@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type {
   CvContent,
   CvWorkEntry,
@@ -156,7 +157,7 @@ function renderSection(content: CvContent, section: CvContent['sectionOrder'][nu
   }
 }
 
-export function AtsClassic({ content }: { content: CvContent }) {
+export const AtsClassic = memo(function AtsClassic({ content }: { content: CvContent }) {
   const { personalDetails: pd, sectionOrder } = content;
 
   return (
@@ -178,4 +179,4 @@ export function AtsClassic({ content }: { content: CvContent }) {
       {sectionOrder.map((section) => renderSection(content, section))}
     </div>
   );
-}
+});

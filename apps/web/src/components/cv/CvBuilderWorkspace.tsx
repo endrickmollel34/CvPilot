@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useDeferredValue } from 'react';
 import { useAuth } from '@clerk/nextjs';
 
 import type { CvContent, CvSection } from '@cvpilot/shared';
@@ -14,6 +14,74 @@ import { Education } from './sections/Education';
 import { Skills } from './sections/Skills';
 import { Languages } from './sections/Languages';
 import { Certifications } from './sections/Certifications';
+
+// ─── Uncertainty stripping ────────────────────────────────────────────────────
+// The AI prefill may inject "[?] " prefixes into extracted values.
+// We strip them here before the content ever enters React state, so
+// markers are never saved back to the database.
+
+function strip(s: string): string {
+  return s.startsWith('[?] ') ? s.slice(4) : s;
+}
+
+function stripOpt(s: string | undefined): string | undefined {
+  return s ? strip(s) : s;
+}
+
+function stripUncertaintyPrefixes(content: CvContent): CvContent {
+  const pd = content.personalDetails;
+  return {
+    ...content,
+    personalDetails: {
+      fullName: strip(pd.fullName),
+      email: strip(pd.email),
+      phone: stripOpt(pd.phone),
+      location: stripOpt(pd.location),
+      linkedIn: stripOpt(pd.linkedIn),
+      website: stripOpt(pd.website),
+      jobTitle: stripOpt(pd.jobTitle),
+    },
+    summary: stripOpt(content.summary),
+    workExperience: content.workExperience.map((e) => ({
+      ...e,
+      company: strip(e.company),
+      title: strip(e.title),
+      location: stripOpt(e.location),
+      startDate: strip(e.startDate),
+      endDate: stripOpt(e.endDate),
+      bullets: e.bullets.map(strip),
+    })),
+    education: content.education.map((e) => ({
+      ...e,
+      institution: strip(e.institution),
+      degree: strip(e.degree),
+      field: stripOpt(e.field),
+      location: stripOpt(e.location),
+      startDate: stripOpt(e.startDate),
+      endDate: stripOpt(e.endDate),
+      grade: stripOpt(e.grade),
+    })),
+    skills: content.skills.map((e) => ({
+      ...e,
+      name: strip(e.name),
+      level: stripOpt(e.level),
+    })),
+    languages: content.languages.map((e) => ({
+      ...e,
+      name: strip(e.name),
+      level: stripOpt(e.level),
+    })),
+    certifications: content.certifications.map((e) => ({
+      ...e,
+      name: strip(e.name),
+      issuer: stripOpt(e.issuer),
+      date: stripOpt(e.date),
+      url: stripOpt(e.url),
+    })),
+  };
+}
+
+// ─── Section metadata ─────────────────────────────────────────────────────────
 
 const SECTION_LABELS: Record<CvSection, string> = {
   summary: 'Summary',
@@ -33,21 +101,40 @@ const ALL_SECTIONS: CvSection[] = [
   'certifications',
 ];
 
+const EMPTY_CONTENT: CvContent = {
+  version: 1,
+  personalDetails: { fullName: '', email: '' },
+  workExperience: [],
+  education: [],
+  skills: [],
+  languages: [],
+  certifications: [],
+  sectionOrder: ALL_SECTIONS,
+};
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
 function SaveIndicator({ state }: { state: SaveState }) {
   if (state === 'idle') return null;
-  const map: Record<SaveState, string> = {
+  const label: Record<SaveState, string> = {
     idle: '',
+    unsaved: 'Unsaved changes',
     saving: 'Saving…',
-    saved: 'Saved ✓',
+    saved: 'Saved',
     error: 'Save failed',
   };
-  const color: Record<SaveState, string> = {
+  const cls: Record<SaveState, string> = {
     idle: '',
+    unsaved: 'text-amber-600',
     saving: 'text-gray-400',
     saved: 'text-green-600',
     error: 'text-red-600',
   };
-  return <span className={`text-xs ${color[state]}`}>{map[state]}</span>;
+  return (
+    <span className={`text-xs ${cls[state]}`} aria-live="polite" aria-atomic="true">
+      {label[state]}
+    </span>
+  );
 }
 
 function SectionPanel({
@@ -63,17 +150,26 @@ function SectionPanel({
   onToggle: () => void;
   onContentChange: (c: CvContent) => void;
 }) {
+  const panelId = `section-panel-${section}`;
+  const headerId = `section-header-${section}`;
+
   return (
     <div className="border-b border-gray-200 last:border-0">
       <button
-        className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50"
+        id={headerId}
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={panelId}
+        className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-500"
         onClick={onToggle}
       >
         <span className="text-sm font-medium text-gray-800">{SECTION_LABELS[section]}</span>
-        <span className="text-xs text-gray-400">{expanded ? '▲' : '▼'}</span>
+        <span className="text-xs text-gray-400" aria-hidden="true">
+          {expanded ? '▲' : '▼'}
+        </span>
       </button>
       {expanded && (
-        <div className="px-4 pb-4 pt-1">
+        <div id={panelId} role="region" aria-labelledby={headerId} className="px-4 pb-4 pt-1">
           {section === 'summary' && (
             <Summary
               value={content.summary}
@@ -116,16 +212,7 @@ function SectionPanel({
   );
 }
 
-const EMPTY_CONTENT: CvContent = {
-  version: 1,
-  personalDetails: { fullName: '', email: '' },
-  workExperience: [],
-  education: [],
-  skills: [],
-  languages: [],
-  certifications: [],
-  sectionOrder: ALL_SECTIONS,
-};
+// ─── Workspace ────────────────────────────────────────────────────────────────
 
 interface Props {
   cvId: string;
@@ -135,9 +222,18 @@ interface Props {
 
 export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }: Props) {
   const { getToken } = useAuth();
-  const [content, setContent] = useState<CvContent>(initialContent ?? EMPTY_CONTENT);
-  const [expandedSection, setExpandedSection] = useState<CvSection>('personalDetails' as CvSection);
-  const [showMobilePreview, setShowMobilePreview] = useState(false);
+
+  const [content, setContent] = useState<CvContent>(() => {
+    const base = initialContent ?? EMPTY_CONTENT;
+    return isPrefilled ? stripUncertaintyPrefixes(base) : base;
+  });
+
+  // Deferred value so the preview never blocks editor input.
+  const deferredContent = useDeferredValue(content);
+
+  // 'personalDetails' is not a CvSection, so we use string | null.
+  const [activePanel, setActivePanel] = useState<string>('personalDetails');
+  const [mobileTab, setMobileTab] = useState<'edit' | 'preview'>('edit');
 
   const saveFn = useCallback(
     async (c: CvContent) => {
@@ -151,16 +247,43 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
 
   const sections = content.sectionOrder.length > 0 ? content.sectionOrder : ALL_SECTIONS;
 
+  const tabCls = (tab: 'edit' | 'preview') =>
+    `flex-1 py-2 text-sm font-medium focus:outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-500 ${
+      mobileTab === tab
+        ? 'border-b-2 border-indigo-600 text-indigo-600'
+        : 'text-gray-500 hover:text-gray-700'
+    }`;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Top bar */}
-      <div className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-2">
+      {/* Top bar: save indicator */}
+      <div className="flex items-center border-b border-gray-200 bg-white px-4 py-2">
         <SaveIndicator state={saveState} />
+      </div>
+
+      {/* Mobile tab bar */}
+      <div
+        className="flex border-b border-gray-200 bg-white lg:hidden"
+        role="tablist"
+        aria-label="Builder view"
+      >
         <button
-          className="rounded bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700 lg:hidden"
-          onClick={() => setShowMobilePreview((p) => !p)}
+          role="tab"
+          type="button"
+          aria-selected={mobileTab === 'edit'}
+          onClick={() => setMobileTab('edit')}
+          className={tabCls('edit')}
         >
-          {showMobilePreview ? 'Editor' : 'Preview'}
+          Edit
+        </button>
+        <button
+          role="tab"
+          type="button"
+          aria-selected={mobileTab === 'preview'}
+          onClick={() => setMobileTab('preview')}
+          className={tabCls('preview')}
+        >
+          Preview
         </button>
       </div>
 
@@ -168,35 +291,44 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Editor panel */}
         <div
-          className={`flex flex-col overflow-y-auto border-r border-gray-200 bg-white ${showMobilePreview ? 'hidden' : 'flex'} w-full lg:flex lg:w-2/5`}
+          role="tabpanel"
+          aria-label="CV editor"
+          className={`flex w-full flex-col overflow-y-auto border-r border-gray-200 bg-white lg:flex lg:w-2/5 ${mobileTab === 'edit' ? 'flex' : 'hidden'}`}
         >
           {isPrefilled && (
-            <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-              <strong>Prefilled from your uploaded CV.</strong> Fields marked with{' '}
-              <code className="rounded bg-amber-100 px-1">[?]</code> are uncertain — please review
-              and correct everything before saving.
+            <div
+              className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800"
+              role="alert"
+            >
+              <strong>Extracted from your uploaded CV.</strong> Review every field carefully — AI
+              extraction is approximate. Edit anything that looks wrong before saving.
             </div>
           )}
 
-          {/* Personal details always first */}
+          {/* Personal Details accordion */}
           <div className="border-b border-gray-200">
             <button
-              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50"
+              type="button"
+              id="section-header-personalDetails"
+              aria-expanded={activePanel === 'personalDetails'}
+              aria-controls="section-panel-personalDetails"
+              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-500"
               onClick={() =>
-                setExpandedSection((s) =>
-                  s === ('personalDetails' as CvSection)
-                    ? ('' as CvSection)
-                    : ('personalDetails' as CvSection),
-                )
+                setActivePanel((p) => (p === 'personalDetails' ? '' : 'personalDetails'))
               }
             >
               <span className="text-sm font-medium text-gray-800">Personal Details</span>
-              <span className="text-xs text-gray-400">
-                {expandedSection === ('personalDetails' as CvSection) ? '▲' : '▼'}
+              <span className="text-xs text-gray-400" aria-hidden="true">
+                {activePanel === 'personalDetails' ? '▲' : '▼'}
               </span>
             </button>
-            {expandedSection === ('personalDetails' as CvSection) && (
-              <div className="px-4 pb-4 pt-1">
+            {activePanel === 'personalDetails' && (
+              <div
+                id="section-panel-personalDetails"
+                role="region"
+                aria-labelledby="section-header-personalDetails"
+                className="px-4 pb-4 pt-1"
+              >
                 <PersonalDetails
                   value={content.personalDetails}
                   onChange={(pd) => setContent((c) => ({ ...c, personalDetails: pd }))}
@@ -205,15 +337,14 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
             )}
           </div>
 
+          {/* Remaining sections */}
           {sections.map((section) => (
             <SectionPanel
               key={section}
               section={section}
               content={content}
-              expanded={expandedSection === section}
-              onToggle={() =>
-                setExpandedSection((s) => (s === section ? ('' as CvSection) : section))
-              }
+              expanded={activePanel === section}
+              onToggle={() => setActivePanel((p) => (p === section ? '' : section))}
               onContentChange={setContent}
             />
           ))}
@@ -221,10 +352,12 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
 
         {/* Preview panel */}
         <div
-          className={`overflow-y-auto bg-gray-50 p-6 ${showMobilePreview ? 'flex' : 'hidden'} flex-1 lg:flex`}
+          role="tabpanel"
+          aria-label="CV preview"
+          className={`flex-1 overflow-y-auto bg-gray-50 p-6 lg:flex ${mobileTab === 'preview' ? 'flex' : 'hidden'}`}
         >
           <div className="mx-auto w-full max-w-[210mm] rounded bg-white p-8 shadow-sm">
-            <AtsClassic content={content} />
+            <AtsClassic content={deferredContent} />
           </div>
         </div>
       </div>
