@@ -12,6 +12,7 @@ import { ZodError } from 'zod';
 
 import { CvService } from './cv.service';
 import { PrefillExtractionService, ExtractionResponseSchema } from './prefill-extraction.service';
+import { PdfGenerationService } from './pdf-generation.service';
 import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
@@ -90,6 +91,7 @@ describe('CvService — prefillFromUpload()', () => {
   const mockUserService = { findByClerkId: jest.fn() };
   const mockBillingService = { canPerformAction: jest.fn(), getUserPlan: jest.fn() };
   const mockPrefillService = { extract: jest.fn() };
+  const mockPdfService = { generate: jest.fn() };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -101,6 +103,7 @@ describe('CvService — prefillFromUpload()', () => {
         { provide: UserService, useValue: mockUserService },
         { provide: BillingService, useValue: mockBillingService },
         { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PdfGenerationService, useValue: mockPdfService },
       ],
     }).compile();
 

@@ -5,7 +5,7 @@ import { useAuth } from '@clerk/nextjs';
 
 import type { CvContent, CvSection } from '@cvpilot/shared';
 import { useAutosave, type SaveState } from '@/hooks/useAutosave';
-import { updateCvContent } from '@/lib/cvApi';
+import { updateCvContent, downloadCvPdf } from '@/lib/cvApi';
 import { AtsClassic } from './templates/AtsClassic';
 import { PersonalDetails } from './sections/PersonalDetails';
 import { Summary } from './sections/Summary';
@@ -234,6 +234,7 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
   // 'personalDetails' is not a CvSection, so we use string | null.
   const [activePanel, setActivePanel] = useState<string>('personalDetails');
   const [mobileTab, setMobileTab] = useState<'edit' | 'preview'>('edit');
+  const [dlState, setDlState] = useState<'idle' | 'downloading' | 'error'>('idle');
 
   const saveFn = useCallback(
     async (c: CvContent) => {
@@ -244,6 +245,18 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
   );
 
   const saveState = useAutosave(content, saveFn, true);
+
+  async function handleDownload() {
+    setDlState('downloading');
+    try {
+      const token = await getToken();
+      const name = (content.personalDetails.fullName || 'cv').replace(/\s+/g, '_');
+      await downloadCvPdf(token!, cvId, `${name}.pdf`);
+      setDlState('idle');
+    } catch {
+      setDlState('error');
+    }
+  }
 
   const sections = content.sectionOrder.length > 0 ? content.sectionOrder : ALL_SECTIONS;
 
@@ -256,9 +269,23 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Top bar: save indicator */}
-      <div className="flex items-center border-b border-gray-200 bg-white px-4 py-2">
+      {/* Top bar: save indicator + download */}
+      <div className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-2">
         <SaveIndicator state={saveState} />
+        <div className="flex items-center gap-3">
+          {dlState === 'error' && (
+            <span className="text-xs text-red-600">Download failed — try again</span>
+          )}
+          <button
+            type="button"
+            onClick={() => void handleDownload()}
+            disabled={dlState === 'downloading'}
+            aria-label="Download CV as PDF"
+            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 disabled:opacity-50"
+          >
+            {dlState === 'downloading' ? 'Preparing…' : 'Download PDF'}
+          </button>
+        </div>
       </div>
 
       {/* Mobile tab bar */}

@@ -5,6 +5,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { CvController } from './cv.controller';
 import { CvService } from './cv.service';
 import { PrefillExtractionService } from './prefill-extraction.service';
+import { PdfGenerationService } from './pdf-generation.service';
 import { CvEntity } from '../../entities/cv.entity';
 import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
@@ -17,7 +18,7 @@ import { UserModule } from '../user/user.module';
     UserModule,
   ],
   controllers: [CvController],
-  providers: [CvService, PrefillExtractionService],
+  providers: [CvService, PrefillExtractionService, PdfGenerationService],
   exports: [CvService],
 })
 export class CvModule {}

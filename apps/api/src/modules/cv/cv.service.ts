@@ -19,6 +19,7 @@ import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { PrefillExtractionService } from './prefill-extraction.service';
+import { PdfGenerationService } from './pdf-generation.service';
 import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
 import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
 import type { CreateCvDto } from './dto/create-cv.dto';
@@ -42,6 +43,7 @@ export class CvService {
     private readonly userService: UserService,
     private readonly billingService: BillingService,
     private readonly prefillService: PrefillExtractionService,
+    private readonly pdfService: PdfGenerationService,
   ) {
     this.s3 = new S3Client({
       region: 'auto',
@@ -218,6 +220,19 @@ export class CvService {
     });
 
     return this.cvRepo.save(cv);
+  }
+
+  async generatePdfStream(
+    clerkId: string,
+    cvId: string,
+  ): Promise<{ stream: import('stream').PassThrough; filename: string }> {
+    const cv = await this.findOneForUser(clerkId, cvId);
+    if (!cv.content) {
+      throw new UnprocessableEntityException('This CV has no builder content to export.');
+    }
+    const stream = this.pdfService.generateStream(cv.content, cv.title ?? 'CV');
+    const safe = (cv.title ?? 'cv').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+    return { stream, filename: `${safe}.pdf` };
   }
 
   private async checkBuilderCvLimit(userId: string): Promise<void> {

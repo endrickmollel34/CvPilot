@@ -66,6 +66,22 @@ export async function deleteCv(token: string, cvId: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(`Failed to delete CV: ${res.status}`);
 }
 
+export async function downloadCvPdf(token: string, cvId: string, filename: string): Promise<void> {
+  const res = await fetch(`${API_URL}/cvs/${cvId}/download`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`PDF download failed: ${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export async function prefillCv(token: string, uploadCvId: string): Promise<CvDto> {
   const res = await fetch(`${API_URL}/cvs/${uploadCvId}/prefill`, {
     method: 'POST',

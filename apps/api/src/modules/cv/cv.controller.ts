@@ -6,10 +6,13 @@ import {
   Delete,
   Body,
   Param,
+  Res,
   UseGuards,
   HttpCode,
   HttpStatus,
+  StreamableFile,
 } from '@nestjs/common';
+import type { Response } from 'express';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -79,6 +82,20 @@ export class CvController {
   @Post(':id/prefill')
   prefill(@CurrentUser() user: { clerkId: string }, @Param('id') id: string) {
     return this.cvService.prefillFromUpload(user.clerkId, id);
+  }
+
+  @Get(':id/download')
+  async downloadPdf(
+    @CurrentUser() user: { clerkId: string },
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    res.setHeader('Cache-Control', 'no-store');
+    const { stream, filename } = await this.cvService.generatePdfStream(user.clerkId, id);
+    return new StreamableFile(stream, {
+      type: 'application/pdf',
+      disposition: `attachment; filename="${filename}"`,
+    });
   }
 
   // Shared
