@@ -7,11 +7,17 @@ import { StripePaymentProvider } from './providers/stripe.provider';
 import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
+import { CoverLetterEntity } from '../../entities/cover-letter.entity';
 import { UserModule } from '../user/user.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SubscriptionEntity, PaymentEntity, AnalysisEntity]),
+    TypeOrmModule.forFeature([
+      SubscriptionEntity,
+      PaymentEntity,
+      AnalysisEntity,
+      CoverLetterEntity,
+    ]),
     UserModule,
   ],
   controllers: [BillingController],

@@ -8,6 +8,7 @@ import { PLAN_LIMITS } from '@cvpilot/shared';
 import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
+import { CoverLetterEntity } from '../../entities/cover-letter.entity';
 import type { UserService } from '../user/user.service';
 import type { StripePaymentProvider } from './providers/stripe.provider';
 import type { PaymentProvider, InternalBillingEvent } from './providers/payment-provider.interface';
@@ -24,6 +25,8 @@ export class BillingService {
     private readonly paymentRepo: Repository<PaymentEntity>,
     @InjectRepository(AnalysisEntity)
     private readonly analysisRepo: Repository<AnalysisEntity>,
+    @InjectRepository(CoverLetterEntity)
+    private readonly coverLetterRepo: Repository<CoverLetterEntity>,
     private readonly userService: UserService,
     stripeProvider: StripePaymentProvider,
   ) {
@@ -93,7 +96,8 @@ export class BillingService {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    const count = await this.analysisRepo.count({
+    const repo = action === 'analyse' ? this.analysisRepo : this.coverLetterRepo;
+    const count = await repo.count({
       where: { userId, createdAt: MoreThanOrEqual(startOfMonth) },
     });
 

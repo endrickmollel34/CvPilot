@@ -13,7 +13,7 @@ import type { UserEntity } from './user.entity';
 import type { CvEntity } from './cv.entity';
 import type { AnalysisEntity } from './analysis.entity';
 
-export type CoverLetterStatus = 'draft' | 'generated' | 'downloaded';
+export type CoverLetterStatus = 'queued' | 'processing' | 'generated' | 'failed' | 'downloaded';
 
 @Entity('cover_letters')
 export class CoverLetterEntity {
@@ -47,7 +47,13 @@ export class CoverLetterEntity {
   @Column({ name: 'tokens_used', type: 'integer', nullable: true })
   tokensUsed?: number;
 
-  @Column({ length: 20, default: 'draft' })
+  @Column({ length: 30, nullable: true })
+  tone?: string;
+
+  @Column({ name: 'generated_at', type: 'timestamptz', nullable: true })
+  generatedAt?: Date;
+
+  @Column({ length: 20, default: 'queued' })
   status!: CoverLetterStatus;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
