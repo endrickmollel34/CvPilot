@@ -42,6 +42,13 @@ export class ParsingService extends WorkerHost {
     try {
       const cv = await this.cvRepo.findOneByOrFail({ id: cvId });
 
+      if (!cv.r2ObjectKey) {
+        // Builder CVs have no R2 file — mark done immediately
+        await this.cvRepo.update(cvId, { parseStatus: 'done' });
+        this.logger.log(`CV ${cvId} is a builder CV — skipping file parse`);
+        return;
+      }
+
       const response = await this.s3.send(
         new GetObjectCommand({ Bucket: this.bucket, Key: cv.r2ObjectKey }),
       );

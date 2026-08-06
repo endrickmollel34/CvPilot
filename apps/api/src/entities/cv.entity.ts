@@ -10,6 +10,7 @@ import {
   OneToMany,
 } from 'typeorm';
 
+import type { CvContent, CvSource } from '@cvpilot/shared';
 import type { UserEntity } from './user.entity';
 import type { AnalysisEntity } from './analysis.entity';
 
@@ -23,17 +24,26 @@ export class CvEntity {
   @Column({ name: 'user_id' })
   userId!: string;
 
-  @Column({ name: 'file_name', length: 255 })
-  fileName!: string;
+  @Column({ name: 'title', length: 255, nullable: true })
+  title?: string;
 
-  @Column({ name: 'r2_object_key', length: 512 })
-  r2ObjectKey!: string;
+  @Column({ name: 'source', length: 20, default: 'upload' })
+  source!: CvSource;
 
-  @Column({ name: 'file_size_bytes', type: 'integer' })
-  fileSizeBytes!: number;
+  @Column({ name: 'content', type: 'jsonb', nullable: true })
+  content?: CvContent;
 
-  @Column({ name: 'mime_type', length: 100 })
-  mimeType!: string;
+  @Column({ name: 'file_name', length: 255, nullable: true })
+  fileName?: string;
+
+  @Column({ name: 'r2_object_key', length: 512, nullable: true })
+  r2ObjectKey?: string;
+
+  @Column({ name: 'file_size_bytes', type: 'integer', nullable: true })
+  fileSizeBytes?: number;
+
+  @Column({ name: 'mime_type', length: 100, nullable: true })
+  mimeType?: string;
 
   @Column({ name: 'parsed_content', type: 'text', nullable: true })
   parsedContent?: string;

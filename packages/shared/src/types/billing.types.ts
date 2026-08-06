@@ -32,9 +32,15 @@ export interface UserPlan {
   currentPeriodEnd: Date | null;
 }
 
-export const PLAN_LIMITS: Record<Plan, { analysesPerMonth: number; coverLettersPerMonth: number }> =
-  {
-    free: { analysesPerMonth: 2, coverLettersPerMonth: 1 },
-    pro: { analysesPerMonth: Infinity, coverLettersPerMonth: Infinity },
-    student: { analysesPerMonth: Infinity, coverLettersPerMonth: Infinity },
-  };
+export const PLAN_LIMITS: Record<
+  Plan,
+  { analysesPerMonth: number; coverLettersPerMonth: number; builderCvsTotal: number }
+> = {
+  free: { analysesPerMonth: 2, coverLettersPerMonth: 1, builderCvsTotal: 1 },
+  pro: { analysesPerMonth: Infinity, coverLettersPerMonth: Infinity, builderCvsTotal: Infinity },
+  student: {
+    analysesPerMonth: Infinity,
+    coverLettersPerMonth: Infinity,
+    builderCvsTotal: Infinity,
+  },
+};

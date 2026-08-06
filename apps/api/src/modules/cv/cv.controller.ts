@@ -1,16 +1,32 @@
-import { Controller, Post, Body, Get, Param, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Patch,
+  Delete,
+  Body,
+  Param,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CvService } from './cv.service';
 import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
 import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
+import type { CreateCvDto } from './dto/create-cv.dto';
+import type { UpdateCvContentDto } from './dto/update-cv-content.dto';
+import type { RenameCvDto } from './dto/rename-cv.dto';
+import type { ReorderCvSectionsDto } from './dto/reorder-cv-sections.dto';
 
 @Controller('cvs')
 @UseGuards(ClerkGuard)
 export class CvController {
   constructor(private readonly cvService: CvService) {}
 
+  // Upload flow
   @Post('upload-url')
   getUploadUrl(@CurrentUser() user: { clerkId: string }, @Body() dto: GenerateUploadUrlDto) {
     return this.cvService.generateUploadUrl(user.clerkId, dto);
@@ -21,6 +37,46 @@ export class CvController {
     return this.cvService.confirmUpload(user.clerkId, dto);
   }
 
+  // Builder flow
+  @Post()
+  create(@CurrentUser() user: { clerkId: string }, @Body() dto: CreateCvDto) {
+    return this.cvService.createBuilder(user.clerkId, dto);
+  }
+
+  @Patch(':id')
+  updateContent(
+    @CurrentUser() user: { clerkId: string },
+    @Param('id') id: string,
+    @Body() dto: UpdateCvContentDto,
+  ) {
+    return this.cvService.updateContent(user.clerkId, id, dto);
+  }
+
+  @Patch(':id/title')
+  rename(
+    @CurrentUser() user: { clerkId: string },
+    @Param('id') id: string,
+    @Body() dto: RenameCvDto,
+  ) {
+    return this.cvService.rename(user.clerkId, id, dto);
+  }
+
+  @Patch(':id/reorder')
+  reorder(
+    @CurrentUser() user: { clerkId: string },
+    @Param('id') id: string,
+    @Body() dto: ReorderCvSectionsDto,
+  ) {
+    return this.cvService.reorderSections(user.clerkId, id, dto);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteCv(@CurrentUser() user: { clerkId: string }, @Param('id') id: string): Promise<void> {
+    await this.cvService.deleteCv(user.clerkId, id);
+  }
+
+  // Shared
   @Get()
   listCvs(@CurrentUser() user: { clerkId: string }) {
     return this.cvService.listForUser(user.clerkId);
