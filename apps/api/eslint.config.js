@@ -30,7 +30,12 @@ module.exports = [
     rules: {
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
+      // NestJS DI relies on emitDecoratorMetadata: constructor-injected services must be
+      // value imports so TypeScript emits the class reference in design:paramtypes. Forcing
+      // import type on those imports causes NestJS to see Object instead of the class and
+      // the DI container cannot resolve the token. Rule disabled project-wide; use import
+      // type deliberately for non-injectable types (entities, DTOs, interfaces).
+      '@typescript-eslint/consistent-type-imports': 'off',
       '@typescript-eslint/no-require-imports': 'off',
     },
   },

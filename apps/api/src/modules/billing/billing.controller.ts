@@ -10,14 +10,18 @@ import type { BillingService } from './billing.service';
 export class BillingController {
   constructor(private readonly billingService: BillingService) {}
 
-  // Stripe requires raw body for signature verification — no JSON middleware on this route
+  // Raw body required for webhook signature verification — no JSON middleware on these routes
   @Post('webhooks/stripe')
   handleStripeWebhook(
     @Headers('stripe-signature') signature: string,
     @Req() request: RawBodyRequest<Request>,
   ) {
-    return this.billingService.handleStripeWebhook(signature, request.rawBody!);
+    return this.billingService.handleWebhook('STRIPE', request.rawBody!, signature);
   }
+
+  // Future provider webhooks follow the same pattern:
+  // @Post('webhooks/clickpesa') → this.billingService.handleWebhook('CLICKPESA', ...)
+  // @Post('webhooks/azampay')   → this.billingService.handleWebhook('AZAMPAY', ...)
 
   @Post('billing/checkout')
   @UseGuards(ClerkGuard)

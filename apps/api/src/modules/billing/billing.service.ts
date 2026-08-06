@@ -1,65 +1,83 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { type Repository, MoreThanOrEqual } from 'typeorm';
-import Stripe from 'stripe';
-import type { Plan } from '@cvpilot/shared';
+
+import type { Plan, PaymentProviderType } from '@cvpilot/shared';
 import { PLAN_LIMITS } from '@cvpilot/shared';
 
 import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
-
-const PRICE_IDS: Record<'pro' | 'student', string> = {
-  pro: 'price_pro_monthly', // replace with real Stripe price IDs
-  student: 'price_student_monthly',
-};
+import type { UserService } from '../user/user.service';
+import type { StripePaymentProvider } from './providers/stripe.provider';
+import type { PaymentProvider, InternalBillingEvent } from './providers/payment-provider.interface';
 
 @Injectable()
 export class BillingService {
   private readonly logger = new Logger(BillingService.name);
-  private readonly stripe: Stripe;
+  private readonly providers = new Map<PaymentProviderType, PaymentProvider>();
 
   constructor(
-    private readonly config: ConfigService,
     @InjectRepository(SubscriptionEntity)
     private readonly subscriptionRepo: Repository<SubscriptionEntity>,
     @InjectRepository(PaymentEntity)
     private readonly paymentRepo: Repository<PaymentEntity>,
     @InjectRepository(AnalysisEntity)
     private readonly analysisRepo: Repository<AnalysisEntity>,
+    private readonly userService: UserService,
+    stripeProvider: StripePaymentProvider,
   ) {
-    this.stripe = new Stripe(this.config.getOrThrow<string>('STRIPE_SECRET_KEY'));
+    this.providers.set('STRIPE', stripeProvider);
   }
 
-  async createCheckoutSession(_clerkId: string, plan: 'pro' | 'student') {
-    // TODO: resolve clerkId → userId, get or create Stripe customer
-    const session = await this.stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{ price: PRICE_IDS[plan], quantity: 1 }],
-      success_url: `${this.config.getOrThrow('FRONTEND_URL')}/dashboard?checkout=success`,
-      cancel_url: `${this.config.getOrThrow('FRONTEND_URL')}/dashboard?checkout=cancelled`,
+  async createCheckoutSession(
+    clerkId: string,
+    plan: Exclude<Plan, 'free'>,
+    providerType: PaymentProviderType = 'STRIPE',
+  ): Promise<{ url: string | null }> {
+    const provider = this.getProvider(providerType);
+    const user = await this.userService.findByClerkId(clerkId);
+    const sub = await this.subscriptionRepo.findOneBy({ userId: user.id });
+
+    return provider.createCheckoutSession({
+      userId: user.id,
+      providerCustomerId: sub?.providerCustomerId,
+      plan,
+      currency: 'GBP',
+      successUrl: `${process.env['FRONTEND_URL'] ?? ''}/dashboard?checkout=success`,
+      cancelUrl: `${process.env['FRONTEND_URL'] ?? ''}/dashboard?checkout=cancelled`,
     });
-    return { url: session.url };
   }
 
-  async createPortalSession(_clerkId: string) {
-    // TODO: resolve clerkId → stripeCustomerId
-    const session = await this.stripe.billingPortal.sessions.create({
-      customer: 'TODO',
-      return_url: `${this.config.getOrThrow('FRONTEND_URL')}/dashboard`,
+  async createPortalSession(
+    clerkId: string,
+    providerType: PaymentProviderType = 'STRIPE',
+  ): Promise<{ url: string }> {
+    const provider = this.getProvider(providerType);
+    if (!provider.createCustomerPortalSession) {
+      throw new BadRequestException(`Provider ${providerType} does not support a customer portal`);
+    }
+
+    const user = await this.userService.findByClerkId(clerkId);
+    const sub = await this.subscriptionRepo.findOneBy({ userId: user.id });
+    if (!sub?.providerCustomerId) {
+      throw new NotFoundException('No active subscription found');
+    }
+
+    return provider.createCustomerPortalSession({
+      providerCustomerId: sub.providerCustomerId,
+      returnUrl: `${process.env['FRONTEND_URL'] ?? ''}/dashboard`,
     });
-    return { url: session.url };
   }
 
-  async getSubscription(_clerkId: string) {
-    // TODO: resolve clerkId → userId
-    return this.subscriptionRepo.findOneBy({});
+  async getSubscription(clerkId: string): Promise<SubscriptionEntity | null> {
+    const user = await this.userService.findByClerkId(clerkId);
+    return this.subscriptionRepo.findOneBy({ userId: user.id });
   }
 
   async getUserPlan(userId: string): Promise<Plan> {
     const sub = await this.subscriptionRepo.findOneBy({ userId });
-    return (sub?.plan ?? 'free') as Plan;
+    return sub?.plan ?? 'free';
   }
 
   async canPerformAction(userId: string, action: 'analyse' | 'cover-letter'): Promise<boolean> {
@@ -82,56 +100,127 @@ export class BillingService {
     return count < limit;
   }
 
-  async handleStripeWebhook(signature: string, rawBody: Buffer): Promise<void> {
-    let event: Stripe.Event;
+  async handleWebhook(
+    providerType: PaymentProviderType,
+    rawBody: Buffer,
+    signature: string,
+  ): Promise<void> {
+    const provider = this.getProvider(providerType);
+    const event = provider.verifyAndParseWebhook({ rawBody, signature });
+    if (!event) return;
+    await this.applyBillingEvent(event);
+  }
 
-    try {
-      event = this.stripe.webhooks.constructEvent(
-        rawBody,
-        signature,
-        this.config.getOrThrow<string>('STRIPE_WEBHOOK_SECRET'),
-      );
-    } catch {
-      throw new BadRequestException('Invalid Stripe webhook signature');
-    }
+  private getProvider(type: PaymentProviderType): PaymentProvider {
+    const provider = this.providers.get(type);
+    if (!provider) throw new BadRequestException(`Unknown payment provider: ${type}`);
+    return provider;
+  }
 
-    this.logger.log(`Stripe event: ${event.type}`);
-
+  private async applyBillingEvent(event: InternalBillingEvent): Promise<void> {
+    this.logger.log(`Billing event: ${event.type} from ${event.provider}`);
     switch (event.type) {
-      case 'checkout.session.completed':
-        await this.onCheckoutCompleted(event.data.object as Stripe.Checkout.Session);
+      case 'subscription.activated':
+        await this.onSubscriptionActivated(event);
         break;
-      case 'customer.subscription.updated':
-        await this.onSubscriptionUpdated(event.data.object as Stripe.Subscription);
+      case 'subscription.updated':
+        await this.onSubscriptionUpdated(event);
         break;
-      case 'customer.subscription.deleted':
-        await this.onSubscriptionDeleted(event.data.object as Stripe.Subscription);
+      case 'subscription.cancelled':
+        await this.onSubscriptionCancelled(event);
         break;
-      case 'invoice.payment_failed':
-        await this.onPaymentFailed(event.data.object as Stripe.Invoice);
+      case 'payment.succeeded':
+        await this.onPaymentSucceeded(event);
         break;
-      default:
-        this.logger.log(`Unhandled Stripe event: ${event.type}`);
+      case 'payment.failed':
+        await this.onPaymentFailed(event);
+        break;
     }
   }
 
-  private async onCheckoutCompleted(session: Stripe.Checkout.Session): Promise<void> {
-    // TODO: upsert SubscriptionEntity from session data
-    this.logger.log('Checkout completed', { sessionId: session.id });
+  private async onSubscriptionActivated(event: InternalBillingEvent): Promise<void> {
+    const userId = event.metadata?.['internalUserId'] as string | undefined;
+    if (!userId || !event.providerCustomerId) {
+      this.logger.warn('subscription.activated missing userId or providerCustomerId', event);
+      return;
+    }
+
+    await this.subscriptionRepo.upsert(
+      {
+        userId,
+        provider: event.provider,
+        providerCustomerId: event.providerCustomerId,
+        providerSubscriptionId: event.providerSubscriptionId,
+        plan: event.plan ?? 'free',
+        status: event.subscriptionStatus ?? 'active',
+        paymentMethod: event.paymentMethod,
+        billingCycle: 'recurring',
+      },
+      { conflictPaths: ['userId'] },
+    );
   }
 
-  private async onSubscriptionUpdated(subscription: Stripe.Subscription): Promise<void> {
-    // TODO: update SubscriptionEntity status/plan
-    this.logger.log('Subscription updated', { subscriptionId: subscription.id });
+  private async onSubscriptionUpdated(event: InternalBillingEvent): Promise<void> {
+    if (!event.providerCustomerId) return;
+
+    await this.subscriptionRepo.update(
+      { providerCustomerId: event.providerCustomerId },
+      {
+        ...(event.plan && { plan: event.plan }),
+        ...(event.subscriptionStatus && { status: event.subscriptionStatus }),
+        ...(event.currentPeriodStart && { currentPeriodStart: event.currentPeriodStart }),
+        ...(event.currentPeriodEnd && { currentPeriodEnd: event.currentPeriodEnd }),
+        ...(event.cancelAtPeriodEnd !== undefined && {
+          cancelAtPeriodEnd: event.cancelAtPeriodEnd,
+        }),
+      },
+    );
   }
 
-  private async onSubscriptionDeleted(subscription: Stripe.Subscription): Promise<void> {
-    // TODO: set SubscriptionEntity status to 'canceled'
-    this.logger.log('Subscription deleted', { subscriptionId: subscription.id });
+  private async onSubscriptionCancelled(event: InternalBillingEvent): Promise<void> {
+    if (!event.providerCustomerId) return;
+
+    await this.subscriptionRepo.update(
+      { providerCustomerId: event.providerCustomerId },
+      { status: 'cancelled', plan: 'free', cancelAtPeriodEnd: false },
+    );
   }
 
-  private async onPaymentFailed(invoice: Stripe.Invoice): Promise<void> {
-    // TODO: set SubscriptionEntity status to 'past_due', send email via NotificationService
-    this.logger.log('Payment failed', { invoiceId: invoice.id });
+  private async onPaymentSucceeded(event: InternalBillingEvent): Promise<void> {
+    if (!event.providerPaymentId || !event.providerCustomerId) return;
+
+    const sub = await this.subscriptionRepo.findOneBy({
+      providerCustomerId: event.providerCustomerId,
+    });
+    if (!sub) {
+      this.logger.warn(`No subscription found for provider customer ${event.providerCustomerId}`);
+      return;
+    }
+
+    await this.paymentRepo.upsert(
+      {
+        userId: sub.userId,
+        provider: event.provider,
+        providerPaymentId: event.providerPaymentId,
+        providerTransactionReference: event.providerTransactionReference,
+        paymentMethod: event.paymentMethod,
+        amount: event.amountMinorUnits ?? 0,
+        currency: event.currency ?? 'GBP',
+        status: 'succeeded',
+      },
+      { conflictPaths: ['providerPaymentId'] },
+    );
+  }
+
+  private async onPaymentFailed(event: InternalBillingEvent): Promise<void> {
+    if (!event.providerCustomerId) return;
+
+    await this.subscriptionRepo.update(
+      { providerCustomerId: event.providerCustomerId },
+      { status: 'past_due' },
+    );
+
+    this.logger.warn(`Payment failed for provider customer ${event.providerCustomerId}`);
+    // TODO: send renewal prompt via NotificationService
   }
 }

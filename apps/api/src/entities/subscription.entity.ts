@@ -8,7 +8,13 @@ import {
   JoinColumn,
 } from 'typeorm';
 
-import type { Plan, SubscriptionStatus } from '@cvpilot/shared';
+import type {
+  Plan,
+  SubscriptionStatus,
+  PaymentProviderType,
+  PaymentMethodType,
+  BillingCycle,
+} from '@cvpilot/shared';
 import type { UserEntity } from './user.entity';
 
 @Entity('subscriptions')
@@ -19,17 +25,26 @@ export class SubscriptionEntity {
   @Column({ name: 'user_id', unique: true })
   userId!: string;
 
-  @Column({ name: 'stripe_customer_id', unique: true })
-  stripeCustomerId!: string;
+  @Column({ name: 'provider', length: 30, default: 'STRIPE' })
+  provider!: PaymentProviderType;
 
-  @Column({ name: 'stripe_subscription_id', unique: true, nullable: true })
-  stripeSubscriptionId?: string;
+  @Column({ name: 'provider_customer_id', unique: true })
+  providerCustomerId!: string;
+
+  @Column({ name: 'provider_subscription_id', unique: true, nullable: true })
+  providerSubscriptionId?: string;
 
   @Column({ length: 20, default: 'free' })
   plan!: Plan;
 
   @Column({ length: 30, default: 'active' })
   status!: SubscriptionStatus;
+
+  @Column({ name: 'billing_cycle', length: 20, default: 'recurring' })
+  billingCycle!: BillingCycle;
+
+  @Column({ name: 'payment_method', length: 30, nullable: true })
+  paymentMethod?: PaymentMethodType;
 
   @Column({ name: 'current_period_start', type: 'timestamptz', nullable: true })
   currentPeriodStart?: Date;
@@ -39,6 +54,9 @@ export class SubscriptionEntity {
 
   @Column({ name: 'cancel_at_period_end', default: false })
   cancelAtPeriodEnd!: boolean;
+
+  @Column({ name: 'provider_metadata', type: 'jsonb', nullable: true })
+  providerMetadata?: Record<string, unknown>;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
