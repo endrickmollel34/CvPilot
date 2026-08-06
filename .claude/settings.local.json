@@ -11,7 +11,10 @@
       "PowerShell(Get-ChildItem C:\\\\Users\\\\molle\\\\Projects\\\\CvPilot\\\\packages\\\\shared -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object FullName | ForEach-Object { $_.FullName.Replace\\('C:\\\\Users\\\\molle\\\\Projects\\\\CvPilot\\\\packages\\\\shared\\\\', ''\\) })",
       "Bash(xargs cat)",
       "Bash(node -e \"require\\('dotenv'\\)\")",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }

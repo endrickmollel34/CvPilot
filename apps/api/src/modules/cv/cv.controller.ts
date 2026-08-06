@@ -76,6 +76,11 @@ export class CvController {
     await this.cvService.deleteCv(user.clerkId, id);
   }
 
+  @Post(':id/prefill')
+  prefill(@CurrentUser() user: { clerkId: string }, @Param('id') id: string) {
+    return this.cvService.prefillFromUpload(user.clerkId, id);
+  }
+
   // Shared
   @Get()
   listCvs(@CurrentUser() user: { clerkId: string }) {

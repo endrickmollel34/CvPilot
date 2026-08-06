@@ -50,6 +50,7 @@ export default async function CvBuilderPage({ params }: Props) {
       <CvBuilderWorkspace
         cvId={cv.id}
         initialContent={cv.content as Parameters<typeof CvBuilderWorkspace>[0]['initialContent']}
+        isPrefilled={cv.source === 'prefill'}
       />
     </div>
   );

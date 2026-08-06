@@ -9,6 +9,7 @@ export interface CvDto {
   fileName?: string;
   parseStatus: 'pending' | 'processing' | 'done' | 'failed';
   content?: CvContent;
+  sourceUploadCvId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -63,4 +64,16 @@ export async function deleteCv(token: string, cvId: string): Promise<void> {
     headers: authHeaders(token),
   });
   if (!res.ok && res.status !== 204) throw new Error(`Failed to delete CV: ${res.status}`);
+}
+
+export async function prefillCv(token: string, uploadCvId: string): Promise<CvDto> {
+  const res = await fetch(`${API_URL}/cvs/${uploadCvId}/prefill`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(body.message ?? `Failed to prefill CV: ${res.status}`);
+  }
+  return res.json() as Promise<CvDto>;
 }

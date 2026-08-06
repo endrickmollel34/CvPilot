@@ -54,6 +54,22 @@ export class CvEntity {
   @Column({ name: 'is_active', default: true })
   isActive!: boolean;
 
+  // Prefill tracking — only populated on source='prefill' CVs
+  @Column({ name: 'source_upload_cv_id', nullable: true })
+  sourceUploadCvId?: string;
+
+  @Column({ name: 'prefill_extracted_at', type: 'timestamptz', nullable: true })
+  prefillExtractedAt?: Date;
+
+  @Column({ name: 'prefill_model', length: 100, nullable: true })
+  prefillModel?: string;
+
+  @Column({ name: 'prefill_tokens_used', type: 'integer', nullable: true })
+  prefillTokensUsed?: number;
+
+  @Column({ name: 'prefill_version', type: 'integer', nullable: true })
+  prefillVersion?: number;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

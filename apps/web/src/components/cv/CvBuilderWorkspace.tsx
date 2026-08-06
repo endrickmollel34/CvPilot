@@ -130,9 +130,10 @@ const EMPTY_CONTENT: CvContent = {
 interface Props {
   cvId: string;
   initialContent: CvContent | null;
+  isPrefilled?: boolean;
 }
 
-export function CvBuilderWorkspace({ cvId, initialContent }: Props) {
+export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }: Props) {
   const { getToken } = useAuth();
   const [content, setContent] = useState<CvContent>(initialContent ?? EMPTY_CONTENT);
   const [expandedSection, setExpandedSection] = useState<CvSection>('personalDetails' as CvSection);
@@ -169,6 +170,14 @@ export function CvBuilderWorkspace({ cvId, initialContent }: Props) {
         <div
           className={`flex flex-col overflow-y-auto border-r border-gray-200 bg-white ${showMobilePreview ? 'hidden' : 'flex'} w-full lg:flex lg:w-2/5`}
         >
+          {isPrefilled && (
+            <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+              <strong>Prefilled from your uploaded CV.</strong> Fields marked with{' '}
+              <code className="rounded bg-amber-100 px-1">[?]</code> are uncertain — please review
+              and correct everything before saving.
+            </div>
+          )}
+
           {/* Personal details always first */}
           <div className="border-b border-gray-200">
             <button

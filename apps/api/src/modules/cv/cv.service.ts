@@ -18,6 +18,7 @@ import { PLAN_LIMITS } from '@cvpilot/shared';
 import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
+import { PrefillExtractionService } from './prefill-extraction.service';
 import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
 import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
 import type { CreateCvDto } from './dto/create-cv.dto';
@@ -40,6 +41,7 @@ export class CvService {
     private readonly config: ConfigService,
     private readonly userService: UserService,
     private readonly billingService: BillingService,
+    private readonly prefillService: PrefillExtractionService,
   ) {
     this.s3 = new S3Client({
       region: 'auto',
@@ -165,6 +167,57 @@ export class CvService {
     const cv = await this.cvRepo.findOneBy({ id: cvId });
     if (!cv) throw new NotFoundException(`CV ${cvId} not found`);
     return cv;
+  }
+
+  async prefillFromUpload(clerkId: string, uploadCvId: string): Promise<CvEntity> {
+    const user = await this.userService.findByClerkId(clerkId);
+
+    const uploadCv = await this.cvRepo.findOne({ where: { id: uploadCvId, userId: user.id } });
+    if (!uploadCv) throw new NotFoundException(`CV ${uploadCvId} not found`);
+
+    if (uploadCv.source !== 'upload') {
+      throw new UnprocessableEntityException(
+        'Only uploaded CVs can be used to prefill a builder CV.',
+      );
+    }
+
+    if (uploadCv.parseStatus !== 'done') {
+      throw new UnprocessableEntityException(
+        'CV text has not been fully extracted yet. Please try again in a moment.',
+      );
+    }
+
+    if (!uploadCv.parsedContent?.trim()) {
+      throw new UnprocessableEntityException(
+        'No text was extracted from this CV. The file may be empty or unsupported.',
+      );
+    }
+
+    // Idempotency: return existing prefill CV for this upload (non-deleted)
+    const existing = await this.cvRepo.findOne({
+      where: { sourceUploadCvId: uploadCvId, userId: user.id },
+    });
+    if (existing) return existing;
+
+    await this.checkBuilderCvLimit(user.id);
+
+    const extraction = await this.prefillService.extract(uploadCv.parsedContent);
+
+    const cv = this.cvRepo.create({
+      userId: user.id,
+      title: uploadCv.title ?? uploadCv.fileName ?? 'Prefilled CV',
+      source: 'prefill',
+      parseStatus: 'done',
+      isActive: true,
+      content: extraction.content,
+      sourceUploadCvId: uploadCvId,
+      prefillExtractedAt: new Date(),
+      prefillModel: extraction.modelUsed,
+      prefillTokensUsed: extraction.tokensUsed,
+      prefillVersion: extraction.version,
+    });
+
+    return this.cvRepo.save(cv);
   }
 
   private async checkBuilderCvLimit(userId: string): Promise<void> {
