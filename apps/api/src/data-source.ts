@@ -1,4 +1,9 @@
 import 'reflect-metadata';
+import { config } from 'dotenv';
+import { resolve } from 'path';
+
+// Load .env before process.env is read below — TypeORM CLI does not load it automatically
+config({ path: resolve(__dirname, '../.env') });
 
 import { DataSource } from 'typeorm';
 

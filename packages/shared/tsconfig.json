@@ -1,8 +1,8 @@
 {
   "extends": "@cvpilot/typescript-config/base.json",
   "compilerOptions": {
-    "module": "esnext",
-    "moduleResolution": "bundler",
+    "module": "commonjs",
+    "moduleResolution": "node",
     "outDir": "./dist",
     "rootDir": "./src"
   },

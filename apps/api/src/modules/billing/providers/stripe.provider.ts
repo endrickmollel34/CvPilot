@@ -21,8 +21,8 @@ export class StripePaymentProvider implements PaymentProvider {
   constructor(private readonly config: ConfigService) {
     this.stripe = new Stripe(config.getOrThrow<string>('STRIPE_SECRET_KEY'));
     this.planToPriceId = {
-      pro: config.getOrThrow<string>('STRIPE_PRICE_ID_PRO'),
-      student: config.getOrThrow<string>('STRIPE_PRICE_ID_STUDENT'),
+      pro: config.getOrThrow<string>('STRIPE_PRICE_PRO_MONTHLY'),
+      student: config.getOrThrow<string>('STRIPE_PRICE_STUDENT_MONTHLY'),
     };
   }
 

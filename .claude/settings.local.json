@@ -4,7 +4,14 @@
       "PowerShell(npm *)",
       "PowerShell(Get-Content *)",
       "PowerShell(New-Item *)",
-      "Bash(npm *)"
+      "Bash(npm *)",
+      "PowerShell($response = Invoke-WebRequest -Uri \"http://localhost:3000\" -UseBasicParsing -ErrorAction SilentlyContinue; Write-Output \"Status: $\\($response.StatusCode\\)\"; $response.Content | Select-String -Pattern \"Score your CV|CVPilot|Three steps|Simple pricing\" | Select-Object -First 5 | ForEach-Object { \"Found: $_\" })",
+      "PowerShell(Test-NetConnection *)",
+      "PowerShell($r = Invoke-WebRequest -Uri \"http://localhost:3000\" -UseBasicParsing -TimeoutSec 10; \"Status: $\\($r.StatusCode\\)\"; $r.Content | Select-String -Pattern \"Score your CV|CVPilot|Three steps|Simple pricing|No credit\" | ForEach-Object Line | Select-Object -First 8)",
+      "PowerShell(Get-ChildItem C:\\\\Users\\\\molle\\\\Projects\\\\CvPilot\\\\packages\\\\shared -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object FullName | ForEach-Object { $_.FullName.Replace\\('C:\\\\Users\\\\molle\\\\Projects\\\\CvPilot\\\\packages\\\\shared\\\\', ''\\) })",
+      "Bash(xargs cat)",
+      "Bash(node -e \"require\\('dotenv'\\)\")",
+      "Bash(node *)"
     ]
   }
 }
