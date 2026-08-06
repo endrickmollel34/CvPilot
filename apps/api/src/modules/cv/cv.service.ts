@@ -100,4 +100,10 @@ export class CvService {
     if (!cv) throw new NotFoundException(`CV ${cvId} not found`);
     return cv;
   }
+
+  async findById(cvId: string) {
+    const cv = await this.cvRepo.findOneBy({ id: cvId });
+    if (!cv) throw new NotFoundException(`CV ${cvId} not found`);
+    return cv;
+  }
 }

@@ -1,12 +1,14 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { type Repository } from 'typeorm';
+import { type Repository, MoreThanOrEqual } from 'typeorm';
 import Stripe from 'stripe';
 import type { Plan } from '@cvpilot/shared';
+import { PLAN_LIMITS } from '@cvpilot/shared';
 
 import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
+import { AnalysisEntity } from '../../entities/analysis.entity';
 
 const PRICE_IDS: Record<'pro' | 'student', string> = {
   pro: 'price_pro_monthly', // replace with real Stripe price IDs
@@ -24,6 +26,8 @@ export class BillingService {
     private readonly subscriptionRepo: Repository<SubscriptionEntity>,
     @InjectRepository(PaymentEntity)
     private readonly paymentRepo: Repository<PaymentEntity>,
+    @InjectRepository(AnalysisEntity)
+    private readonly analysisRepo: Repository<AnalysisEntity>,
   ) {
     this.stripe = new Stripe(this.config.getOrThrow<string>('STRIPE_SECRET_KEY'));
   }
@@ -58,9 +62,24 @@ export class BillingService {
     return (sub?.plan ?? 'free') as Plan;
   }
 
-  async canPerformAction(_userId: string, _action: 'analyse' | 'cover-letter'): Promise<boolean> {
-    // TODO: count usage this month, compare against PLAN_LIMITS
-    return true;
+  async canPerformAction(userId: string, action: 'analyse' | 'cover-letter'): Promise<boolean> {
+    const plan = await this.getUserPlan(userId);
+    const limit =
+      action === 'analyse'
+        ? PLAN_LIMITS[plan].analysesPerMonth
+        : PLAN_LIMITS[plan].coverLettersPerMonth;
+
+    if (limit === Infinity) return true;
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const count = await this.analysisRepo.count({
+      where: { userId, createdAt: MoreThanOrEqual(startOfMonth) },
+    });
+
+    return count < limit;
   }
 
   async handleStripeWebhook(signature: string, rawBody: Buffer): Promise<void> {

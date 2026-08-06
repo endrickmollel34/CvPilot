@@ -1,4 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ForbiddenException,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { type Repository } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -7,26 +13,15 @@ import type { Queue, Job } from 'bullmq';
 import type { EventEmitter2 } from '@nestjs/event-emitter';
 import type { Observable } from 'rxjs';
 import { fromEvent } from 'rxjs';
-import { map } from 'rxjs/operators';
-import { z } from 'zod';
+import { filter, map } from 'rxjs/operators';
 
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { AtsReportEntity } from '../../entities/ats-report.entity';
-
-const AnalysisResponseSchema = z.object({
-  match_score: z.number().min(0).max(100),
-  suggestions: z
-    .array(
-      z.object({
-        category: z.enum(['MISSING_KEYWORD', 'WEAK_LANGUAGE', 'STRUCTURE', 'ATS_WARNING']),
-        priority: z.enum(['HIGH', 'MEDIUM', 'LOW']),
-        text: z.string().min(10).max(500),
-      }),
-    )
-    .min(3)
-    .max(20),
-  ats_keywords: z.array(z.object({ keyword: z.string(), found: z.boolean() })),
-});
+import type { UserService } from '../user/user.service';
+import type { CvService } from '../cv/cv.service';
+import type { BillingService } from '../billing/billing.service';
+import type { AiService } from './ai.service';
+import type { CreateAnalysisDto } from './dto/create-analysis.dto';
 
 @Processor('cv-analysis')
 @Injectable()
@@ -41,23 +36,42 @@ export class AnalysisService extends WorkerHost {
     @InjectQueue('cv-analysis')
     private readonly analysisQueue: Queue,
     private readonly eventEmitter: EventEmitter2,
+    private readonly userService: UserService,
+    private readonly cvService: CvService,
+    private readonly billingService: BillingService,
+    private readonly aiService: AiService,
   ) {
     super();
   }
 
-  async createAnalysis(
-    clerkId: string,
-    body: { cvId: string; jobTitle: string; companyName: string; jobDescription: string },
-  ) {
-    // TODO: resolve clerkId → userId, check subscription limit via BillingService
+  async submit(clerkId: string, dto: CreateAnalysisDto): Promise<AnalysisEntity> {
+    const user = await this.userService.findByClerkId(clerkId);
+
+    const cv = await this.cvService.findById(dto.cvId);
+    if (cv.userId !== user.id) {
+      throw new ForbiddenException('CV not found');
+    }
+    if (cv.parseStatus !== 'done' || !cv.parsedContent) {
+      throw new UnprocessableEntityException('CV is still being parsed. Please try again shortly.');
+    }
+
+    const canAnalyse = await this.billingService.canPerformAction(user.id, 'analyse');
+    if (!canAnalyse) {
+      throw new ForbiddenException(
+        'Monthly analysis limit reached. Upgrade your plan to continue.',
+      );
+    }
+
     const analysis = this.analysisRepo.create({
-      jobTitle: body.jobTitle,
-      companyName: body.companyName,
-      jobDescription: body.jobDescription,
+      userId: user.id,
+      cvId: dto.cvId,
+      jobTitle: dto.jobTitle,
+      companyName: dto.companyName,
+      jobDescription: dto.jobDescription,
       status: 'pending',
     });
     const saved = await this.analysisRepo.save(analysis);
-    await this.analysisQueue.add('run-analysis', { analysisId: saved.id, cvId: body.cvId });
+    await this.analysisQueue.add('run-analysis', { analysisId: saved.id, cvId: dto.cvId });
     return saved;
   }
 
@@ -68,37 +82,75 @@ export class AnalysisService extends WorkerHost {
     await this.analysisRepo.update(analysisId, { status: 'processing' });
 
     try {
-      // TODO: fetch parsedContent from cvs table
-      // TODO: call AIService.analyse(cvText, jdText) with GPT-4o
-      // TODO: validate response with AnalysisResponseSchema (retry up to 3x)
-      const mockResult = { match_score: 0, suggestions: [], ats_keywords: [] };
-      const parsed = AnalysisResponseSchema.parse(mockResult);
+      const [analysis, cv] = await Promise.all([
+        this.analysisRepo.findOneByOrFail({ id: analysisId }),
+        this.cvService.findById(cvId),
+      ]);
+
+      if (!cv.parsedContent) {
+        throw new Error(`CV ${cvId} has no parsed content`);
+      }
+
+      const { result, modelUsed, tokensUsed } = await this.aiService.runAnalysis(
+        cv.parsedContent,
+        analysis.jobDescription,
+      );
 
       await this.analysisRepo.update(analysisId, {
-        matchScore: parsed.match_score,
-        suggestions: parsed.suggestions,
+        matchScore: result.match_score,
+        suggestions: result.suggestions,
+        modelUsed,
+        tokensUsed,
         status: 'done',
         completedAt: new Date(),
       });
 
+      const keywordHits = result.ats_keywords.filter((k) => k.found);
+      const missingKeywords = result.ats_keywords.filter((k) => !k.found).map((k) => k.keyword);
+      const atsScore =
+        result.ats_keywords.length > 0
+          ? Math.round((keywordHits.length / result.ats_keywords.length) * 100)
+          : 0;
+
+      await this.atsRepo.save(
+        this.atsRepo.create({ analysisId, keywordHits, missingKeywords, atsScore }),
+      );
+
       this.eventEmitter.emit('analysis.completed', { analysisId });
+      this.logger.log(`Analysis ${analysisId} completed (score: ${result.match_score})`);
     } catch (err) {
       this.logger.error(`Analysis ${analysisId} failed`, err);
       await this.analysisRepo.update(analysisId, { status: 'failed' });
     }
   }
 
-  async listForUser(_clerkId: string) {
-    // TODO: enforce user_id scoping
-    return this.analysisRepo.find({ order: { createdAt: 'DESC' } });
+  async listForUser(clerkId: string) {
+    const user = await this.userService.findByClerkId(clerkId);
+    return this.analysisRepo.find({
+      where: { userId: user.id },
+      relations: ['atsReport'],
+      order: { createdAt: 'DESC' },
+    });
   }
 
-  async findOneForUser(_clerkId: string, id: string) {
-    return this.analysisRepo.findOneByOrFail({ id });
+  async findOneForUser(clerkId: string, id: string) {
+    const user = await this.userService.findByClerkId(clerkId);
+    const analysis = await this.analysisRepo.findOne({
+      where: { id, userId: user.id },
+      relations: ['atsReport'],
+    });
+    if (!analysis) throw new NotFoundException(`Analysis ${id} not found`);
+    return analysis;
   }
 
-  statusStream(_analysisId: string): Observable<MessageEvent> {
+  statusStream(analysisId: string): Observable<MessageEvent> {
     return fromEvent(this.eventEmitter, 'analysis.completed').pipe(
+      filter(
+        (data): data is { analysisId: string } =>
+          typeof data === 'object' &&
+          data !== null &&
+          (data as Record<string, unknown>)['analysisId'] === analysisId,
+      ),
       map((data) => ({ data }) as MessageEvent),
     );
   }

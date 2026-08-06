@@ -1,8 +1,10 @@
 import { Controller, Post, Get, Param, Body, UseGuards, Sse } from '@nestjs/common';
+import type { Observable } from 'rxjs';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { AnalysisService } from './analysis.service';
+import type { CreateAnalysisDto } from './dto/create-analysis.dto';
 
 @Controller('analyses')
 @UseGuards(ClerkGuard)
@@ -10,11 +12,8 @@ export class AnalysisController {
   constructor(private readonly analysisService: AnalysisService) {}
 
   @Post()
-  createAnalysis(
-    @CurrentUser() user: { clerkId: string },
-    @Body() body: { cvId: string; jobTitle: string; companyName: string; jobDescription: string },
-  ) {
-    return this.analysisService.createAnalysis(user.clerkId, body);
+  submitAnalysis(@CurrentUser() user: { clerkId: string }, @Body() dto: CreateAnalysisDto) {
+    return this.analysisService.submit(user.clerkId, dto);
   }
 
   @Get()
@@ -28,7 +27,11 @@ export class AnalysisController {
   }
 
   @Sse(':id/status')
-  statusStream(@Param('id') id: string) {
+  async statusStream(
+    @CurrentUser() user: { clerkId: string },
+    @Param('id') id: string,
+  ): Promise<Observable<MessageEvent>> {
+    await this.analysisService.findOneForUser(user.clerkId, id);
     return this.analysisService.statusStream(id);
   }
 }
