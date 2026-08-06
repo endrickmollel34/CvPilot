@@ -4,7 +4,7 @@ import type { Request } from 'express';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { BillingService } from './billing.service';
+import { BillingService } from './billing.service';
 
 @Controller()
 export class BillingController {

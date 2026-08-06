@@ -1,8 +1,8 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import { Webhook } from 'svix';
 
-import type { UserService } from '../user/user.service';
+import { UserService } from '../user/user.service';
 
 interface ClerkWebhookHeaders {
   svixId: string;

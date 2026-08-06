@@ -1,5 +1,5 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 
 import type { Plan, SubscriptionStatus, Currency } from '@cvpilot/shared';

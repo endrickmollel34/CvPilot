@@ -16,7 +16,7 @@ import type { Observable } from 'rxjs';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { CoverLetterService } from './cover-letter.service';
+import { CoverLetterService } from './cover-letter.service';
 import type { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
 import type { UpdateCoverLetterDto } from './dto/update-cover-letter.dto';
 import type { ListCoverLettersDto } from './dto/list-cover-letters.dto';

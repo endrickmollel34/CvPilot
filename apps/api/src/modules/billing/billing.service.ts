@@ -9,8 +9,8 @@ import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { CoverLetterEntity } from '../../entities/cover-letter.entity';
-import type { UserService } from '../user/user.service';
-import type { StripePaymentProvider } from './providers/stripe.provider';
+import { UserService } from '../user/user.service';
+import { StripePaymentProvider } from './providers/stripe.provider';
 import type { PaymentProvider, InternalBillingEvent } from './providers/payment-provider.interface';
 
 @Injectable()

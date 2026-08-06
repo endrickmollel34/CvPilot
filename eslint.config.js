@@ -23,7 +23,10 @@ module.exports = [
     rules: {
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
       '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
+      // Disabled in root config: NestJS DI (apps/api) requires value imports for constructor-injected
+      // classes so TypeScript emits design:paramtypes correctly. Each workspace enforces its own
+      // import style via its local eslint.config.js and turbo lint.
+      '@typescript-eslint/consistent-type-imports': 'off',
     },
   },
 ];

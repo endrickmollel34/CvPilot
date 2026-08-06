@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { type Repository } from 'typeorm';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import type { Readable } from 'stream';
 

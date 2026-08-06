@@ -11,17 +11,17 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
 import type { Job } from 'bullmq';
-import type { EventEmitter2 } from '@nestjs/event-emitter';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import type { Observable } from 'rxjs';
 import { fromEvent } from 'rxjs';
 import { filter, map } from 'rxjs/operators';
 
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { AtsReportEntity } from '../../entities/ats-report.entity';
-import type { UserService } from '../user/user.service';
-import type { CvService } from '../cv/cv.service';
-import type { BillingService } from '../billing/billing.service';
-import type { AiService } from './ai.service';
+import { UserService } from '../user/user.service';
+import { CvService } from '../cv/cv.service';
+import { BillingService } from '../billing/billing.service';
+import { AiService } from './ai.service';
 import type { CreateAnalysisDto } from './dto/create-analysis.dto';
 
 @Processor('cv-analysis')

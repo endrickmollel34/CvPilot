@@ -5,13 +5,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { type Repository } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 import { CvEntity } from '../../entities/cv.entity';
-import type { UserService } from '../user/user.service';
-import type { BillingService } from '../billing/billing.service';
+import { UserService } from '../user/user.service';
+import { BillingService } from '../billing/billing.service';
 import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
 import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
 

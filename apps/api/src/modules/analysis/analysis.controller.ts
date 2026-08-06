@@ -3,7 +3,7 @@ import type { Observable } from 'rxjs';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import type { AnalysisService } from './analysis.service';
+import { AnalysisService } from './analysis.service';
 import type { CreateAnalysisDto } from './dto/create-analysis.dto';
 
 @Controller('analyses')

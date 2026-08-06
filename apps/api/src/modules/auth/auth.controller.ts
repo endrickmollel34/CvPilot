@@ -2,7 +2,7 @@ import type { RawBodyRequest } from '@nestjs/common';
 import { Controller, Post, Headers, Req } from '@nestjs/common';
 import type { Request } from 'express';
 
-import type { AuthService } from './auth.service';
+import { AuthService } from './auth.service';
 
 @Controller('webhooks')
 export class AuthController {
