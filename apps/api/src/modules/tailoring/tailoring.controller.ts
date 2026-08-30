@@ -12,8 +12,8 @@ import {
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TailoringService } from './tailoring.service';
-import type { CreateTailoringDto } from './dto/create-tailoring.dto';
-import type { ApplySuggestionsDto } from './dto/apply-suggestions.dto';
+import { CreateTailoringDto } from './dto/create-tailoring.dto';
+import { ApplySuggestionsDto } from './dto/apply-suggestions.dto';
 
 @Controller('tailorings')
 @UseGuards(ClerkGuard)

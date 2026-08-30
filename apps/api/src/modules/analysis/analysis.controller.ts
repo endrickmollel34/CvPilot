@@ -4,7 +4,7 @@ import type { Observable } from 'rxjs';
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AnalysisService } from './analysis.service';
-import type { CreateAnalysisDto } from './dto/create-analysis.dto';
+import { CreateAnalysisDto } from './dto/create-analysis.dto';
 
 @Controller('analyses')
 @UseGuards(ClerkGuard)

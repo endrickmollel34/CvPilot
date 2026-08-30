@@ -9,6 +9,7 @@ import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { CoverLetterEntity } from '../../entities/cover-letter.entity';
+import { isDevQuotaBypassActive } from '../../common/utils/dev-quota-bypass.util';
 import { UserService } from '../user/user.service';
 import { StripePaymentProvider } from './providers/stripe.provider';
 import type { PaymentProvider, InternalBillingEvent } from './providers/payment-provider.interface';
@@ -84,6 +85,10 @@ export class BillingService {
   }
 
   async canPerformAction(userId: string, action: 'analyse' | 'cover-letter'): Promise<boolean> {
+    // DEV-ONLY quota bypass — see dev-quota-bypass.util.ts for the full
+    // rationale. Never active outside NODE_ENV=development.
+    if (isDevQuotaBypassActive()) return true;
+
     const plan = await this.getUserPlan(userId);
     const limit =
       action === 'analyse'

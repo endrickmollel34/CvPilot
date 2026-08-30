@@ -17,9 +17,9 @@ import type { Observable } from 'rxjs';
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CoverLetterService } from './cover-letter.service';
-import type { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
-import type { UpdateCoverLetterDto } from './dto/update-cover-letter.dto';
-import type { ListCoverLettersDto } from './dto/list-cover-letters.dto';
+import { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
+import { UpdateCoverLetterDto } from './dto/update-cover-letter.dto';
+import { ListCoverLettersDto } from './dto/list-cover-letters.dto';
 
 @Controller('cover-letters')
 @UseGuards(ClerkGuard)

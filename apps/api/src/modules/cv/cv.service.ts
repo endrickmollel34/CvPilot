@@ -3,7 +3,9 @@ import { randomUUID } from 'crypto';
 import {
   Injectable,
   ForbiddenException,
+  Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -17,6 +19,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { PLAN_LIMITS } from '@cvpilot/shared';
 import type { CvContent } from '@cvpilot/shared';
 import { CvEntity } from '../../entities/cv.entity';
+import { isDevQuotaBypassActive } from '../../common/utils/dev-quota-bypass.util';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { PrefillExtractionService } from './prefill-extraction.service';
@@ -32,8 +35,10 @@ const PRESIGNED_URL_TTL_SECONDS = 900; // 15 minutes
 
 @Injectable()
 export class CvService {
+  private readonly logger = new Logger(CvService.name);
   private readonly s3: S3Client;
   private readonly bucket: string;
+  private readonly r2Configured: boolean;
 
   constructor(
     @InjectRepository(CvEntity)
@@ -46,18 +51,35 @@ export class CvService {
     private readonly prefillService: PrefillExtractionService,
     private readonly pdfService: PdfGenerationService,
   ) {
+    const endpoint = this.config.getOrThrow<string>('CLOUDFLARE_R2_ENDPOINT');
+    const accessKeyId = this.config.getOrThrow<string>('CLOUDFLARE_R2_ACCESS_KEY_ID');
+    const secretAccessKey = this.config.getOrThrow<string>('CLOUDFLARE_R2_SECRET_ACCESS_KEY');
+    this.bucket = this.config.getOrThrow<string>('CLOUDFLARE_R2_BUCKET_NAME');
+
+    this.r2Configured = ![endpoint, accessKeyId, secretAccessKey, this.bucket].some((v) =>
+      v.includes('placeholder'),
+    );
+    if (!this.r2Configured) {
+      this.logger.warn(
+        'CLOUDFLARE_R2_* env vars are placeholders — CV upload requests will be rejected ' +
+          'with a clear error until real Cloudflare R2 credentials are configured in apps/api/.env.',
+      );
+    }
+
     this.s3 = new S3Client({
       region: 'auto',
-      endpoint: this.config.getOrThrow<string>('CLOUDFLARE_R2_ENDPOINT'),
-      credentials: {
-        accessKeyId: this.config.getOrThrow<string>('CLOUDFLARE_R2_ACCESS_KEY_ID'),
-        secretAccessKey: this.config.getOrThrow<string>('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
-      },
+      endpoint,
+      credentials: { accessKeyId, secretAccessKey },
     });
-    this.bucket = this.config.getOrThrow<string>('CLOUDFLARE_R2_BUCKET_NAME');
   }
 
   async generateUploadUrl(clerkId: string, dto: GenerateUploadUrlDto) {
+    if (!this.r2Configured) {
+      throw new ServiceUnavailableException(
+        'File storage is not configured for this environment. Set CLOUDFLARE_R2_* in apps/api/.env to enable CV uploads.',
+      );
+    }
+
     const user = await this.userService.findByClerkId(clerkId);
 
     const canProceed = await this.billingService.canPerformAction(user.id, 'analyse');
@@ -257,6 +279,10 @@ export class CvService {
   }
 
   private async checkBuilderCvLimit(userId: string): Promise<void> {
+    // DEV-ONLY quota bypass — see dev-quota-bypass.util.ts for the full
+    // rationale. Never active outside NODE_ENV=development.
+    if (isDevQuotaBypassActive()) return;
+
     const plan = await this.billingService.getUserPlan(userId);
     const limit = PLAN_LIMITS[plan].builderCvsTotal;
     if (limit === Infinity) return;

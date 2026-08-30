@@ -3,11 +3,11 @@ export const dynamic = 'force-dynamic';
 import { auth } from '@clerk/nextjs/server';
 import { redirect } from 'next/navigation';
 
-import { NewCvChooser } from '@/components/cv/NewCvChooser';
+import { NewCvUpload } from '@/components/cv/NewCvUpload';
 
-export default async function NewCvPage() {
+export default async function NewCvUploadPage() {
   const { userId } = await auth();
   if (!userId) redirect('/sign-in');
 
-  return <NewCvChooser />;
+  return <NewCvUpload />;
 }

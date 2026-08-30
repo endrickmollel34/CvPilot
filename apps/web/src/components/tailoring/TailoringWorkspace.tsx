@@ -11,6 +11,7 @@ import {
   applyTailoring,
   type TailoringDto,
 } from '@/lib/tailoringApi';
+import { getFriendlyErrorMessage } from '@/lib/errorMessage';
 
 type Phase = 'input' | 'polling' | 'review' | 'error';
 
@@ -81,7 +82,7 @@ export function TailoringWorkspace({ masterCvId }: { masterCvId: string }) {
       setPhase('polling');
       startPolling(t.id);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
+      setErrorMsg(getFriendlyErrorMessage(err));
       setPhase('error');
     } finally {
       setSubmitting(false);
@@ -200,7 +201,7 @@ export function TailoringWorkspace({ masterCvId }: { masterCvId: string }) {
       const { tailoredCvId } = await applyTailoring(token!, tailoring!.id, decisionList);
       router.push(`/cvs/${tailoredCvId}/edit`);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Apply failed. Please try again.');
+      setErrorMsg(getFriendlyErrorMessage(err, 'Apply failed. Please try again.'));
       setPhase('error');
     } finally {
       setApplying(false);

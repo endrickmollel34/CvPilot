@@ -17,12 +17,12 @@ import type { Response } from 'express';
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CvService } from './cv.service';
-import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
-import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
-import type { CreateCvDto } from './dto/create-cv.dto';
-import type { UpdateCvContentDto } from './dto/update-cv-content.dto';
-import type { RenameCvDto } from './dto/rename-cv.dto';
-import type { ReorderCvSectionsDto } from './dto/reorder-cv-sections.dto';
+import { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
+import { ConfirmUploadDto } from './dto/confirm-upload.dto';
+import { CreateCvDto } from './dto/create-cv.dto';
+import { UpdateCvContentDto } from './dto/update-cv-content.dto';
+import { RenameCvDto } from './dto/rename-cv.dto';
+import { ReorderCvSectionsDto } from './dto/reorder-cv-sections.dto';
 
 @Controller('cvs')
 @UseGuards(ClerkGuard)

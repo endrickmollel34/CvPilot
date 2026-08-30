@@ -1,4 +1,9 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 
@@ -15,18 +20,34 @@ import type {
 export class StripePaymentProvider implements PaymentProvider {
   readonly providerType = 'STRIPE' as const;
 
+  private readonly logger = new Logger(StripePaymentProvider.name);
   private readonly stripe: Stripe;
   private readonly planToPriceId: Record<Exclude<Plan, 'free'>, string>;
+  private readonly stripeConfigured: boolean;
 
   constructor(private readonly config: ConfigService) {
-    this.stripe = new Stripe(config.getOrThrow<string>('STRIPE_SECRET_KEY'));
-    this.planToPriceId = {
-      pro: config.getOrThrow<string>('STRIPE_PRICE_PRO_MONTHLY'),
-      student: config.getOrThrow<string>('STRIPE_PRICE_STUDENT_MONTHLY'),
-    };
+    const secretKey = this.config.getOrThrow<string>('STRIPE_SECRET_KEY');
+    const webhookSecret = this.config.getOrThrow<string>('STRIPE_WEBHOOK_SECRET');
+    const proPriceId = this.config.getOrThrow<string>('STRIPE_PRICE_PRO_MONTHLY');
+    const studentPriceId = this.config.getOrThrow<string>('STRIPE_PRICE_STUDENT_MONTHLY');
+
+    this.stripeConfigured = ![secretKey, webhookSecret, proPriceId, studentPriceId].some((v) =>
+      v.includes('placeholder'),
+    );
+    if (!this.stripeConfigured) {
+      this.logger.warn(
+        'STRIPE_* env vars are placeholders — billing requests will be rejected with a clear ' +
+          'error until real Stripe test-mode credentials are configured in apps/api/.env.',
+      );
+    }
+
+    this.stripe = new Stripe(secretKey);
+    this.planToPriceId = { pro: proPriceId, student: studentPriceId };
   }
 
   async createCheckoutSession(params: CheckoutSessionParams): Promise<{ url: string | null }> {
+    this.ensureConfigured();
+
     const sessionParams: Stripe.Checkout.SessionCreateParams = {
       mode: 'subscription',
       line_items: [{ price: this.planToPriceId[params.plan], quantity: 1 }],
@@ -44,6 +65,8 @@ export class StripePaymentProvider implements PaymentProvider {
   }
 
   async createCustomerPortalSession(params: CustomerPortalParams): Promise<{ url: string }> {
+    this.ensureConfigured();
+
     const session = await this.stripe.billingPortal.sessions.create({
       customer: params.providerCustomerId,
       return_url: params.returnUrl,
@@ -52,6 +75,8 @@ export class StripePaymentProvider implements PaymentProvider {
   }
 
   verifyAndParseWebhook(params: WebhookParams): InternalBillingEvent | null {
+    this.ensureConfigured();
+
     let event: Stripe.Event;
     try {
       event = this.stripe.webhooks.constructEvent(
@@ -66,7 +91,17 @@ export class StripePaymentProvider implements PaymentProvider {
   }
 
   async cancelSubscription(providerSubscriptionId: string): Promise<void> {
+    this.ensureConfigured();
     await this.stripe.subscriptions.cancel(providerSubscriptionId);
+  }
+
+  private ensureConfigured(): void {
+    if (!this.stripeConfigured) {
+      throw new ServiceUnavailableException(
+        'Payments are not configured for this environment. Set real STRIPE_* test-mode ' +
+          'values in apps/api/.env to enable checkout.',
+      );
+    }
   }
 
   private mapStripeEvent(event: Stripe.Event): InternalBillingEvent | null {

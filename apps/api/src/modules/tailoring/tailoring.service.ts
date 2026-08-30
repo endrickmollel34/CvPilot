@@ -21,10 +21,12 @@ import type {
   TailoringStatus,
 } from '@cvpilot/shared';
 import { TailoringEntity } from '../../entities/tailoring.entity';
+import { isDevQuotaBypassActive } from '../../common/utils/dev-quota-bypass.util';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { CvService } from '../cv/cv.service';
 import { TailoringAiService } from './tailoring-ai.service';
+import { isNewSkillGrounded } from './skill-grounding.util';
 import type { CreateTailoringDto } from './dto/create-tailoring.dto';
 import type { ApplySuggestionsDto } from './dto/apply-suggestions.dto';
 
@@ -89,7 +91,19 @@ export class TailoringService {
         tokensUsed,
       } = await this.tailoringAiService.runTailoring(masterCv.content, tailoring.jobDescription);
 
-      const suggestions = sortSuggestions(raw);
+      const grounded = raw.filter((s) => {
+        if (s.section !== 'skills' && s.section !== 'languages') return true;
+        return isNewSkillGrounded(s.suggestedContent, s.evidence, masterCv.content!);
+      });
+      const droppedCount = raw.length - grounded.length;
+      if (droppedCount > 0) {
+        this.logger.warn(
+          `Tailoring ${tailoringId}: dropped ${droppedCount} skill/language suggestion(s) not ` +
+            'grounded in the source CV (see skill-grounding.util.ts)',
+        );
+      }
+
+      const suggestions = sortSuggestions(grounded);
 
       this.logger.log(
         `Tailoring ${tailoringId} complete: ${suggestions.length} suggestions, model=${modelUsed}, tokens=${tokensUsed}`,
@@ -166,6 +180,10 @@ export class TailoringService {
   }
 
   private async checkTailoringLimit(userId: string): Promise<void> {
+    // DEV-ONLY quota bypass — see dev-quota-bypass.util.ts for the full
+    // rationale. Never active outside NODE_ENV=development.
+    if (isDevQuotaBypassActive()) return;
+
     const plan = await this.billingService.getUserPlan(userId);
     const limit = PLAN_LIMITS[plan].tailoringsPerMonth;
     if (limit === Infinity) return;
@@ -262,13 +280,23 @@ function applyDecisions(
       }
 
       case 'skills':
-        if (!content.skills.some((s) => s.name.toLowerCase() === text.toLowerCase())) {
+        // Second grounding check (defense in depth) — re-verify against the
+        // pristine master CV even if this suggestion was somehow persisted
+        // ungrounded (e.g. stored before this check existed), so it still
+        // cannot be written into the tailored CV.
+        if (
+          isNewSkillGrounded(text, suggestion.evidence, masterContent) &&
+          !content.skills.some((s) => s.name.toLowerCase() === text.toLowerCase())
+        ) {
           content.skills.push({ id: randomUUID(), name: text });
         }
         break;
 
       case 'languages':
-        if (!content.languages.some((l) => l.name.toLowerCase() === text.toLowerCase())) {
+        if (
+          isNewSkillGrounded(text, suggestion.evidence, masterContent) &&
+          !content.languages.some((l) => l.name.toLowerCase() === text.toLowerCase())
+        ) {
           content.languages.push({ id: randomUUID(), name: text });
         }
         break;

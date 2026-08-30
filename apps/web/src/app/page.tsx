@@ -2,6 +2,8 @@ import Link from 'next/link';
 import { SignedIn, SignedOut } from '@clerk/nextjs';
 import { ArrowRight, Upload, ClipboardList, BarChart3, Check } from 'lucide-react';
 
+import { PricingCta } from '@/components/billing/PricingCta';
+
 export default function HomePage() {
   return (
     <div className="min-h-screen bg-white text-neutral-900">
@@ -37,16 +39,16 @@ export default function HomePage() {
         {/* ── Hero ───────────────────────────────────────────────────────────── */}
         <section className="mx-auto max-w-5xl px-6 py-24 text-center">
           <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-neutral-400">
-            For students &amp; recent graduates
+            Built for every career move
           </p>
           <h1 className="text-5xl font-extrabold leading-tight tracking-tight sm:text-6xl">
-            Score your CV against
+            Build, improve, and tailor
             <br />
-            any job description.
+            your CV — with AI.
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-neutral-600">
-            Upload your CV, paste the job description, and get an AI match score with specific
-            feedback — in under a minute.
+            Create a CV from scratch or upload an existing one, get an instant AI match score
+            against any job description, and generate a tailored cover letter — all in one place.
           </p>
 
           <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
@@ -55,7 +57,7 @@ export default function HomePage() {
                 href="/sign-up"
                 className="inline-flex items-center gap-2 rounded-md bg-neutral-900 px-8 py-3 text-base font-semibold text-white hover:bg-neutral-700"
               >
-                Analyse my CV — it&apos;s free
+                Get started — it&apos;s free
                 <ArrowRight className="h-4 w-4" />
               </Link>
             </SignedOut>
@@ -105,7 +107,7 @@ export default function HomePage() {
             </p>
 
             <div className="mt-12 grid gap-6 sm:grid-cols-3">
-              {plans.map(({ name, price, period, features, cta, href, highlight }) => (
+              {plans.map(({ name, price, period, features, cta, href, highlight, billingPlan }) => (
                 <div
                   key={name}
                   className={`rounded-xl border p-6 ${
@@ -143,16 +145,28 @@ export default function HomePage() {
                     ))}
                   </ul>
 
-                  <Link
-                    href={href}
-                    className={`block w-full rounded-md py-2 text-center text-sm font-semibold transition-colors ${
-                      highlight
-                        ? 'bg-white text-neutral-900 hover:bg-neutral-100'
-                        : 'bg-neutral-900 text-white hover:bg-neutral-700'
-                    }`}
-                  >
-                    {cta}
-                  </Link>
+                  {billingPlan ? (
+                    <PricingCta
+                      plan={billingPlan}
+                      label={cta}
+                      className={`block w-full rounded-md py-2 text-center text-sm font-semibold transition-colors ${
+                        highlight
+                          ? 'bg-white text-neutral-900 hover:bg-neutral-100'
+                          : 'bg-neutral-900 text-white hover:bg-neutral-700'
+                      }`}
+                    />
+                  ) : (
+                    <Link
+                      href={href}
+                      className={`block w-full rounded-md py-2 text-center text-sm font-semibold transition-colors ${
+                        highlight
+                          ? 'bg-white text-neutral-900 hover:bg-neutral-100'
+                          : 'bg-neutral-900 text-white hover:bg-neutral-700'
+                      }`}
+                    >
+                      {cta}
+                    </Link>
+                  )}
                 </div>
               ))}
             </div>
@@ -164,7 +178,7 @@ export default function HomePage() {
       <footer className="border-t border-neutral-100 px-6 py-8">
         <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-2 text-sm text-neutral-400 sm:flex-row">
           <span>© 2026 CVPilot</span>
-          <span>Built for students who deserve more interviews.</span>
+          <span>Helping you land more interviews.</span>
         </div>
       </footer>
     </div>
@@ -197,12 +211,13 @@ const steps = [
 const plans = [
   {
     name: 'Free',
-    price: '£0',
-    period: '/ forever',
+    price: 'Free',
+    period: '',
     features: ['2 CV analyses per month', '1 cover letter per month', 'PDF & DOCX support'],
     cta: 'Get started free',
     href: '/sign-up',
     highlight: false,
+    billingPlan: undefined,
   },
   {
     name: 'Pro',
@@ -212,6 +227,7 @@ const plans = [
     cta: 'Start Pro',
     href: '/sign-up',
     highlight: true,
+    billingPlan: 'pro',
   },
   {
     name: 'Student',
@@ -221,5 +237,6 @@ const plans = [
     cta: 'Start Student plan',
     href: '/sign-up',
     highlight: false,
+    billingPlan: 'student',
   },
 ] as const;

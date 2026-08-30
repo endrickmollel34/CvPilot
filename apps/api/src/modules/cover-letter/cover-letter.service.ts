@@ -140,12 +140,19 @@ export class CoverLetterService extends WorkerHost {
         throw new Error(`CV ${cvId} has no parsed content`);
       }
 
+      // Structured skills, when available (builder/prefill/tailored CVs),
+      // are supplied as an extra evidence block alongside the raw parsed
+      // text. Upload-only CVs with no structured content simply pass
+      // undefined here and generation proceeds off parsedContent alone.
+      const candidateSkills = cv.content?.skills.map((s) => s.name);
+
       const { content, modelUsed, tokensUsed } = await this.aiService.generateCoverLetter(
         cv.parsedContent,
         jobDescription,
         jobTitle,
         companyName,
         tone,
+        candidateSkills,
       );
 
       await this.repo.update(coverLetterId, {

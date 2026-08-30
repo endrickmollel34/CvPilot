@@ -199,6 +199,81 @@ describe('CoverLetterService', () => {
     });
   });
 
+  it("passes the CV's structured skills to the AI service when the CV has structured content", async () => {
+    mockAiService.generateCoverLetter.mockResolvedValue({
+      content: 'Dear Hiring Manager, ... Acme Corp ... Senior Engineer ...',
+      modelUsed: 'gpt-4o',
+      tokensUsed: 300,
+    });
+    mockCvService.findById.mockResolvedValue({
+      ...MOCK_CV,
+      content: {
+        version: 1,
+        personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+        workExperience: [],
+        education: [],
+        skills: [
+          { id: 'sk-1', name: 'TypeScript' },
+          { id: 'sk-2', name: 'React' },
+        ],
+        languages: [],
+        certifications: [],
+        sectionOrder: [],
+      },
+    });
+
+    await service.process({
+      data: {
+        coverLetterId: 'letter-1',
+        userId: 'user-1',
+        cvId: 'cv-1',
+        jobTitle: 'Senior Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Lead backend development.',
+        tone: 'professional',
+      },
+    } as unknown as Job<CoverLetterJobData>);
+
+    expect(mockAiService.generateCoverLetter).toHaveBeenCalledWith(
+      MOCK_CV.parsedContent,
+      'Lead backend development.',
+      'Senior Engineer',
+      'Acme Corp',
+      'professional',
+      ['TypeScript', 'React'],
+    );
+  });
+
+  it('passes undefined skills for upload-only CVs with no structured content (must still work)', async () => {
+    mockAiService.generateCoverLetter.mockResolvedValue({
+      content: 'Dear Hiring Manager, ... Acme Corp ... Senior Engineer ...',
+      modelUsed: 'gpt-4o',
+      tokensUsed: 300,
+    });
+    mockCvService.findById.mockResolvedValue(MOCK_CV); // no `content` field
+
+    await service.process({
+      data: {
+        coverLetterId: 'letter-1',
+        userId: 'user-1',
+        cvId: 'cv-1',
+        jobTitle: 'Senior Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Lead backend development.',
+        tone: 'professional',
+      },
+    } as unknown as Job<CoverLetterJobData>);
+
+    expect(mockAiService.generateCoverLetter).toHaveBeenCalledWith(
+      MOCK_CV.parsedContent,
+      'Lead backend development.',
+      'Senior Engineer',
+      'Acme Corp',
+      'professional',
+      undefined,
+    );
+  });
+
   it('updates entity to failed and does not re-throw when AI fails', async () => {
     mockAiService.generateCoverLetter.mockRejectedValue(new Error('All AI providers exhausted'));
     mockCvService.findById.mockResolvedValue(MOCK_CV);

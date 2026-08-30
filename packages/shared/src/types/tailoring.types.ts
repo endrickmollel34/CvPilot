@@ -19,6 +19,14 @@ export interface TailoringSuggestion {
   originalContent: string;
   /** AI-recommended replacement */
   suggestedContent: string;
+  /**
+   * For 'skills'/'languages' suggestions that add a new entry: an exact quote
+   * from the candidate's CV that supports the addition (e.g. the bullet that
+   * mentions it). Never the job description — see skill-grounding.util.ts in
+   * apps/api, which independently verifies this quote actually appears in
+   * the CV before the suggestion is shown to the user or ever applied.
+   */
+  evidence?: string;
   /** Why this change improves the match */
   reason: string;
   priority: TailoringPriority;

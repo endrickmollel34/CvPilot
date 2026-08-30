@@ -5,8 +5,7 @@ import { auth } from '@clerk/nextjs/server';
 import { notFound, redirect } from 'next/navigation';
 
 import { CvBuilderWorkspace } from '@/components/cv/CvBuilderWorkspace';
-
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3001';
+import { API_BASE_URL as API_URL } from '@/lib/apiUrl';
 
 async function fetchCv(token: string, cvId: string) {
   const res = await fetch(`${API_URL}/cvs/${cvId}`, {

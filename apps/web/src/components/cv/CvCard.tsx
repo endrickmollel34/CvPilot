@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@clerk/nextjs';
 
 import { deleteCv, prefillCv, type CvDto } from '@/lib/cvApi';
+import { getFriendlyErrorMessage } from '@/lib/errorMessage';
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-GB', {
@@ -69,9 +70,7 @@ export function CvCard({ cv }: { cv: CvDto }) {
       const prefillCv_result = await prefillCv(token!, cv.id);
       router.push(`/cvs/${prefillCv_result.id}/edit`);
     } catch (err) {
-      setPrefillError(
-        err instanceof Error ? err.message : 'Something went wrong. Please try again.',
-      );
+      setPrefillError(getFriendlyErrorMessage(err));
       setPrefilling(false);
     }
   }

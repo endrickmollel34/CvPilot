@@ -5,6 +5,7 @@ import type { Request } from 'express';
 import { ClerkGuard } from '../auth/guards/clerk.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { BillingService } from './billing.service';
+import { CreateCheckoutDto } from './dto/create-checkout.dto';
 
 @Controller()
 export class BillingController {
@@ -25,11 +26,8 @@ export class BillingController {
 
   @Post('billing/checkout')
   @UseGuards(ClerkGuard)
-  createCheckout(
-    @CurrentUser() user: { clerkId: string },
-    @Body() body: { plan: 'pro' | 'student' },
-  ) {
-    return this.billingService.createCheckoutSession(user.clerkId, body.plan);
+  createCheckout(@CurrentUser() user: { clerkId: string }, @Body() dto: CreateCheckoutDto) {
+    return this.billingService.createCheckoutSession(user.clerkId, dto.plan);
   }
 
   @Post('billing/portal')

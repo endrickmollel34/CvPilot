@@ -1,6 +1,7 @@
 import type { TailoringDecision, TailoringSuggestion, TailoringStatus } from '@cvpilot/shared';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
+import { API_BASE_URL as API_URL } from './apiUrl';
+import { throwApiError } from './apiError';
 
 export interface TailoringDto {
   id: string;
@@ -37,8 +38,8 @@ export async function submitTailoring(
     }),
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { message?: string };
-    throw new Error(body.message ?? `Submit failed: ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Submit failed: ${res.status}`);
   }
   return res.json() as Promise<TailoringDto>;
 }
@@ -62,8 +63,8 @@ export async function applyTailoring(
     body: JSON.stringify({ decisions }),
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { message?: string };
-    throw new Error(body.message ?? `Apply failed: ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Apply failed: ${res.status}`);
   }
   return res.json() as Promise<{ tailoredCvId: string }>;
 }

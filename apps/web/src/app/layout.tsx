@@ -7,9 +7,9 @@ import './globals.css';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'CVPilot — Score your CV against any job description',
+  title: 'CVPilot — Build, improve, and tailor your CV with AI',
   description:
-    'Upload your CV, paste a job description, and get an AI match score with specific feedback in under a minute. Free to start.',
+    'Create or upload your CV, get an instant AI match score against any job description, and generate a tailored cover letter. Free to start.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

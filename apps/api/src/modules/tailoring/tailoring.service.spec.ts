@@ -15,7 +15,7 @@ import { TailoringEntity } from '../../entities/tailoring.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { CvService } from '../cv/cv.service';
-import type { CvContent, TailoringSuggestion } from '@cvpilot/shared';
+import type { CvContent, TailoringDecision, TailoringSuggestion } from '@cvpilot/shared';
 
 const MOCK_USER = { id: 'user-1', clerkId: 'clerk-1', plan: 'pro' };
 
@@ -86,6 +86,92 @@ const MOCK_DONE_TAILORING: Partial<TailoringEntity> = {
   suggestions: MOCK_SUGGESTIONS,
   tailoredCvId: undefined,
 };
+
+// A CV with no mention of Python, Java, REST APIs, MySQL, Git, or Docker
+// anywhere (summary, bullets, education, skills) — used to prove those six
+// job-description technologies cannot be added when unsupported by the CV.
+const PLAIN_CONTENT: CvContent = {
+  version: 1,
+  personalDetails: { fullName: 'Sam Lee', email: 'sam@example.com' },
+  summary: 'Customer-focused retail supervisor with a track record of hitting sales targets.',
+  workExperience: [
+    {
+      id: 'we-2',
+      company: 'Northwind Retail',
+      title: 'Store Supervisor',
+      startDate: '2021-03',
+      current: true,
+      bullets: [
+        'Trained and scheduled a team of 8 sales associates',
+        'Managed inventory counts and vendor orders',
+      ],
+    },
+  ],
+  education: [{ id: 'ed-1', institution: 'City College', degree: 'BA Business Studies' }],
+  skills: [{ id: 'sk-2', name: 'Customer Service' }],
+  languages: [],
+  certifications: [],
+  sectionOrder: ['summary', 'workExperience', 'education', 'skills', 'languages', 'certifications'],
+};
+
+const PLAIN_CV = { id: 'cv-2', userId: 'user-1', content: PLAIN_CONTENT };
+
+const UNSUPPORTED_TECH_SUGGESTIONS: TailoringSuggestion[] = [
+  {
+    id: 'u1',
+    section: 'skills',
+    originalContent: '',
+    suggestedContent: 'Python',
+    reason: 'The job description requires Python.',
+    priority: 'HIGH',
+  },
+  {
+    id: 'u2',
+    section: 'skills',
+    originalContent: '',
+    suggestedContent: 'Java',
+    reason: 'The job description requires Java.',
+    priority: 'HIGH',
+    // Real CV text, but unrelated to Java — must still be rejected.
+    evidence: 'Trained and scheduled a team of 8 sales associates',
+  },
+  {
+    id: 'u3',
+    section: 'skills',
+    originalContent: '',
+    suggestedContent: 'REST APIs',
+    reason: 'The job description requires REST API experience.',
+    priority: 'MEDIUM',
+  },
+  {
+    id: 'u4',
+    section: 'skills',
+    originalContent: '',
+    suggestedContent: 'MySQL',
+    reason: 'The job description requires MySQL.',
+    priority: 'MEDIUM',
+    // Fabricated evidence — this sentence is not in the CV at all.
+    evidence: 'We need someone who knows MySQL well',
+  },
+  {
+    id: 'u5',
+    section: 'skills',
+    originalContent: '',
+    suggestedContent: 'Git',
+    reason: 'The job description requires Git.',
+    priority: 'LOW',
+  },
+  {
+    id: 'u6',
+    section: 'skills',
+    originalContent: '',
+    suggestedContent: 'Docker',
+    reason: 'The job description requires Docker.',
+    priority: 'LOW',
+  },
+];
+
+const UNSUPPORTED_TECH_NAMES = ['Python', 'Java', 'REST APIs', 'MySQL', 'Git', 'Docker'];
 
 // ─── TailoringService tests ───────────────────────────────────────────────────
 
@@ -302,6 +388,83 @@ describe('TailoringService', () => {
         }),
       );
     });
+
+    // ─── Grounding: apply-time enforcement (defense in depth) ────────────────
+
+    it('promotes a genuinely supported skill into the Skills section when accepted', async () => {
+      mockRepo.findOne.mockResolvedValue({
+        ...MOCK_DONE_TAILORING,
+        suggestions: [
+          {
+            id: 'g1',
+            section: 'skills',
+            originalContent: '',
+            suggestedContent: 'REST APIs',
+            evidence: 'Built REST APIs',
+            reason: 'Matches a required skill in the JD.',
+            priority: 'HIGH',
+          },
+        ],
+      });
+
+      await service.apply('clerk-1', 'tailor-1', {
+        decisions: [{ suggestionId: 'g1', decision: 'accepted' }],
+      });
+
+      expect(mockCvService.createTailored).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          skills: expect.arrayContaining([expect.objectContaining({ name: 'REST APIs' })]),
+        }),
+        'Backend Engineer',
+      );
+    });
+
+    it('blocks a stored ungrounded skill suggestion even when the user accepts it', async () => {
+      // s3 ('Docker', no evidence) is already part of MOCK_DONE_TAILORING —
+      // simulates a suggestion that was somehow persisted ungrounded (e.g.
+      // stored before this check existed). Accepting it must not add it.
+      await service.apply('clerk-1', 'tailor-1', {
+        decisions: [{ suggestionId: 's3', decision: 'accepted' }],
+      });
+
+      expect(mockCvService.createTailored).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          skills: expect.not.arrayContaining([expect.objectContaining({ name: 'Docker' })]),
+        }),
+        'Backend Engineer',
+      );
+    });
+
+    it('regression: "Accept all" cannot inject unsupported job-description technologies', async () => {
+      // Simulates the frontend's "Accept all" button, which sends every
+      // suggestion as accepted regardless of content.
+      mockCvService.findById.mockResolvedValue(PLAIN_CV);
+      mockRepo.findOne.mockResolvedValue({
+        ...MOCK_DONE_TAILORING,
+        masterCvId: 'cv-2',
+        suggestions: UNSUPPORTED_TECH_SUGGESTIONS,
+      });
+      const acceptAllDecisions: TailoringDecision[] = UNSUPPORTED_TECH_SUGGESTIONS.map((s) => ({
+        suggestionId: s.id,
+        decision: 'accepted',
+      }));
+
+      await service.apply('clerk-1', 'tailor-1', { decisions: acceptAllDecisions });
+
+      const [, tailoredContentArg] = mockCvService.createTailored.mock.calls[0] as [
+        string,
+        CvContent,
+        string?,
+      ];
+      const skillNames = tailoredContentArg.skills.map((s) => s.name);
+      for (const tech of UNSUPPORTED_TECH_NAMES) {
+        expect(skillNames).not.toContain(tech);
+      }
+      // Only the CV's original, pre-existing skill remains.
+      expect(skillNames).toEqual(['Customer Service']);
+    });
   });
 
   // ─── runTailoring() ───────────────────────────────────────────────────────────
@@ -351,7 +514,11 @@ describe('TailoringService', () => {
           id: 'x3',
           section: 'skills',
           originalContent: '',
-          suggestedContent: 'Docker',
+          suggestedContent: 'REST APIs',
+          // Grounded in MOCK_CONTENT's 'Built REST APIs' bullet — this test
+          // is about sort order, not grounding, so the fixture must survive
+          // the grounding filter to keep testing what it says it tests.
+          evidence: 'Built REST APIs',
           reason: 'Required skill.',
           priority: 'HIGH',
         },
@@ -411,6 +578,77 @@ describe('TailoringService', () => {
 
       expect(mockRepo.update).toHaveBeenLastCalledWith('tailor-1', { status: 'failed' });
       expect(mockTailoringAiService.runTailoring).not.toHaveBeenCalled();
+    });
+
+    // ─── Grounding: generation-time filtering ────────────────────────────────
+
+    it('drops Python/Java/REST APIs/MySQL/Git/Docker skill suggestions when none is supported by the source CV', async () => {
+      mockCvService.findById.mockResolvedValue(PLAIN_CV);
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: UNSUPPORTED_TECH_SUGGESTIONS,
+        modelUsed: 'gpt-4o',
+        tokensUsed: 300,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+        suggestions: TailoringSuggestion[];
+      };
+      const persistedNames = saved.suggestions.map((s) => s.suggestedContent);
+      for (const tech of UNSUPPORTED_TECH_NAMES) {
+        expect(persistedNames).not.toContain(tech);
+      }
+      expect(saved.suggestions).toHaveLength(0);
+    });
+
+    it('keeps a skill suggestion that is genuinely grounded in the source CV', async () => {
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [
+          {
+            id: 'g1',
+            section: 'skills',
+            originalContent: '',
+            suggestedContent: 'REST APIs',
+            evidence: 'Built REST APIs',
+            reason: 'Matches a required skill in the JD.',
+            priority: 'HIGH',
+          },
+        ],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 150,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+        suggestions: TailoringSuggestion[];
+      };
+      expect(saved.suggestions.map((s) => s.suggestedContent)).toEqual(['REST APIs']);
+    });
+
+    it('completes successfully with status "done" when the AI legitimately returns zero suggestions', async () => {
+      // e.g. a CV that already matches the job description well, or one
+      // where grounding leaves nothing safe to suggest.
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 180,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      expect(mockRepo.update).toHaveBeenLastCalledWith(
+        'tailor-1',
+        expect.objectContaining({
+          suggestions: [],
+          modelUsed: 'gpt-4o',
+          tokensUsed: 180,
+          status: 'done',
+        }),
+      );
+      // Must not be treated as a provider failure.
+      expect(mockRepo.update).not.toHaveBeenCalledWith('tailor-1', { status: 'failed' });
     });
   });
 });

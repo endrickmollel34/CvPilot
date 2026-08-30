@@ -1,6 +1,7 @@
 import type { CvContent, CvSource } from '@cvpilot/shared';
 
-const API_URL = process.env['NEXT_PUBLIC_API_URL'] ?? 'http://localhost:3001';
+import { API_BASE_URL as API_URL } from './apiUrl';
+import { throwApiError } from './apiError';
 
 export interface CvDto {
   id: string;
@@ -38,8 +39,8 @@ export async function createCv(
     body: JSON.stringify({ title, source }),
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { message?: string };
-    throw new Error(body.message ?? `Failed to create CV: ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to create CV: ${res.status}`);
   }
   return res.json() as Promise<CvDto>;
 }
@@ -82,14 +83,70 @@ export async function downloadCvPdf(token: string, cvId: string, filename: strin
   URL.revokeObjectURL(url);
 }
 
+export async function getCv(token: string, cvId: string): Promise<CvDto> {
+  const res = await fetch(`${API_URL}/cvs/${cvId}`, {
+    headers: authHeaders(token),
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new Error(`Failed to fetch CV: ${res.status}`);
+  return res.json() as Promise<CvDto>;
+}
+
+export async function getUploadUrl(
+  token: string,
+  fileName: string,
+  mimeType: string,
+  fileSizeBytes: number,
+): Promise<{ uploadUrl: string; r2ObjectKey: string }> {
+  const res = await fetch(`${API_URL}/cvs/upload-url`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ fileName, mimeType, fileSizeBytes }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to get upload URL: ${res.status}`);
+  }
+  return res.json() as Promise<{ uploadUrl: string; r2ObjectKey: string }>;
+}
+
+export async function confirmUpload(
+  token: string,
+  r2ObjectKey: string,
+  fileName: string,
+  fileSizeBytes: number,
+  mimeType: string,
+): Promise<CvDto> {
+  const res = await fetch(`${API_URL}/cvs/confirm`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ r2ObjectKey, fileName, fileSizeBytes, mimeType }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to confirm upload: ${res.status}`);
+  }
+  return res.json() as Promise<CvDto>;
+}
+
+export async function renameCv(token: string, cvId: string, title: string): Promise<CvDto> {
+  const res = await fetch(`${API_URL}/cvs/${cvId}/title`, {
+    method: 'PATCH',
+    headers: authHeaders(token),
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`Failed to rename CV: ${res.status}`);
+  return res.json() as Promise<CvDto>;
+}
+
 export async function prefillCv(token: string, uploadCvId: string): Promise<CvDto> {
   const res = await fetch(`${API_URL}/cvs/${uploadCvId}/prefill`, {
     method: 'POST',
     headers: authHeaders(token),
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { message?: string };
-    throw new Error(body.message ?? `Failed to prefill CV: ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to prefill CV: ${res.status}`);
   }
   return res.json() as Promise<CvDto>;
 }
