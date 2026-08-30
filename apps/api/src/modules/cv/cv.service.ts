@@ -204,6 +204,13 @@ export class CvService {
 
     await this.checkBuilderCvLimit(user.id);
 
+    // Diagnostic only — length, never content, so this is safe to log
+    // (no PII). A very short length here is a strong signal that
+    // parsedContent is placeholder/garbage text rather than a real CV body.
+    this.logger.log(
+      `Prefilling CV ${uploadCvId} from ${uploadCv.parsedContent.length} chars of parsed text`,
+    );
+
     const extraction = await this.prefillService.extract(uploadCv.parsedContent);
 
     const cv = this.cvRepo.create({

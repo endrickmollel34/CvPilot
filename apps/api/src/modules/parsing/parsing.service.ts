@@ -6,6 +6,8 @@ import type { Job } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import type { Readable } from 'stream';
+import { PDFParse } from 'pdf-parse';
+import mammoth from 'mammoth';
 
 import { CvEntity } from '../../entities/cv.entity';
 
@@ -54,19 +56,50 @@ export class ParsingService extends WorkerHost {
       );
 
       const fileBuffer = await this.streamToBuffer(response.Body as Readable);
+      const parsedContent = await this.extractText(fileBuffer, cv.mimeType);
 
-      // TODO: branch on cv.mimeType
-      //   'application/pdf' → pdf-parse(fileBuffer).then(d => d.text)
-      //   'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      //       → mammoth.extractRawText({ buffer: fileBuffer }).then(r => r.value)
-      const parsedContent = fileBuffer.length > 0 ? 'TODO: extracted text' : '';
+      if (!parsedContent.trim()) {
+        // Extraction ran without error but found no text (e.g. a scanned/
+        // image-only PDF with no text layer). Surface this as a failure
+        // rather than persisting empty text that would silently make
+        // downstream AI prefill/analysis look like it "succeeded" with
+        // nothing to work from.
+        throw new Error('No text content could be extracted from the file');
+      }
 
       await this.cvRepo.update(cvId, { parsedContent, parseStatus: 'done' });
-      this.logger.log(`CV ${cvId} parsed successfully`);
+      this.logger.log(`CV ${cvId} parsed successfully (${parsedContent.length} chars extracted)`);
     } catch (err) {
       this.logger.error(`CV ${cvId} parsing failed`, err);
       await this.cvRepo.update(cvId, { parseStatus: 'failed' });
     }
+  }
+
+  /**
+   * Extracts raw text from an uploaded CV file so it can be fed to the AI
+   * prefill/analysis pipeline. Dispatches on the stored MIME type — see
+   * ALLOWED_MIME_TYPES in dto/generate-upload-url.dto.ts for the exhaustive
+   * set of file types the upload flow accepts.
+   */
+  private async extractText(fileBuffer: Buffer, mimeType?: string): Promise<string> {
+    if (fileBuffer.length === 0) return '';
+
+    if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      const result = await mammoth.extractRawText({ buffer: fileBuffer });
+      return result.value.trim();
+    }
+
+    if (mimeType === 'application/pdf') {
+      const parser = new PDFParse({ data: fileBuffer });
+      try {
+        const result = await parser.getText();
+        return result.text.trim();
+      } finally {
+        await parser.destroy();
+      }
+    }
+
+    throw new Error(`Unsupported CV file type for text extraction: ${String(mimeType)}`);
   }
 
   private streamToBuffer(stream: Readable): Promise<Buffer> {
