@@ -25,15 +25,27 @@ jest.mock('@anthropic-ai/sdk', () =>
   })),
 );
 
+// ANTHROPIC_API_KEY is resolved via ConfigService.get() (never getOrThrow —
+// see optional-api-key.util.ts), so the mock must implement both methods:
+// getOrThrow for the required OPENAI_API_KEY, get for the optional one.
 const mockConfig = {
   getOrThrow: jest.fn((key: string) => {
-    const vals: Record<string, string> = {
-      OPENAI_API_KEY: 'test-key',
-      ANTHROPIC_API_KEY: 'test-key',
-    };
+    const vals: Record<string, string> = { OPENAI_API_KEY: 'test-key' };
     return vals[key] ?? '';
   }),
+  get: jest.fn((key: string) => {
+    const vals: Record<string, string> = { ANTHROPIC_API_KEY: 'test-key' };
+    return vals[key];
+  }),
 };
+
+function buildService(anthropicKeyValue: string | undefined): TailoringAiService {
+  const config = {
+    getOrThrow: mockConfig.getOrThrow,
+    get: jest.fn((key: string) => (key === 'ANTHROPIC_API_KEY' ? anthropicKeyValue : undefined)),
+  };
+  return new TailoringAiService(config as unknown as ConfigService);
+}
 
 const CONTENT: CvContent = {
   version: 1,
@@ -152,5 +164,67 @@ describe('TailoringAiService', () => {
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1); // fallback activated
     expect(result.modelUsed).toBe('claude-3-5-sonnet-20241022');
     expect(result.suggestions).toEqual([]);
+  });
+
+  // ─── Anthropic is a genuinely optional fallback ────────────────────────────
+
+  describe('optional Anthropic fallback', () => {
+    it('fails cleanly after OpenAI is exhausted when ANTHROPIC_API_KEY is unset — never calls Anthropic', async () => {
+      const noAnthropicService = buildService(undefined);
+      mockOpenAICreate.mockResolvedValue(
+        openAiResponse({ suggestions: [{ id: 's1', section: 'summary' }] }),
+      );
+
+      await expect(
+        noAnthropicService.runTailoring(CONTENT, 'Job description text.'),
+      ).rejects.toThrow('all AI providers exhausted');
+
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+
+    it('fails cleanly and never calls Anthropic when ANTHROPIC_API_KEY is an obvious placeholder value', async () => {
+      const placeholderService = buildService('sk-ant-placeholder-dev-only');
+      mockOpenAICreate.mockResolvedValue(
+        openAiResponse({ suggestions: [{ id: 's1', section: 'summary' }] }),
+      );
+
+      await expect(
+        placeholderService.runTailoring(CONTENT, 'Job description text.'),
+      ).rejects.toThrow('all AI providers exhausted');
+
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+
+    it('still falls back to Anthropic when a real key is configured (unaffected by the optionality change)', async () => {
+      const configuredService = buildService('sk-ant-real-key');
+      mockOpenAICreate.mockResolvedValue(
+        openAiResponse({ suggestions: [{ id: 's1', section: 'summary' }] }),
+      );
+      mockAnthropicCreate.mockResolvedValue({
+        content: [{ type: 'text', text: JSON.stringify({ suggestions: [] }) }],
+        usage: { input_tokens: 50, output_tokens: 20 },
+      });
+
+      const result = await configuredService.runTailoring(CONTENT, 'Job description text.');
+
+      expect(result.modelUsed).toBe('claude-3-5-sonnet-20241022');
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('OpenAI-only happy path is unaffected regardless of Anthropic configuration', async () => {
+      const noAnthropicService = buildService(undefined);
+      mockOpenAICreate.mockResolvedValue(openAiResponse({ suggestions: [] }, 250));
+
+      const result = await noAnthropicService.runTailoring(
+        CONTENT,
+        'A job description this CV already matches very well.',
+      );
+
+      expect(result.suggestions).toEqual([]);
+      expect(result.modelUsed).toBe('gpt-4o');
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
   });
 });

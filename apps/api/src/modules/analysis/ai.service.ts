@@ -4,6 +4,8 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 
+import { resolveOptionalApiKey } from '../../common/utils/optional-api-key.util';
+
 const ANALYSIS_SYSTEM_PROMPT =
   'You are an expert CV/resume analyst. Analyse the candidate CV against the job description and return structured feedback. ' +
   'Respond with ONLY valid JSON — no markdown fences, no explanation, no preamble.';
@@ -59,11 +61,16 @@ const MAX_ATTEMPTS = 3;
 export class AiService {
   private readonly logger = new Logger(AiService.name);
   private readonly openai: OpenAI;
-  private readonly anthropic: Anthropic;
+  // Genuinely optional — OpenAI is the required primary provider; Anthropic
+  // is only ever a fallback and must never block boot. undefined means "not
+  // configured" (unset or an obvious placeholder value), not "broken."
+  private readonly anthropic?: Anthropic;
 
   constructor(private readonly config: ConfigService) {
     this.openai = new OpenAI({ apiKey: config.getOrThrow<string>('OPENAI_API_KEY') });
-    this.anthropic = new Anthropic({ apiKey: config.getOrThrow<string>('ANTHROPIC_API_KEY') });
+
+    const anthropicKey = resolveOptionalApiKey(config, 'ANTHROPIC_API_KEY');
+    this.anthropic = anthropicKey ? new Anthropic({ apiKey: anthropicKey }) : undefined;
   }
 
   async runAnalysis(cvText: string, jobDescription: string): Promise<AiCallResult> {
@@ -73,6 +80,11 @@ export class AiService {
       } catch (err) {
         this.logger.warn(`OpenAI analysis attempt ${attempt}/${MAX_ATTEMPTS} failed`, err);
       }
+    }
+
+    if (!this.anthropic) {
+      this.logger.warn('OpenAI exhausted — Anthropic fallback is not configured, failing');
+      throw new Error('Analysis failed: all AI providers exhausted after retries');
     }
 
     this.logger.warn('OpenAI exhausted — activating Anthropic fallback');
@@ -110,6 +122,13 @@ export class AiService {
   }
 
   private async callAnthropic(cvText: string, jobDescription: string): Promise<AiCallResult> {
+    // Unreachable in practice — runAnalysis() never enters the Anthropic
+    // retry loop when this.anthropic is undefined — kept as a type-safe
+    // defensive guard rather than a non-null assertion.
+    if (!this.anthropic) {
+      throw new Error('Anthropic client is not configured');
+    }
+
     const response = await this.anthropic.messages.create({
       model: 'claude-3-5-sonnet-20241022',
       max_tokens: 2048,

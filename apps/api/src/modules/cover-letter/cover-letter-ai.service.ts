@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 
 import { findUnsupportedPossessionClaims } from './possession-claim-guard.util';
+import { resolveOptionalApiKey } from '../../common/utils/optional-api-key.util';
 
 // ─── Grounding ─────────────────────────────────────────────────────────────
 // Shared verbatim by both providers (OpenAI + Anthropic fallback) and all
@@ -142,11 +143,16 @@ const MAX_ATTEMPTS = 3;
 export class CoverLetterAiService {
   private readonly logger = new Logger(CoverLetterAiService.name);
   private readonly openai: OpenAI;
-  private readonly anthropic: Anthropic;
+  // Genuinely optional — OpenAI is the required primary provider; Anthropic
+  // is only ever a fallback and must never block boot. undefined means "not
+  // configured" (unset or an obvious placeholder value), not "broken."
+  private readonly anthropic?: Anthropic;
 
   constructor(private readonly config: ConfigService) {
     this.openai = new OpenAI({ apiKey: config.getOrThrow<string>('OPENAI_API_KEY') });
-    this.anthropic = new Anthropic({ apiKey: config.getOrThrow<string>('ANTHROPIC_API_KEY') });
+
+    const anthropicKey = resolveOptionalApiKey(config, 'ANTHROPIC_API_KEY');
+    this.anthropic = anthropicKey ? new Anthropic({ apiKey: anthropicKey }) : undefined;
   }
 
   async generateCoverLetter(
@@ -173,6 +179,11 @@ export class CoverLetterAiService {
       } catch (err) {
         this.logger.warn(`OpenAI cover letter attempt ${attempt}/${MAX_ATTEMPTS} failed`, err);
       }
+    }
+
+    if (!this.anthropic) {
+      this.logger.warn('OpenAI exhausted — Anthropic fallback is not configured, failing');
+      throw new Error('Cover letter generation failed: all AI providers exhausted after retries');
     }
 
     this.logger.warn('OpenAI exhausted — activating Anthropic fallback');
@@ -219,6 +230,13 @@ export class CoverLetterAiService {
     jobTitle: string,
     cvEvidenceText: string,
   ): Promise<CoverLetterAiResult> {
+    // Unreachable in practice — generateCoverLetter() never enters the
+    // Anthropic retry loop when this.anthropic is undefined — kept as a
+    // type-safe defensive guard rather than a non-null assertion.
+    if (!this.anthropic) {
+      throw new Error('Anthropic client is not configured');
+    }
+
     const response = await this.anthropic.messages.create({
       model: 'claude-3-5-sonnet-20241022',
       max_tokens: 2048,

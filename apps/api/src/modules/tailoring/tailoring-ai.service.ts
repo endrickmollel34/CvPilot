@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import type { CvContent } from '@cvpilot/shared';
 import type { TailoringSuggestion } from '@cvpilot/shared';
+import { resolveOptionalApiKey } from '../../common/utils/optional-api-key.util';
 
 const SYSTEM_PROMPT =
   'You are an expert CV tailoring specialist. Analyse the candidate CV against the target job description ' +
@@ -101,11 +102,16 @@ const MAX_ATTEMPTS = 3;
 export class TailoringAiService {
   private readonly logger = new Logger(TailoringAiService.name);
   private readonly openai: OpenAI;
-  private readonly anthropic: Anthropic;
+  // Genuinely optional — OpenAI is the required primary provider; Anthropic
+  // is only ever a fallback and must never block boot. undefined means "not
+  // configured" (unset or an obvious placeholder value), not "broken."
+  private readonly anthropic?: Anthropic;
 
   constructor(private readonly config: ConfigService) {
     this.openai = new OpenAI({ apiKey: config.getOrThrow<string>('OPENAI_API_KEY') });
-    this.anthropic = new Anthropic({ apiKey: config.getOrThrow<string>('ANTHROPIC_API_KEY') });
+
+    const anthropicKey = resolveOptionalApiKey(config, 'ANTHROPIC_API_KEY');
+    this.anthropic = anthropicKey ? new Anthropic({ apiKey: anthropicKey }) : undefined;
   }
 
   async runTailoring(content: CvContent, jobDescription: string): Promise<TailoringAiResult> {
@@ -117,6 +123,11 @@ export class TailoringAiService {
       } catch (err) {
         this.logger.warn(`OpenAI tailoring attempt ${attempt}/${MAX_ATTEMPTS} failed`, err);
       }
+    }
+
+    if (!this.anthropic) {
+      this.logger.warn('OpenAI exhausted — Anthropic fallback is not configured, failing');
+      throw new Error('Tailoring failed: all AI providers exhausted after retries');
     }
 
     this.logger.warn('OpenAI exhausted — activating Anthropic fallback for tailoring');
@@ -158,6 +169,13 @@ export class TailoringAiService {
   }
 
   private async callAnthropic(cvText: string, jobDescription: string): Promise<TailoringAiResult> {
+    // Unreachable in practice — runTailoring() never enters the Anthropic
+    // retry loop when this.anthropic is undefined — kept as a type-safe
+    // defensive guard rather than a non-null assertion.
+    if (!this.anthropic) {
+      throw new Error('Anthropic client is not configured');
+    }
+
     const response = await this.anthropic.messages.create({
       model: 'claude-3-5-sonnet-20241022',
       max_tokens: 2048,

@@ -24,15 +24,27 @@ jest.mock('@anthropic-ai/sdk', () =>
   })),
 );
 
+// ANTHROPIC_API_KEY is resolved via ConfigService.get() (never getOrThrow —
+// see optional-api-key.util.ts), so the mock must implement both methods:
+// getOrThrow for the required OPENAI_API_KEY, get for the optional one.
 const mockConfig = {
   getOrThrow: jest.fn((key: string) => {
-    const vals: Record<string, string> = {
-      OPENAI_API_KEY: 'test-key',
-      ANTHROPIC_API_KEY: 'test-key',
-    };
+    const vals: Record<string, string> = { OPENAI_API_KEY: 'test-key' };
     return vals[key] ?? '';
   }),
+  get: jest.fn((key: string) => {
+    const vals: Record<string, string> = { ANTHROPIC_API_KEY: 'test-key' };
+    return vals[key];
+  }),
 };
+
+function buildService(anthropicKeyValue: string | undefined): CoverLetterAiService {
+  const config = {
+    getOrThrow: mockConfig.getOrThrow,
+    get: jest.fn((key: string) => (key === 'ANTHROPIC_API_KEY' ? anthropicKeyValue : undefined)),
+  };
+  return new CoverLetterAiService(config as unknown as ConfigService);
+}
 
 // The exact regression scenario: a CV that establishes none of Python, Java,
 // TypeScript, REST APIs, PostgreSQL/MySQL, Git, Docker, CI/CD, cloud
@@ -301,5 +313,82 @@ describe('CoverLetterAiService', () => {
         'professional',
       ),
     ).rejects.toThrow('all AI providers exhausted');
+  });
+
+  // ─── Anthropic is a genuinely optional fallback ────────────────────────────
+
+  describe('optional Anthropic fallback', () => {
+    it('fails cleanly after OpenAI is exhausted when ANTHROPIC_API_KEY is unset — never calls Anthropic', async () => {
+      const noAnthropicService = buildService(undefined);
+      mockOpenAICreate.mockResolvedValue(openAiResponse('too short'));
+
+      await expect(
+        noAnthropicService.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+        ),
+      ).rejects.toThrow('all AI providers exhausted');
+
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+
+    it('fails cleanly and never calls Anthropic when ANTHROPIC_API_KEY is an obvious placeholder value', async () => {
+      const placeholderService = buildService('sk-ant-placeholder-dev-only');
+      mockOpenAICreate.mockResolvedValue(openAiResponse('too short'));
+
+      await expect(
+        placeholderService.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+        ),
+      ).rejects.toThrow('all AI providers exhausted');
+
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+
+    it('still falls back to Anthropic when a real key is configured (unaffected by the optionality change)', async () => {
+      const configuredService = buildService('sk-ant-real-key');
+      const badLetter = HALLUCINATED_LETTERS.professional('Acme Corp', 'Backend Engineer');
+      const goodLetter = cleanLetter('Acme Corp', 'Backend Engineer');
+      mockOpenAICreate.mockResolvedValue(openAiResponse(badLetter));
+      mockAnthropicCreate.mockResolvedValue(anthropicResponse(goodLetter));
+
+      const result = await configuredService.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+      );
+
+      expect(result.content).toBe(goodLetter);
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('OpenAI-only happy path is unaffected regardless of Anthropic configuration', async () => {
+      const noAnthropicService = buildService(undefined);
+      const letter = cleanLetter('Acme Corp', 'Backend Engineer');
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter, 420));
+
+      const result = await noAnthropicService.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+      );
+
+      expect(result.content).toBe(letter);
+      expect(result.modelUsed).toBe('gpt-4o');
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
   });
 });
