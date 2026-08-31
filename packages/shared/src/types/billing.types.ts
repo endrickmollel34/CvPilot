@@ -55,3 +55,31 @@ export const PLAN_LIMITS: Record<
     tailoringsPerMonth: Infinity,
   },
 };
+
+// ── Usage visibility ─────────────────────────────────────────────────────────
+// Shared between apps/api (BillingService.getUsageSummary) and apps/web
+// (the dashboard usage card + contextual hints) so the frontend never needs
+// its own copy of PLAN_LIMITS or quota-counting rules.
+
+export interface UsageCounter {
+  used: number;
+  /** null means unlimited (never a serialized Infinity). */
+  limit: number | null;
+  /** null means unlimited. */
+  remaining: number | null;
+}
+
+export interface UsageSummary {
+  /** The plan that actually governs entitlements right now (see resolveEffectivePlan). */
+  plan: Plan;
+  /** The raw, stored plan — may differ from `plan` for e.g. a past_due Pro subscription. Omitted when there is no subscription row. */
+  rawPlan?: Plan;
+  /** Omitted when there is no subscription row. */
+  subscriptionStatus?: SubscriptionStatus;
+  usage: {
+    analyses: UsageCounter;
+    coverLetters: UsageCounter;
+    tailorings: UsageCounter;
+    builderCvs: UsageCounter;
+  };
+}

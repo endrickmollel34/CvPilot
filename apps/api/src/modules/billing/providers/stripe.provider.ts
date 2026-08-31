@@ -84,7 +84,15 @@ export class StripePaymentProvider implements PaymentProvider {
         params.signature,
         this.config.getOrThrow<string>('STRIPE_WEBHOOK_SECRET'),
       );
-    } catch {
+    } catch (err) {
+      // Stripe's own SDK error messages are generic diagnostic phrases (e.g.
+      // "No signatures found matching...", "Timestamp outside the tolerance
+      // zone") — safe to log. Never log params.rawBody, params.signature, or
+      // the webhook secret itself; this is the only context needed to tell
+      // a wrong/rotated STRIPE_WEBHOOK_SECRET apart from clock skew.
+      this.logger.warn(
+        `Stripe webhook signature verification failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+      );
       throw new BadRequestException('Invalid Stripe webhook signature');
     }
     return this.mapStripeEvent(event);

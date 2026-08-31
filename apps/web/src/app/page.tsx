@@ -99,7 +99,7 @@ export default function HomePage() {
         </section>
 
         {/* ── Pricing ────────────────────────────────────────────────────────── */}
-        <section className="px-6 py-20">
+        <section id="pricing" className="px-6 py-20">
           <div className="mx-auto max-w-5xl">
             <h2 className="text-center text-2xl font-bold tracking-tight">Simple pricing</h2>
             <p className="mt-2 text-center text-sm text-neutral-500">

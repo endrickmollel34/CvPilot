@@ -1,5 +1,6 @@
 import type { RawBodyRequest } from '@nestjs/common';
 import { Controller, Post, Body, Headers, Req, UseGuards, Get } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import type { Request } from 'express';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
@@ -11,8 +12,12 @@ import { CreateCheckoutDto } from './dto/create-checkout.dto';
 export class BillingController {
   constructor(private readonly billingService: BillingService) {}
 
-  // Raw body required for webhook signature verification — no JSON middleware on these routes
+  // Raw body required for webhook signature verification — no JSON middleware on these routes.
+  // Exempt from per-IP throttling: Stripe delivers webhooks from its own
+  // infrastructure, not "a user", and a burst of legitimate retries should
+  // never be dropped by ordinary request rate limiting.
   @Post('webhooks/stripe')
+  @SkipThrottle()
   handleStripeWebhook(
     @Headers('stripe-signature') signature: string,
     @Req() request: RawBodyRequest<Request>,
@@ -40,5 +45,11 @@ export class BillingController {
   @UseGuards(ClerkGuard)
   getSubscription(@CurrentUser() user: { clerkId: string }) {
     return this.billingService.getSubscription(user.clerkId);
+  }
+
+  @Get('billing/usage')
+  @UseGuards(ClerkGuard)
+  getUsage(@CurrentUser() user: { clerkId: string }) {
+    return this.billingService.getUsageSummary(user.clerkId);
   }
 }

@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { auth } from '@clerk/nextjs/server';
 import { redirect } from 'next/navigation';
 
+import { getUsage } from '@/lib/billingApi';
 import { TailoringWorkspace } from '@/components/tailoring/TailoringWorkspace';
 
 export const metadata = { title: 'Tailor CV for Job — CVPilot' };
@@ -12,8 +13,11 @@ interface Props {
 
 export default async function TailorPage({ params }: Props) {
   const { id } = await params;
-  const { userId } = await auth();
+  const { getToken, userId } = await auth();
   if (!userId) redirect('/sign-in');
+
+  const token = await getToken();
+  const usage = token ? await getUsage(token).catch(() => null) : null;
 
   return (
     <div className="flex h-screen flex-col">
@@ -24,7 +28,7 @@ export default async function TailorPage({ params }: Props) {
         <h1 className="font-semibold text-gray-900">Tailor for job</h1>
       </header>
       <div className="flex-1 overflow-y-auto">
-        <TailoringWorkspace masterCvId={id} />
+        <TailoringWorkspace masterCvId={id} usage={usage?.usage.tailorings} />
       </div>
     </div>
   );

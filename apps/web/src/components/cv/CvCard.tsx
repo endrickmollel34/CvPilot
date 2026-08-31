@@ -6,7 +6,8 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@clerk/nextjs';
 
 import { deleteCv, prefillCv, type CvDto } from '@/lib/cvApi';
-import { getFriendlyErrorMessage } from '@/lib/errorMessage';
+import { useApiError } from '@/hooks/useApiError';
+import { ActionableError } from '@/components/ui/ActionableError';
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-GB', {
@@ -46,7 +47,7 @@ export function CvCard({ cv }: { cv: CvDto }) {
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [prefilling, setPrefilling] = useState(false);
-  const [prefillError, setPrefillError] = useState<string | null>(null);
+  const prefillError = useApiError();
 
   const title = cv.title ?? cv.fileName ?? 'Untitled CV';
 
@@ -64,13 +65,13 @@ export function CvCard({ cv }: { cv: CvDto }) {
 
   async function handlePrefill() {
     setPrefilling(true);
-    setPrefillError(null);
+    prefillError.clear();
     try {
       const token = await getToken();
       const prefillCv_result = await prefillCv(token!, cv.id);
       router.push(`/cvs/${prefillCv_result.id}/edit`);
     } catch (err) {
-      setPrefillError(getFriendlyErrorMessage(err));
+      prefillError.setFromError(err);
       setPrefilling(false);
     }
   }
@@ -87,7 +88,11 @@ export function CvCard({ cv }: { cv: CvDto }) {
 
       {cv.source === 'upload' && <ParseStatusHint status={cv.parseStatus} />}
 
-      {prefillError && <p className="text-xs text-red-600">{prefillError}</p>}
+      {prefillError.message && (
+        <p className="text-xs text-red-600">
+          <ActionableError message={prefillError.message} quota={prefillError.quota} />
+        </p>
+      )}
 
       {confirmDelete ? (
         <div className="flex gap-2">

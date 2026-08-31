@@ -81,10 +81,8 @@ jobs:
           sleep 15
           curl --fail "${{ vars.PRODUCTION_API_URL }}/api/health" || exit 1
 
-      - name: Notify Sentry of release
-        run: |
-          curl -sS https://sentry.io/api/0/organizations/${{ secrets.SENTRY_ORG }}/releases/ \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.SENTRY_AUTH_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"version\": \"${{ github.sha }}\", \"projects\": [\"cvpilot-api\", \"cvpilot-web\"]}"
+      # Sentry is not yet integrated (see CLAUDE.md "Monitoring") — the
+      # release-notification step was removed rather than left pointing at
+      # secrets/a project that don't exist, since a step that can fail for
+      # reasons unrelated to the deploy itself is worse than no step.
+      # Re-add once Sentry is actually wired into the codebase.

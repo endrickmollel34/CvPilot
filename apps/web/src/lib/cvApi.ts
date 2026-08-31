@@ -40,7 +40,7 @@ export async function createCv(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Failed to create CV: ${res.status}`);
+    throwApiError(body, `Failed to create CV: ${res.status}`, res.status);
   }
   return res.json() as Promise<CvDto>;
 }
@@ -105,7 +105,7 @@ export async function getUploadUrl(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Failed to get upload URL: ${res.status}`);
+    throwApiError(body, `Failed to get upload URL: ${res.status}`, res.status);
   }
   return res.json() as Promise<{ uploadUrl: string; r2ObjectKey: string }>;
 }
@@ -124,7 +124,7 @@ export async function confirmUpload(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Failed to confirm upload: ${res.status}`);
+    throwApiError(body, `Failed to confirm upload: ${res.status}`, res.status);
   }
   return res.json() as Promise<CvDto>;
 }
@@ -146,7 +146,7 @@ export async function prefillCv(token: string, uploadCvId: string): Promise<CvDt
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Failed to prefill CV: ${res.status}`);
+    throwApiError(body, `Failed to prefill CV: ${res.status}`, res.status);
   }
   return res.json() as Promise<CvDto>;
 }

@@ -339,6 +339,37 @@ describe('CoverLetterService', () => {
     expect(result.items).toHaveLength(2);
   });
 
+  it('requests the cv relation so history rows can show the source CV title (History Phase 1)', async () => {
+    mockRepo.findAndCount.mockResolvedValue([[], 0]);
+
+    await service.listForUser('clerk-1', { page: 1, limit: 20 });
+
+    expect(mockRepo.findAndCount).toHaveBeenCalledWith(
+      expect.objectContaining({ relations: ['cv'] }),
+    );
+  });
+
+  // ─── findOneForUser() ────────────────────────────────────────────────────────
+
+  it('requests the cv relation when loading a single cover letter (History Phase 1)', async () => {
+    mockRepo.findOne.mockResolvedValue(MOCK_LETTER);
+
+    await service.findOneForUser('clerk-1', 'letter-1');
+
+    expect(mockRepo.findOne).toHaveBeenCalledWith({
+      where: { id: 'letter-1', userId: 'user-1' },
+      relations: ['cv'],
+    });
+  });
+
+  it('tolerates a missing cv relation (source CV since deleted) without throwing', async () => {
+    mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, cv: undefined });
+
+    const result = await service.findOneForUser('clerk-1', 'letter-1');
+
+    expect(result.cv).toBeUndefined();
+  });
+
   // ─── getDownloadUrl() ────────────────────────────────────────────────────────
 
   it('throws NotFoundException when downloading a letter that does not belong to the user', async () => {

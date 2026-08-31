@@ -8,6 +8,8 @@ import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { CoverLetterEntity } from '../../entities/cover-letter.entity';
+import { TailoringEntity } from '../../entities/tailoring.entity';
+import { CvEntity } from '../../entities/cv.entity';
 import { UserModule } from '../user/user.module';
 
 @Module({
@@ -17,6 +19,8 @@ import { UserModule } from '../user/user.module';
       PaymentEntity,
       AnalysisEntity,
       CoverLetterEntity,
+      TailoringEntity,
+      CvEntity,
     ]),
     UserModule,
   ],

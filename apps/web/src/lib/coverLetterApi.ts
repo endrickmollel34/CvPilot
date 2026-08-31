@@ -1,3 +1,4 @@
+import type { CvDto } from './cvApi';
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
 
@@ -16,6 +17,11 @@ export interface CoverLetterDto {
   status: 'queued' | 'processing' | 'generated' | 'failed' | 'downloaded';
   createdAt: string;
   generatedAt?: string;
+  // Undefined when the source CV has since been deleted — always optional.
+  // Note: the original job description is never persisted for cover
+  // letters (see the AI History investigation), so it is intentionally
+  // not part of this DTO — never fabricate or display one.
+  cv?: Pick<CvDto, 'id' | 'title' | 'fileName' | 'source'>;
 }
 
 export interface SubmitCoverLetterParams {
@@ -38,7 +44,7 @@ export async function submitCoverLetter(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Submit failed: ${res.status}`);
+    throwApiError(body, `Submit failed: ${res.status}`, res.status);
   }
   return res.json() as Promise<CoverLetterDto>;
 }
@@ -54,13 +60,20 @@ export async function getCoverLetter(token: string, id: string): Promise<CoverLe
 
 export async function listCoverLetters(
   token: string,
-): Promise<{ items: CoverLetterDto[]; total: number }> {
-  const res = await fetch(`${API_URL}/cover-letters`, {
+  page = 1,
+  limit = 20,
+): Promise<{ items: CoverLetterDto[]; total: number; page: number; limit: number }> {
+  const res = await fetch(`${API_URL}/cover-letters?page=${page}&limit=${limit}`, {
     headers: { Authorization: `Bearer ${token}` },
     cache: 'no-store',
   });
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
-  return res.json() as Promise<{ items: CoverLetterDto[]; total: number }>;
+  return res.json() as Promise<{
+    items: CoverLetterDto[];
+    total: number;
+    page: number;
+    limit: number;
+  }>;
 }
 
 export async function updateCoverLetter(

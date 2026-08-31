@@ -6,7 +6,10 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@clerk/nextjs';
 
 import { createCv, updateCvContent } from '@/lib/cvApi';
-import { getFriendlyErrorMessage } from '@/lib/errorMessage';
+import type { UsageCounter } from '@/lib/billingApi';
+import { useApiError } from '@/hooks/useApiError';
+import { ActionableError } from '@/components/ui/ActionableError';
+import { UsageHint } from '@/components/billing/UsageCard';
 import type { CvContent } from '@cvpilot/shared';
 
 const EXAMPLE_CONTENT: CvContent = {
@@ -60,35 +63,35 @@ const EXAMPLE_CONTENT: CvContent = {
   sectionOrder: ['summary', 'workExperience', 'education', 'skills', 'languages'],
 };
 
-export function NewCvChooser() {
+export function NewCvChooser({ usage }: { usage?: UsageCounter }) {
   const { getToken } = useAuth();
   const router = useRouter();
   const [loading, setLoading] = useState<'scratch' | 'example' | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const error = useApiError();
 
   async function handleScratch() {
     setLoading('scratch');
-    setError(null);
+    error.clear();
     try {
       const token = await getToken();
       const cv = await createCv(token!, 'Untitled CV');
       router.push(`/cvs/${cv.id}/edit`);
     } catch (err) {
-      setError(getFriendlyErrorMessage(err));
+      error.setFromError(err);
       setLoading(null);
     }
   }
 
   async function handleExample() {
     setLoading('example');
-    setError(null);
+    error.clear();
     try {
       const token = await getToken();
       const cv = await createCv(token!, 'Example CV');
       await updateCvContent(token!, cv.id, EXAMPLE_CONTENT);
       router.push(`/cvs/${cv.id}/edit`);
     } catch (err) {
-      setError(getFriendlyErrorMessage(err));
+      error.setFromError(err);
       setLoading(null);
     }
   }
@@ -101,11 +104,16 @@ export function NewCvChooser() {
         </Link>
         <h1 className="mt-4 text-2xl font-bold text-gray-900">Create a CV</h1>
         <p className="mt-1 text-sm text-gray-500">Choose how you want to get started.</p>
+        {usage && (
+          <div className="mt-2">
+            <UsageHint counter={usage} unit="CV" />
+          </div>
+        )}
       </div>
 
-      {error && (
+      {error.message && (
         <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {error}
+          <ActionableError message={error.message} quota={error.quota} />
         </div>
       )}
 

@@ -1,3 +1,4 @@
+import type { CvDto } from './cvApi';
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
 
@@ -23,6 +24,8 @@ export interface AnalysisDto {
   createdAt: string;
   completedAt?: string;
   atsReport?: AtsReportDto;
+  // Undefined when the source CV has since been deleted — always optional.
+  cv?: Pick<CvDto, 'id' | 'title' | 'fileName' | 'source'>;
 }
 
 export async function submitAnalysis(
@@ -39,7 +42,7 @@ export async function submitAnalysis(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Submit failed: ${res.status}`);
+    throwApiError(body, `Submit failed: ${res.status}`, res.status);
   }
   return res.json() as Promise<AnalysisDto>;
 }

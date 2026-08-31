@@ -12,7 +12,10 @@ import {
   downloadCoverLetterPdf,
   type CoverLetterDto,
 } from '@/lib/coverLetterApi';
-import { getFriendlyErrorMessage } from '@/lib/errorMessage';
+import type { UsageCounter } from '@/lib/billingApi';
+import { useApiError } from '@/hooks/useApiError';
+import { ActionableError } from '@/components/ui/ActionableError';
+import { UsageHint } from '@/components/billing/UsageCard';
 
 type Phase = 'setup' | 'processing' | 'editor';
 
@@ -25,7 +28,13 @@ const TONE_OPTIONS = [
 
 type Tone = (typeof TONE_OPTIONS)[number]['value'];
 
-export function CoverLetterWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
+export function CoverLetterWorkspace({
+  initialCvs,
+  usage,
+}: {
+  initialCvs: CvDto[];
+  usage?: UsageCounter;
+}) {
   const { getToken } = useAuth();
 
   const readyCvs = initialCvs.filter((c) => c.parseStatus === 'done');
@@ -34,7 +43,7 @@ export function CoverLetterWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
   const [companyName, setCompanyName] = useState('');
   const [jobDescription, setJobDescription] = useState('');
   const [tone, setTone] = useState<Tone>('professional');
-  const [formError, setFormError] = useState('');
+  const formError = useApiError();
 
   const [phase, setPhase] = useState<Phase>('setup');
   const [letter, setLetter] = useState<CoverLetterDto | null>(null);
@@ -56,21 +65,21 @@ export function CoverLetterWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setFormError('');
+    formError.clear();
     if (!selectedCvId) {
-      setFormError('Select a CV.');
+      formError.setMessage('Select a CV.');
       return;
     }
     if (!jobTitle.trim()) {
-      setFormError('Job title is required.');
+      formError.setMessage('Job title is required.');
       return;
     }
     if (!companyName.trim()) {
-      setFormError('Company name is required.');
+      formError.setMessage('Company name is required.');
       return;
     }
     if (jobDescription.trim().length < 50) {
-      setFormError('Job description must be at least 50 characters.');
+      formError.setMessage('Job description must be at least 50 characters.');
       return;
     }
 
@@ -98,7 +107,7 @@ export function CoverLetterWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
               setPhase('editor');
             } else if (updated.status === 'failed') {
               clearInterval(pollRef.current!);
-              setFormError('Generation failed. Please try again.');
+              formError.setMessage('Generation failed. Please try again.');
               setPhase('setup');
             }
           } catch {
@@ -107,7 +116,7 @@ export function CoverLetterWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
         })();
       }, 2000);
     } catch (err) {
-      setFormError(getFriendlyErrorMessage(err));
+      formError.setFromError(err);
     }
   }
 
@@ -317,7 +326,13 @@ export function CoverLetterWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
           </div>
         </div>
 
-        {formError && <p className="text-sm text-red-600">{formError}</p>}
+        {formError.message && (
+          <p className="text-sm text-red-600">
+            <ActionableError message={formError.message} quota={formError.quota} />
+          </p>
+        )}
+
+        {usage && <UsageHint counter={usage} unit="cover letters" suffix="this month" />}
 
         <button
           type="submit"

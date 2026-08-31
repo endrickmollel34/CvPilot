@@ -12,6 +12,7 @@ describe('BillingController', () => {
     createCheckoutSession: jest.fn(),
     createPortalSession: jest.fn(),
     getSubscription: jest.fn(),
+    getUsageSummary: jest.fn(),
     handleWebhook: jest.fn(),
   };
 
@@ -72,5 +73,23 @@ describe('BillingController', () => {
     await controller.getSubscription({ clerkId: 'clerk-1' });
 
     expect(mockBillingService.getSubscription).toHaveBeenCalledWith('clerk-1');
+  });
+
+  it('getUsage forwards the authenticated clerkId and returns the usage summary', async () => {
+    const summary = {
+      plan: 'free',
+      usage: {
+        analyses: { used: 1, limit: 2, remaining: 1 },
+        coverLetters: { used: 0, limit: 1, remaining: 1 },
+        tailorings: { used: 0, limit: 0, remaining: 0 },
+        builderCvs: { used: 1, limit: 1, remaining: 0 },
+      },
+    };
+    mockBillingService.getUsageSummary.mockResolvedValue(summary);
+
+    const result = await controller.getUsage({ clerkId: 'clerk-1' });
+
+    expect(mockBillingService.getUsageSummary).toHaveBeenCalledWith('clerk-1');
+    expect(result).toEqual(summary);
   });
 });

@@ -273,6 +273,69 @@ describe('TailoringService', () => {
     });
   });
 
+  // ─── listForUser() (History Phase 2) ───────────────────────────────────────────
+
+  describe('listForUser()', () => {
+    it('scopes the query to the requesting user and requests both CV relations in a single batched query', async () => {
+      mockRepo.find.mockResolvedValue([]);
+
+      await service.listForUser('clerk-1');
+
+      expect(mockRepo.find).toHaveBeenCalledTimes(1);
+      expect(mockRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'user-1' },
+          relations: ['masterCv', 'tailoredCv'],
+        }),
+      );
+    });
+
+    it('returns masterCv and tailoredCv metadata when both CVs still exist', async () => {
+      const withCvs = {
+        ...MOCK_DONE_TAILORING,
+        masterCv: { id: 'cv-1', title: 'My Master CV', fileName: undefined, source: 'builder' },
+        tailoredCv: {
+          id: 'cv-tailored-1',
+          title: 'Tailored — Backend Engineer',
+          source: 'tailored',
+        },
+      };
+      mockRepo.find.mockResolvedValue([withCvs]);
+
+      const result = await service.listForUser('clerk-1');
+
+      expect(result[0]?.masterCv).toEqual(withCvs.masterCv);
+      expect(result[0]?.tailoredCv).toEqual(withCvs.tailoredCv);
+    });
+
+    it('tolerates a missing masterCv or tailoredCv (deleted source/result CV) without throwing', async () => {
+      mockRepo.find.mockResolvedValue([
+        { ...MOCK_DONE_TAILORING, masterCv: undefined, tailoredCv: undefined },
+      ]);
+
+      const result = await service.listForUser('clerk-1');
+
+      expect(result[0]?.masterCv).toBeUndefined();
+      expect(result[0]?.tailoredCv).toBeUndefined();
+    });
+
+    it("never exposes another user's CV — the query is scoped by the tailoring's own userId, and masterCvId/tailoredCvId are only ever set to that user's own CVs at write time", async () => {
+      // The relation can only resolve to a CV row whose id equals this
+      // tailoring's own masterCvId/tailoredCvId, both of which are set
+      // exclusively by submit()/apply() to CVs already ownership-checked
+      // against this same user. There is no code path where a tailoring
+      // row's FK could point at another user's CV.
+      mockRepo.find.mockResolvedValue([MOCK_DONE_TAILORING]);
+
+      await service.listForUser('clerk-1');
+
+      expect(mockUserService.findByClerkId).toHaveBeenCalledWith('clerk-1');
+      expect(mockRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { userId: 'user-1' } }),
+      );
+    });
+  });
+
   // ─── findOneForUser() ─────────────────────────────────────────────────────────
 
   describe('findOneForUser()', () => {
@@ -289,6 +352,42 @@ describe('TailoringService', () => {
 
       const result = await service.findOneForUser('clerk-1', 'tailor-1');
       expect(result).toEqual(MOCK_DONE_TAILORING);
+    });
+
+    it('requests both the masterCv and tailoredCv relations', async () => {
+      mockRepo.findOne.mockResolvedValue(MOCK_DONE_TAILORING);
+
+      await service.findOneForUser('clerk-1', 'tailor-1');
+
+      expect(mockRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'tailor-1', userId: 'user-1' },
+        relations: ['masterCv', 'tailoredCv'],
+      });
+    });
+
+    it('returns applied-status tailoring with its decisions and resulting tailoredCv metadata intact', async () => {
+      const applied = {
+        ...MOCK_DONE_TAILORING,
+        status: 'applied',
+        tailoredCvId: 'cv-tailored-1',
+        tailoredCv: {
+          id: 'cv-tailored-1',
+          title: 'Tailored — Backend Engineer',
+          source: 'tailored',
+        },
+        decisions: [
+          { suggestionId: 's1', decision: 'accepted' },
+          { suggestionId: 's2', decision: 'accepted' },
+          { suggestionId: 's3', decision: 'rejected' },
+        ],
+      };
+      mockRepo.findOne.mockResolvedValue(applied);
+
+      const result = await service.findOneForUser('clerk-1', 'tailor-1');
+
+      expect(result.status).toBe('applied');
+      expect(result.decisions).toEqual(applied.decisions);
+      expect(result.tailoredCv).toEqual(applied.tailoredCv);
     });
   });
 

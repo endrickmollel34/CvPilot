@@ -126,6 +126,9 @@ export class TailoringService {
     const user = await this.userService.findByClerkId(clerkId);
     const tailoring = await this.tailoringRepo.findOne({
       where: { id: tailoringId, userId: user.id },
+      // LEFT JOINs — resolve to undefined rather than excluding the row if
+      // either CV has since been (soft-)deleted.
+      relations: ['masterCv', 'tailoredCv'],
     });
     if (!tailoring) throw new NotFoundException(`Tailoring ${tailoringId} not found`);
     return tailoring;
@@ -135,6 +138,9 @@ export class TailoringService {
     const user = await this.userService.findByClerkId(clerkId);
     return this.tailoringRepo.find({
       where: { userId: user.id },
+      // Single query with two LEFT JOINs — avoids N+1 lookups for the
+      // history list, same pattern as AnalysisService/CoverLetterService.
+      relations: ['masterCv', 'tailoredCv'],
       order: { createdAt: 'DESC' },
     });
   }

@@ -3,62 +3,31 @@
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@clerk/nextjs';
-import { Upload, CheckCircle, XCircle } from 'lucide-react';
+import { Upload } from 'lucide-react';
 
 import type { CvDto } from '@/lib/cvApi';
 import { getUploadUrl, confirmUpload, getCv } from '@/lib/cvApi';
 import { submitAnalysis, getAnalysis, type AnalysisDto } from '@/lib/analysisApi';
-import { getFriendlyErrorMessage } from '@/lib/errorMessage';
+import type { UsageCounter } from '@/lib/billingApi';
+import { useApiError } from '@/hooks/useApiError';
+import { ActionableError } from '@/components/ui/ActionableError';
+import { AnalysisResults } from '@/components/analysis/AnalysisResults';
+import { UsageHint } from '@/components/billing/UsageCard';
 
 type Phase = 'setup' | 'processing' | 'results';
-
-const CATEGORY_LABELS: Record<string, string> = {
-  MISSING_KEYWORD: 'Missing keyword',
-  WEAK_LANGUAGE: 'Weak language',
-  STRUCTURE: 'Structure',
-  ATS_WARNING: 'ATS warning',
-};
-
-const PRIORITY_COLOR: Record<string, string> = {
-  HIGH: 'border-l-red-400 bg-red-50',
-  MEDIUM: 'border-l-amber-400 bg-amber-50',
-  LOW: 'border-l-gray-300 bg-gray-50',
-};
-
-function ScoreRing({ score }: { score: number }) {
-  const r = 44;
-  const circ = 2 * Math.PI * r;
-  const fill = (score / 100) * circ;
-  const color = score >= 70 ? '#16a34a' : score >= 40 ? '#d97706' : '#dc2626';
-  return (
-    <div className="relative flex items-center justify-center" style={{ width: 120, height: 120 }}>
-      <svg width="120" height="120" viewBox="0 0 120 120" className="-rotate-90">
-        <circle cx="60" cy="60" r={r} fill="none" stroke="#e5e7eb" strokeWidth="10" />
-        <circle
-          cx="60"
-          cy="60"
-          r={r}
-          fill="none"
-          stroke={color}
-          strokeWidth="10"
-          strokeDasharray={`${fill} ${circ}`}
-          strokeLinecap="round"
-        />
-      </svg>
-      <div className="absolute text-center">
-        <p className="text-2xl font-bold text-gray-900">{score}</p>
-        <p className="text-xs text-gray-500">/ 100</p>
-      </div>
-    </div>
-  );
-}
 
 const ACCEPTED_TYPES = [
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ];
 
-export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
+export function AnalysisWorkspace({
+  initialCvs,
+  usage,
+}: {
+  initialCvs: CvDto[];
+  usage?: UsageCounter;
+}) {
   const { getToken } = useAuth();
 
   const [uploadedCvs, setUploadedCvs] = useState<CvDto[]>(
@@ -69,13 +38,13 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
   );
 
   const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState('');
+  const uploadError = useApiError();
   const [parsePollingId, setParsePollingId] = useState<string | null>(null);
 
   const [jobTitle, setJobTitle] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [jobDescription, setJobDescription] = useState('');
-  const [formError, setFormError] = useState('');
+  const formError = useApiError();
 
   const [phase, setPhase] = useState<Phase>('setup');
   const [analysis, setAnalysis] = useState<AnalysisDto | null>(null);
@@ -94,10 +63,10 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!ACCEPTED_TYPES.includes(file.type)) {
-      setUploadError('Only PDF and DOCX files are supported.');
+      uploadError.setMessage('Only PDF and DOCX files are supported.');
       return;
     }
-    setUploadError('');
+    uploadError.clear();
     setUploading(true);
 
     try {
@@ -133,7 +102,7 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
             } else if (updated.parseStatus === 'failed') {
               clearInterval(parseRef.current!);
               setParsePollingId(null);
-              setUploadError('Text extraction failed. Try a different file.');
+              uploadError.setMessage('Text extraction failed. Try a different file.');
             }
           } catch {
             /* keep polling */
@@ -141,7 +110,7 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
         })();
       }, 2000);
     } catch (err) {
-      setUploadError(getFriendlyErrorMessage(err, 'Upload failed. Please try again.'));
+      uploadError.setFromError(err, 'Upload failed. Please try again.');
     } finally {
       setUploading(false);
       e.target.value = '';
@@ -150,17 +119,17 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setFormError('');
+    formError.clear();
     if (!selectedCvId) {
-      setFormError('Select a CV to analyse.');
+      formError.setMessage('Select a CV to analyse.');
       return;
     }
     if (!jobTitle.trim()) {
-      setFormError('Job title is required.');
+      formError.setMessage('Job title is required.');
       return;
     }
     if (jobDescription.trim().length < 50) {
-      setFormError('Job description must be at least 50 characters.');
+      formError.setMessage('Job description must be at least 50 characters.');
       return;
     }
 
@@ -187,7 +156,7 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
               setPhase('results');
             } else if (updated.status === 'failed') {
               clearInterval(pollRef.current!);
-              setFormError('Analysis failed. Please try again.');
+              formError.setMessage('Analysis failed. Please try again.');
               setPhase('setup');
             }
           } catch {
@@ -196,7 +165,7 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
         })();
       }, 2000);
     } catch (err) {
-      setFormError(getFriendlyErrorMessage(err));
+      formError.setFromError(err);
     }
   }
 
@@ -211,95 +180,14 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
   }
 
   if (phase === 'results' && analysis) {
-    const suggestions = analysis.suggestions ?? [];
-    const atsReport = analysis.atsReport;
-    const score = analysis.matchScore ?? 0;
-
     return (
-      <div className="mx-auto max-w-3xl space-y-8">
-        {/* Score header */}
-        <div className="flex items-center gap-8 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-          <ScoreRing score={score} />
-          <div>
-            <h2 className="text-xl font-bold text-gray-900">
-              {score >= 70 ? 'Strong match' : score >= 40 ? 'Partial match' : 'Low match'}
-            </h2>
-            <p className="mt-1 text-sm text-gray-500">
-              {analysis.jobTitle ?? 'Role'}
-              {analysis.companyName ? ` at ${analysis.companyName}` : ''}
-            </p>
-            {atsReport?.atsScore != null && (
-              <p className="mt-1 text-xs text-gray-400">ATS keyword score: {atsReport.atsScore}%</p>
-            )}
-            <div className="mt-4 flex gap-2">
-              <Link
-                href="/cover-letter"
-                className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
-              >
-                Generate cover letter
-              </Link>
-              <button
-                onClick={() => {
-                  setAnalysis(null);
-                  setPhase('setup');
-                }}
-                className="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
-              >
-                New analysis
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* ATS Keywords */}
-        {atsReport && (
-          <div>
-            <h3 className="mb-3 text-sm font-semibold text-gray-700">ATS Keywords</h3>
-            <div className="flex flex-wrap gap-2">
-              {(atsReport.keywordHits ?? []).map((k) => (
-                <span
-                  key={k.keyword}
-                  className="inline-flex items-center gap-1 rounded-full border border-green-200 bg-green-50 px-2.5 py-0.5 text-xs font-medium text-green-700"
-                >
-                  <CheckCircle className="h-3 w-3" />
-                  {k.keyword}
-                </span>
-              ))}
-              {(atsReport.missingKeywords ?? []).map((kw) => (
-                <span
-                  key={kw}
-                  className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-0.5 text-xs font-medium text-gray-500"
-                >
-                  <XCircle className="h-3 w-3" />
-                  {kw}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Suggestions */}
-        {suggestions.length > 0 && (
-          <div>
-            <h3 className="mb-3 text-sm font-semibold text-gray-700">
-              {suggestions.length} improvement suggestions
-            </h3>
-            <div className="flex flex-col gap-2">
-              {suggestions.map((s, i) => (
-                <div
-                  key={i}
-                  className={`rounded-lg border-l-4 p-4 text-sm ${PRIORITY_COLOR[s.priority] ?? 'bg-gray-50'}`}
-                >
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-400">
-                    {CATEGORY_LABELS[s.category] ?? s.category} · {s.priority}
-                  </span>
-                  {s.text}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+      <AnalysisResults
+        analysis={analysis}
+        onNewAnalysis={() => {
+          setAnalysis(null);
+          setPhase('setup');
+        }}
+      />
     );
   }
 
@@ -366,7 +254,11 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
               className="sr-only"
             />
           </label>
-          {uploadError && <p className="mt-2 text-xs text-red-600">{uploadError}</p>}
+          {uploadError.message && (
+            <p className="mt-2 text-xs text-red-600">
+              <ActionableError message={uploadError.message} quota={uploadError.quota} />
+            </p>
+          )}
         </div>
 
         {/* Job details */}
@@ -412,7 +304,13 @@ export function AnalysisWorkspace({ initialCvs }: { initialCvs: CvDto[] }) {
           </div>
         </div>
 
-        {formError && <p className="text-sm text-red-600">{formError}</p>}
+        {formError.message && (
+          <p className="text-sm text-red-600">
+            <ActionableError message={formError.message} quota={formError.quota} />
+          </p>
+        )}
+
+        {usage && <UsageHint counter={usage} unit="analyses" suffix="this month" />}
 
         <button
           type="submit"

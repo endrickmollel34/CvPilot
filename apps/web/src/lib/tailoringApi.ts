@@ -1,5 +1,6 @@
 import type { TailoringDecision, TailoringSuggestion, TailoringStatus } from '@cvpilot/shared';
 
+import type { CvDto } from './cvApi';
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
 
@@ -18,6 +19,9 @@ export interface TailoringDto {
   status: TailoringStatus;
   createdAt: string;
   completedAt?: string;
+  // Undefined when the source/result CV has since been deleted — always optional.
+  masterCv?: Pick<CvDto, 'id' | 'title' | 'fileName' | 'source'>;
+  tailoredCv?: Pick<CvDto, 'id' | 'title' | 'fileName' | 'source'>;
 }
 
 export async function submitTailoring(
@@ -39,9 +43,18 @@ export async function submitTailoring(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Submit failed: ${res.status}`);
+    throwApiError(body, `Submit failed: ${res.status}`, res.status);
   }
   return res.json() as Promise<TailoringDto>;
+}
+
+export async function listTailorings(token: string): Promise<TailoringDto[]> {
+  const res = await fetch(`${API_URL}/tailorings`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new Error(`List failed: ${res.status}`);
+  return res.json() as Promise<TailoringDto[]>;
 }
 
 export async function getTailoring(token: string, tailoringId: string): Promise<TailoringDto> {
@@ -64,7 +77,7 @@ export async function applyTailoring(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwApiError(body, `Apply failed: ${res.status}`);
+    throwApiError(body, `Apply failed: ${res.status}`, res.status);
   }
   return res.json() as Promise<{ tailoredCvId: string }>;
 }

@@ -129,7 +129,9 @@ export class AnalysisService extends WorkerHost {
     const user = await this.userService.findByClerkId(clerkId);
     return this.analysisRepo.find({
       where: { userId: user.id },
-      relations: ['atsReport'],
+      // 'cv' is a LEFT JOIN — resolves to undefined rather than excluding
+      // the analysis if the source CV has since been (soft-)deleted.
+      relations: ['atsReport', 'cv'],
       order: { createdAt: 'DESC' },
     });
   }
@@ -138,7 +140,7 @@ export class AnalysisService extends WorkerHost {
     const user = await this.userService.findByClerkId(clerkId);
     const analysis = await this.analysisRepo.findOne({
       where: { id, userId: user.id },
-      relations: ['atsReport'],
+      relations: ['atsReport', 'cv'],
     });
     if (!analysis) throw new NotFoundException(`Analysis ${id} not found`);
     return analysis;

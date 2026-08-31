@@ -7,7 +7,8 @@ import { useAuth } from '@clerk/nextjs';
 import { CheckCircle, Upload } from 'lucide-react';
 
 import { getUploadUrl, confirmUpload, getCv, prefillCv } from '@/lib/cvApi';
-import { getFriendlyErrorMessage } from '@/lib/errorMessage';
+import { useApiError } from '@/hooks/useApiError';
+import { ActionableError } from '@/components/ui/ActionableError';
 
 type Phase = 'choose' | 'uploading' | 'parsing' | 'ready' | 'prefilling';
 
@@ -23,7 +24,7 @@ export function NewCvUpload() {
   const [phase, setPhase] = useState<Phase>('choose');
   const [fileName, setFileName] = useState('');
   const [uploadedCvId, setUploadedCvId] = useState<string | null>(null);
-  const [error, setError] = useState('');
+  const error = useApiError();
   const parseRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(
@@ -37,10 +38,10 @@ export function NewCvUpload() {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!ACCEPTED_TYPES.includes(file.type)) {
-      setError('Only PDF and DOCX files are supported.');
+      error.setMessage('Only PDF and DOCX files are supported.');
       return;
     }
-    setError('');
+    error.clear();
     setFileName(file.name);
     setPhase('uploading');
 
@@ -74,7 +75,7 @@ export function NewCvUpload() {
               setPhase('ready');
             } else if (updated.parseStatus === 'failed') {
               clearInterval(parseRef.current!);
-              setError('Text extraction failed. Try a different file.');
+              error.setMessage('Text extraction failed. Try a different file.');
               setPhase('choose');
             }
           } catch {
@@ -83,7 +84,7 @@ export function NewCvUpload() {
         })();
       }, 2000);
     } catch (err) {
-      setError(getFriendlyErrorMessage(err, 'Upload failed. Please try again.'));
+      error.setFromError(err, 'Upload failed. Please try again.');
       setPhase('choose');
     } finally {
       e.target.value = '';
@@ -93,13 +94,13 @@ export function NewCvUpload() {
   async function handleUseExtractedDetails() {
     if (!uploadedCvId) return;
     setPhase('prefilling');
-    setError('');
+    error.clear();
     try {
       const token = await getToken();
       const cv = await prefillCv(token!, uploadedCvId);
       router.push(`/cvs/${cv.id}/edit`);
     } catch (err) {
-      setError(getFriendlyErrorMessage(err));
+      error.setFromError(err);
       setPhase('ready');
     }
   }
@@ -116,9 +117,9 @@ export function NewCvUpload() {
         </p>
       </div>
 
-      {error && (
+      {error.message && (
         <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {error}
+          <ActionableError message={error.message} quota={error.quota} />
         </div>
       )}
 

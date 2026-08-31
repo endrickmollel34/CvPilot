@@ -169,10 +169,18 @@ Set these in `.env.local` (frontend) and `.env` (backend). See `.env.example` in
 
 ## Monitoring
 
+**Not yet implemented.** Deferred until immediately after initial deployment — none of the
+tools below are installed or wired into the codebase today; treat this as a roadmap, not a
+description of current behavior.
+
 - **Sentry** — error tracking (frontend + backend)
 - **Axiom** — structured application logs (NestJS)
 - **PostHog** — user analytics and funnels (IP anonymisation enabled, no PII in events)
-- **BetterUptime** — external uptime monitoring
+- **BetterUptime** — external uptime monitoring, would point at `GET /api/health`
+
+The Reliability Layer (Production Readiness Phase 1) added `GET /api/health` (checks
+PostgreSQL + Redis connectivity) and a wired-up `GlobalExceptionFilter` that logs every
+unexpected 5xx server-side — this is today's only production error visibility.
 
 ## Security Constraints
 

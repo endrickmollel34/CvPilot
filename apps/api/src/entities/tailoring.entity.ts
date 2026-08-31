@@ -4,9 +4,12 @@ import {
   Column,
   CreateDateColumn,
   DeleteDateColumn,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
 
 import type { TailoringSuggestion, TailoringDecision, TailoringStatus } from '@cvpilot/shared';
+import type { CvEntity } from './cv.entity';
 
 @Entity('tailorings')
 export class TailoringEntity {
@@ -54,4 +57,16 @@ export class TailoringEntity {
 
   @DeleteDateColumn({ name: 'deleted_at', type: 'timestamptz', nullable: true })
   deletedAt?: Date;
+
+  // Unidirectional LEFT JOINs onto the existing master_cv_id/tailored_cv_id
+  // columns — resolve to undefined rather than excluding the row if the CV
+  // has since been (soft-)deleted. No migration needed: the FK columns
+  // already exist, only the relation mapping is new (History Phase 2).
+  @ManyToOne('CvEntity')
+  @JoinColumn({ name: 'master_cv_id' })
+  masterCv?: CvEntity;
+
+  @ManyToOne('CvEntity')
+  @JoinColumn({ name: 'tailored_cv_id' })
+  tailoredCv?: CvEntity;
 }

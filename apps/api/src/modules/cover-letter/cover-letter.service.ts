@@ -180,8 +180,11 @@ export class CoverLetterService extends WorkerHost {
     const page = dto.page ?? 1;
     const limit = dto.limit ?? 20;
 
+    // 'cv' is a LEFT JOIN — resolves to undefined rather than excluding the
+    // letter if the source CV has since been (soft-)deleted.
     const [items, total] = await this.repo.findAndCount({
       where: { userId: user.id },
+      relations: ['cv'],
       order: { createdAt: 'DESC' },
       skip: (page - 1) * limit,
       take: limit,
@@ -192,7 +195,10 @@ export class CoverLetterService extends WorkerHost {
 
   async findOneForUser(clerkId: string, id: string): Promise<CoverLetterEntity> {
     const user = await this.userService.findByClerkId(clerkId);
-    const letter = await this.repo.findOne({ where: { id, userId: user.id } });
+    const letter = await this.repo.findOne({
+      where: { id, userId: user.id },
+      relations: ['cv'],
+    });
     if (!letter) throw new NotFoundException(`Cover letter ${id} not found`);
     return letter;
   }

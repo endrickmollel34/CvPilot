@@ -8,6 +8,15 @@ import { FileText, BarChart3, Mail, Plus, Upload, Wand2 } from 'lucide-react';
 import { listCvs } from '@/lib/cvApi';
 import { listAnalyses } from '@/lib/analysisApi';
 import { listCoverLetters } from '@/lib/coverLetterApi';
+import { listTailorings } from '@/lib/tailoringApi';
+import {
+  getSubscription,
+  getUsage,
+  type SubscriptionDto,
+  type UsageSummary,
+} from '@/lib/billingApi';
+import { BillingSummary } from '@/components/billing/BillingSummary';
+import { PlanUsageCard } from '@/components/billing/UsageCard';
 
 function ScoreBadge({ score }: { score: number }) {
   const color =
@@ -47,18 +56,26 @@ export default async function DashboardPage({ searchParams }: Props) {
 
   const token = await getToken();
 
-  const [cvs, analyses, coverLettersRes] = await Promise.all([
+  const [cvs, analyses, coverLettersRes, tailorings, subscription, usage] = await Promise.all([
     token ? listCvs(token).catch(() => []) : [],
     token ? listAnalyses(token).catch(() => []) : [],
     token
-      ? listCoverLetters(token).catch(() => ({ items: [], total: 0 }))
-      : { items: [], total: 0 },
+      ? listCoverLetters(token).catch(() => ({ items: [], total: 0, page: 1, limit: 20 }))
+      : { items: [], total: 0, page: 1, limit: 20 },
+    token ? listTailorings(token).catch(() => []) : [],
+    token
+      ? getSubscription(token).catch((): SubscriptionDto | null | 'error' => 'error')
+      : ('error' as const),
+    token ? getUsage(token).catch((): UsageSummary | 'error' => 'error') : ('error' as const),
   ]);
 
   const recentCvs = cvs.slice(0, 3);
   const recentAnalyses = analyses.filter((a) => a.status === 'done').slice(0, 3);
   const recentLetters = coverLettersRes.items
     .filter((l) => l.status === 'generated' || l.status === 'downloaded')
+    .slice(0, 3);
+  const recentTailorings = tailorings
+    .filter((t) => t.status === 'done' || t.status === 'applied')
     .slice(0, 3);
 
   const uploadedCvsReady = cvs.filter((c) => c.source === 'upload' && c.parseStatus === 'done');
@@ -82,6 +99,9 @@ export default async function DashboardPage({ searchParams }: Props) {
         <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
         <p className="mt-1 text-sm text-gray-500">Everything you need to land your next role.</p>
       </div>
+
+      <BillingSummary subscription={subscription} />
+      <PlanUsageCard usage={usage} />
 
       {/* Stats */}
       <div className="mb-8 grid grid-cols-3 gap-4">
@@ -211,20 +231,25 @@ export default async function DashboardPage({ searchParams }: Props) {
             <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
               Recent analyses
             </h2>
-            <Link href="/analyze" className="text-xs text-indigo-600 hover:underline">
-              New analysis
-            </Link>
+            <div className="flex items-center gap-3">
+              <Link href="/analyses" className="text-xs text-indigo-600 hover:underline">
+                View all
+              </Link>
+              <Link href="/analyze" className="text-xs text-indigo-600 hover:underline">
+                New analysis
+              </Link>
+            </div>
           </div>
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
             {recentAnalyses.map((a) => (
               <div key={a.id} className="flex items-center justify-between px-5 py-3.5">
-                <div className="min-w-0">
+                <Link href={`/analyses/${a.id}`} className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-gray-900">
                     {a.jobTitle ?? 'Untitled role'}
                     {a.companyName ? ` — ${a.companyName}` : ''}
                   </p>
                   <p className="text-xs text-gray-400">{formatDate(a.createdAt)}</p>
-                </div>
+                </Link>
                 <div className="flex shrink-0 items-center gap-3 ml-4">
                   {a.matchScore != null && <ScoreBadge score={a.matchScore} />}
                   <Link
@@ -247,14 +272,19 @@ export default async function DashboardPage({ searchParams }: Props) {
             <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
               Recent cover letters
             </h2>
-            <Link href="/cover-letter" className="text-xs text-indigo-600 hover:underline">
-              New letter
-            </Link>
+            <div className="flex items-center gap-3">
+              <Link href="/cover-letters" className="text-xs text-indigo-600 hover:underline">
+                View all
+              </Link>
+              <Link href="/cover-letter" className="text-xs text-indigo-600 hover:underline">
+                New letter
+              </Link>
+            </div>
           </div>
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
             {recentLetters.map((l) => (
               <div key={l.id} className="flex items-center justify-between px-5 py-3.5">
-                <div className="min-w-0">
+                <Link href={`/cover-letters/${l.id}`} className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-gray-900">
                     {l.jobTitle ?? 'Untitled role'}
                     {l.companyName ? ` — ${l.companyName}` : ''}
@@ -262,13 +292,54 @@ export default async function DashboardPage({ searchParams }: Props) {
                   <p className="text-xs text-gray-400 capitalize">
                     {l.tone} · {formatDate(l.createdAt)}
                   </p>
-                </div>
+                </Link>
                 <Link
                   href="/cover-letter"
                   className="ml-4 rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700 shrink-0"
                 >
                   New letter
                 </Link>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Recent tailorings */}
+      {recentTailorings.length > 0 && (
+        <section className="mb-8">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
+              Recent tailorings
+            </h2>
+            <div className="flex items-center gap-3">
+              <Link href="/tailorings" className="text-xs text-indigo-600 hover:underline">
+                View all
+              </Link>
+              <Link href="/cvs" className="text-xs text-indigo-600 hover:underline">
+                Tailor a CV
+              </Link>
+            </div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
+            {recentTailorings.map((t) => (
+              <div key={t.id} className="flex items-center justify-between px-5 py-3.5">
+                <Link href={`/tailorings/${t.id}`} className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-gray-900">
+                    {t.jobTitle ?? 'Untitled role'}
+                    {t.companyName ? ` — ${t.companyName}` : ''}
+                  </p>
+                  <p className="text-xs text-gray-400">{formatDate(t.createdAt)}</p>
+                </Link>
+                <span
+                  className={`ml-4 inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-semibold ${
+                    t.status === 'applied'
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-amber-100 text-amber-700'
+                  }`}
+                >
+                  {t.status === 'applied' ? 'Applied' : 'Ready to review'}
+                </span>
               </div>
             ))}
           </div>

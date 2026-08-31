@@ -1,7 +1,7 @@
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { ServiceUnavailableException, BadRequestException } from '@nestjs/common';
+import { Logger, ServiceUnavailableException, BadRequestException } from '@nestjs/common';
 
 import { StripePaymentProvider } from './stripe.provider';
 
@@ -218,6 +218,205 @@ describe('StripePaymentProvider', () => {
       );
     });
 
+    it.each([
+      ['active', 'active'],
+      ['past_due', 'past_due'],
+      ['canceled', 'cancelled'],
+      ['trialing', 'trialing'],
+      ['unpaid', 'incomplete'], // anything unrecognised falls back to 'incomplete'
+    ])(
+      'maps a customer.subscription.updated event with Stripe status "%s" to "%s"',
+      async (stripeStatus, expectedStatus) => {
+        const provider = await buildProvider(makeConfig());
+        mockWebhooksConstructEvent.mockReturnValue({
+          type: 'customer.subscription.updated',
+          data: {
+            object: {
+              id: 'sub_1',
+              customer: 'cus_1',
+              status: stripeStatus,
+              cancel_at_period_end: false,
+              current_period_start: 1_700_000_000,
+              current_period_end: 1_702_592_000,
+              items: { data: [{ price: { id: 'price_pro_real123' } }] },
+            },
+          },
+        });
+
+        const result = provider.verifyAndParseWebhook({
+          rawBody: Buffer.from('{}'),
+          signature: 'sig',
+        });
+
+        expect(result).toEqual(
+          expect.objectContaining({
+            type: 'subscription.updated',
+            providerCustomerId: 'cus_1',
+            providerSubscriptionId: 'sub_1',
+            plan: 'pro',
+            subscriptionStatus: expectedStatus,
+            cancelAtPeriodEnd: false,
+          }),
+        );
+      },
+    );
+
+    it('maps a customer.subscription.updated event with cancel_at_period_end true', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'customer.subscription.updated',
+        data: {
+          object: {
+            id: 'sub_1',
+            customer: 'cus_1',
+            status: 'active',
+            cancel_at_period_end: true,
+            current_period_start: 1_700_000_000,
+            current_period_end: 1_702_592_000,
+            items: { data: [{ price: { id: 'price_student_real123' } }] },
+          },
+        },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          plan: 'student',
+          subscriptionStatus: 'active',
+          cancelAtPeriodEnd: true,
+        }),
+      );
+    });
+
+    it('maps an unrecognised price id on customer.subscription.updated to plan "free"', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'customer.subscription.updated',
+        data: {
+          object: {
+            id: 'sub_1',
+            customer: 'cus_1',
+            status: 'active',
+            cancel_at_period_end: false,
+            current_period_start: 1_700_000_000,
+            current_period_end: 1_702_592_000,
+            items: { data: [{ price: { id: 'price_unknown' } }] },
+          },
+        },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(expect.objectContaining({ plan: 'free' }));
+    });
+
+    it('maps a customer.subscription.deleted event to subscription.cancelled', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'customer.subscription.deleted',
+        data: {
+          object: {
+            id: 'sub_1',
+            customer: 'cus_1',
+          },
+        },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual({
+        type: 'subscription.cancelled',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
+        subscriptionStatus: 'cancelled',
+      });
+    });
+
+    it('maps an invoice.payment_succeeded event with amount and currency', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'invoice.payment_succeeded',
+        data: {
+          object: {
+            customer: 'cus_1',
+            subscription: 'sub_1',
+            payment_intent: 'pi_1',
+            amount_paid: 999,
+            currency: 'gbp',
+          },
+        },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual({
+        type: 'payment.succeeded',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
+        providerPaymentId: 'pi_1',
+        paymentStatus: 'succeeded',
+        paymentMethod: 'CARD',
+        amountMinorUnits: 999,
+        currency: 'GBP',
+      });
+    });
+
+    it('maps an invoice.payment_failed event', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'invoice.payment_failed',
+        data: {
+          object: {
+            customer: 'cus_1',
+            subscription: 'sub_1',
+          },
+        },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual({
+        type: 'payment.failed',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
+        paymentStatus: 'failed',
+      });
+    });
+
+    it('returns null for an unhandled Stripe event type', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'customer.updated',
+        data: { object: {} },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toBeNull();
+    });
+
     it('throws BadRequestException for an invalid webhook signature', async () => {
       const provider = await buildProvider(makeConfig());
       mockWebhooksConstructEvent.mockImplementation(() => {
@@ -227,6 +426,57 @@ describe('StripePaymentProvider', () => {
       expect(() =>
         provider.verifyAndParseWebhook({ rawBody: Buffer.from('{}'), signature: 'bad-sig' }),
       ).toThrow(BadRequestException);
+    });
+
+    // ─── Diagnostics (Production Readiness Phase 1) ──────────────────────────
+    // A misconfigured/rotated STRIPE_WEBHOOK_SECRET must leave a trace —
+    // previously this failure was completely silent server-side.
+
+    it('logs a warning with the verification-failure reason when the signature is invalid', async () => {
+      const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockImplementation(() => {
+        throw new Error('No signatures found matching the expected signature for payload');
+      });
+
+      try {
+        provider.verifyAndParseWebhook({
+          rawBody: Buffer.from('{"secret":"do-not-log-me"}'),
+          signature: 'super-secret-signature-value',
+        });
+      } catch {
+        // BadRequestException is already asserted separately above.
+      }
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No signatures found matching the expected signature for payload'),
+      );
+
+      warnSpy.mockRestore();
+    });
+
+    it('never logs the raw body, signature header, or webhook secret on verification failure', async () => {
+      const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockImplementation(() => {
+        throw new Error('Timestamp outside the tolerance zone');
+      });
+
+      try {
+        provider.verifyAndParseWebhook({
+          rawBody: Buffer.from('{"secret":"do-not-log-me"}'),
+          signature: 'super-secret-signature-value',
+        });
+      } catch {
+        // expected
+      }
+
+      const loggedText = warnSpy.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(loggedText).not.toContain('do-not-log-me');
+      expect(loggedText).not.toContain('super-secret-signature-value');
+      expect(loggedText).not.toContain('whsec_real123'); // STRIPE_WEBHOOK_SECRET from makeConfig()
+
+      warnSpy.mockRestore();
     });
 
     it('cancels a subscription', async () => {
