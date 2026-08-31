@@ -76,7 +76,11 @@ export class AuthService {
 
   private async deleteUser(data: ClerkUserData): Promise<void> {
     try {
-      await this.userService.deleteByClerkId(data.id);
+      // 'continue': the Clerk account is already gone by the time this
+      // webhook arrives, so there is no user-facing surface left to retry
+      // a failed Stripe cancellation through — see
+      // UserService.CancellationFailureBehavior.
+      await this.userService.deleteByClerkId(data.id, 'continue');
     } catch {
       // User may not exist locally yet (e.g., deleted before first sync)
       this.logger.warn(`Clerk user.deleted: no local record for ${data.id}`);

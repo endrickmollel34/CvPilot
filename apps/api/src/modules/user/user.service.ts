@@ -1,27 +1,69 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { type Repository } from 'typeorm';
+import { Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { type Repository, type DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { createClerkClient, type ClerkClient } from '@clerk/backend';
+import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
 
 import { UserEntity } from '../../entities/user.entity';
 import { ProfileEntity } from '../../entities/profile.entity';
+import { CvEntity } from '../../entities/cv.entity';
+import { CoverLetterEntity } from '../../entities/cover-letter.entity';
+import { AnalysisEntity } from '../../entities/analysis.entity';
+import { TailoringEntity } from '../../entities/tailoring.entity';
+import { SubscriptionEntity } from '../../entities/subscription.entity';
+import { StripePaymentProvider } from '../billing/providers/stripe.provider';
+
+/**
+ * What to do if cancelling the user's Stripe subscription fails during
+ * account deletion:
+ *   - 'abort'    — self-service DELETE /users/me. The Clerk identity still
+ *      exists, so the user can retry; nothing is erased until billing is
+ *      confirmed stopped.
+ *   - 'continue' — the Clerk user.deleted webhook. The Clerk account is
+ *      already gone by the time this runs, so there is no user-facing
+ *      retry surface — erasure proceeds anyway rather than leaving CVPilot
+ *      personal data permanently stuck, and the failure is logged loudly
+ *      for manual Stripe follow-up.
+ */
+export type CancellationFailureBehavior = 'abort' | 'continue';
 
 @Injectable()
 export class UserService {
   private readonly logger = new Logger(UserService.name);
   private readonly clerkClient: ClerkClient;
+  private readonly s3: S3Client;
+  private readonly bucket: string;
 
   constructor(
     @InjectRepository(UserEntity)
     private readonly userRepo: Repository<UserEntity>,
     @InjectRepository(ProfileEntity)
     private readonly profileRepo: Repository<ProfileEntity>,
+    @InjectRepository(CvEntity)
+    private readonly cvRepo: Repository<CvEntity>,
+    @InjectRepository(CoverLetterEntity)
+    private readonly coverLetterRepo: Repository<CoverLetterEntity>,
+    @InjectRepository(SubscriptionEntity)
+    private readonly subscriptionRepo: Repository<SubscriptionEntity>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
+    private readonly stripeProvider: StripePaymentProvider,
     config: ConfigService,
   ) {
     this.clerkClient = createClerkClient({
       secretKey: config.getOrThrow<string>('CLERK_SECRET_KEY'),
     });
+
+    this.s3 = new S3Client({
+      region: 'auto',
+      endpoint: config.getOrThrow<string>('CLOUDFLARE_R2_ENDPOINT'),
+      credentials: {
+        accessKeyId: config.getOrThrow<string>('CLOUDFLARE_R2_ACCESS_KEY_ID'),
+        secretAccessKey: config.getOrThrow<string>('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
+      },
+    });
+    this.bucket = config.getOrThrow<string>('CLOUDFLARE_R2_BUCKET_NAME');
   }
 
   /**
@@ -78,9 +120,138 @@ export class UserService {
     return this.findOrCreateByClerkId(clerkId, primaryEmail.emailAddress);
   }
 
-  async deleteByClerkId(clerkId: string): Promise<void> {
+  /**
+   * Real account-data erasure, shared by the self-service `DELETE /users/me`
+   * endpoint and the Clerk `user.deleted` webhook. Erases every CVPilot
+   * personal-data record owned by this user: CVs (incl. their R2 files),
+   * analyses (and their ATS reports, via cascade), cover letters (incl.
+   * their R2 PDF files, if downloaded), tailorings, and the user/profile
+   * row itself.
+   *
+   * Before any of that, an active Stripe subscription is cancelled first
+   * (see cancelActiveSubscription()) — the customer must not keep being
+   * billed for a CVPilot account whose data has been erased. Only the
+   * local `subscriptions`/`payments` rows are touched by the DB erasure
+   * itself; they cascade-delete along with the user row per their existing
+   * FK definitions (InitialSchema migration). `cancellationFailure`
+   * controls what happens if the Stripe API call fails — see
+   * CancellationFailureBehavior's docstring.
+   */
+  async deleteByClerkId(
+    clerkId: string,
+    cancellationFailure: CancellationFailureBehavior = 'abort',
+  ): Promise<void> {
     const user = await this.findByClerkId(clerkId);
-    await this.userRepo.softDelete(user.id);
-    // TODO: schedule R2 CV file deletion, emit gdpr.erasure.requested event
+
+    await this.cancelActiveSubscription(user.id, cancellationFailure);
+
+    // Collect R2 object keys before any relational deletion — includes
+    // previously soft-deleted CVs (a user may have "deleted" a CV earlier,
+    // which today only soft-deletes it; genuine erasure must still clean
+    // up its file). Cover letters only have an R2 object once downloaded.
+    const [cvs, coverLetters] = await Promise.all([
+      this.cvRepo.find({ where: { userId: user.id }, withDeleted: true }),
+      this.coverLetterRepo.find({ where: { userId: user.id }, withDeleted: true }),
+    ]);
+    const objectKeys = [...cvs, ...coverLetters]
+      .map((row) => row.r2ObjectKey)
+      .filter((key): key is string => !!key);
+
+    // Relational erasure, in one transaction, in FK-dependency order:
+    //   1. tailorings — its master_cv_id/tailored_cv_id FKs to cvs have no
+    //      ON DELETE CASCADE (unlike every other user-owned table's FKs —
+    //      see migrations/1750500000000-TailoringTable.ts), so a tailoring
+    //      row referencing this user's CVs must be removed before those
+    //      CVs are deleted, or the CV delete would be rejected.
+    //   2. cover_letters, 3. analyses (ats_reports cascade automatically
+    //      via analyses' own ON DELETE CASCADE), 4. cvs — all safe once
+    //      tailorings are gone.
+    //   5. the user row itself — cascades profiles/subscriptions/payments/
+    //      notifications automatically (all plain ON DELETE CASCADE with
+    //      nothing else referencing them, per InitialSchema).
+    // This is deliberately explicit rather than relying solely on the
+    // user-row cascade, so the deletion order is self-documenting and
+    // testable, and doesn't depend on Postgres's multi-path cascade
+    // resolution order being exactly what's assumed above.
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(TailoringEntity, { userId: user.id });
+      await manager.delete(CoverLetterEntity, { userId: user.id });
+      await manager.delete(AnalysisEntity, { userId: user.id });
+      await manager.delete(CvEntity, { userId: user.id });
+      await manager.delete(UserEntity, { id: user.id });
+    });
+
+    // R2 deletion only after the DB transaction has committed. Tradeoff:
+    // deleting R2 objects first (or inside the transaction) risks a
+    // committed-but-still-referenced state if the DB step later failed —
+    // CV/cover-letter rows pointing at files that no longer exist, which
+    // could break downstream reads. Deleting R2 objects after commit risks
+    // the opposite: if R2 cleanup fails here, the DB erasure has already
+    // succeeded (irreversible) and a small number of orphaned files may be
+    // left in the bucket, unreferenced by any row and unreachable through
+    // the app. The second failure mode is strictly safer — an orphaned
+    // file is a cheap, non-user-facing cleanup problem; a dangling DB
+    // reference to a missing file is a broken user-facing one. So erasure
+    // is considered successful once the DB transaction commits; R2
+    // failures are logged, not thrown.
+    await Promise.all(objectKeys.map((key) => this.deleteR2ObjectSafely(key)));
+  }
+
+  /**
+   * Cancels the user's Stripe subscription if one exists and isn't already
+   * cancelled. Reuses the existing StripePaymentProvider.cancelSubscription
+   * — no second cancellation implementation. Free users / no subscription
+   * row / an already-cancelled subscription are all no-ops (nothing to
+   * cancel — every non-'cancelled' status, including active, trialing,
+   * past_due, incomplete, and active+cancelAtPeriodEnd, is treated
+   * uniformly: if it's not already cancelled and a provider subscription
+   * id exists, attempt to cancel it).
+   */
+  private async cancelActiveSubscription(
+    userId: string,
+    cancellationFailure: CancellationFailureBehavior,
+  ): Promise<void> {
+    const sub = await this.subscriptionRepo.findOneBy({ userId });
+    if (!sub?.providerSubscriptionId || sub.status === 'cancelled') return;
+
+    try {
+      await this.stripeProvider.cancelSubscription(sub.providerSubscriptionId);
+    } catch (err) {
+      // Only the error's *type* is logged, never its message — an SDK
+      // error's message text is not a guaranteed-safe value (it could in
+      // principle echo back request detail), unlike its constructor name.
+      // The subscription id is not a secret and is required here so an
+      // operator can locate/cancel it manually.
+      const errorType = err instanceof Error ? err.name : 'UnknownError';
+
+      if (cancellationFailure === 'abort') {
+        this.logger.error(
+          `Account deletion aborted: failed to cancel subscription ${sub.providerSubscriptionId} ` +
+            `for user ${userId} (${errorType})`,
+        );
+        throw new ServiceUnavailableException(
+          "We couldn't cancel your subscription right now. Please try again in a moment, or contact support.",
+        );
+      }
+
+      this.logger.error(
+        `Failed to cancel subscription ${sub.providerSubscriptionId} for user ${userId} during ` +
+          `Clerk-triggered account deletion (${errorType}) — proceeding with data erasure anyway. ` +
+          'MANUAL STRIPE CANCELLATION MAY BE REQUIRED.',
+      );
+    }
+  }
+
+  private async deleteR2ObjectSafely(key: string): Promise<void> {
+    try {
+      await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+    } catch (err) {
+      // Log only the object key (a storage path, not a secret) and the
+      // error message — never credentials, never file contents.
+      this.logger.warn(
+        `Account erasure: failed to delete R2 object "${key}" (${err instanceof Error ? err.message : 'unknown error'}). ` +
+          'The database record for this file has already been erased; the object is now orphaned in R2 and unreachable through the app.',
+      );
+    }
   }
 }

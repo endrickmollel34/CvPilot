@@ -109,6 +109,16 @@ export class CvService {
   async confirmUpload(clerkId: string, dto: ConfirmUploadDto) {
     const user = await this.userService.findByClerkId(clerkId);
 
+    // The presigned URL issued by generateUploadUrl always scopes the R2 key
+    // under this exact prefix; a client submitting a key outside its own
+    // namespace (someone else's, or a malformed one) is rejected rather than
+    // trusted, so a CV row can never be created pointing at another user's —
+    // or a nonexistent — R2 object. Deliberately generic error: this must
+    // not confirm or deny another user's key even exists.
+    if (!dto.r2ObjectKey.startsWith(`cvs/${user.id}/`)) {
+      throw new ForbiddenException('Invalid upload reference.');
+    }
+
     const cv = this.cvRepo.create({
       userId: user.id,
       source: 'upload',

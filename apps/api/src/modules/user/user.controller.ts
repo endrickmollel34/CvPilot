@@ -16,6 +16,9 @@ export class UserController {
 
   @Delete('me')
   deleteMe(@CurrentUser() user: { clerkId: string }) {
-    return this.userService.deleteByClerkId(user.clerkId);
+    // 'abort': self-service deletion — the caller's Clerk identity still
+    // exists, so a failed Stripe cancellation must stop the deletion
+    // entirely (rather than default implicitly) so they can retry.
+    return this.userService.deleteByClerkId(user.clerkId, 'abort');
   }
 }

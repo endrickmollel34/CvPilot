@@ -17,6 +17,7 @@ import { SubscriptionEntity } from './entities/subscription.entity';
 import { PaymentEntity } from './entities/payment.entity';
 import { AuditLogEntity } from './entities/audit-log.entity';
 import { NotificationEntity } from './entities/notification.entity';
+import { TailoringEntity } from './entities/tailoring.entity';
 
 export const AppDataSource = new DataSource({
   type: 'postgres',
@@ -32,6 +33,7 @@ export const AppDataSource = new DataSource({
     PaymentEntity,
     AuditLogEntity,
     NotificationEntity,
+    TailoringEntity,
   ],
   migrations: ['dist/migrations/*.js'],
   synchronize: false,
