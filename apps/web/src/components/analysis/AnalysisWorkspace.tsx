@@ -243,7 +243,7 @@ export function AnalysisWorkspace({
             <span className="text-sm font-medium text-gray-700">
               {uploading ? 'Uploading…' : 'Upload a CV'}
             </span>
-            <span className="text-xs text-gray-400">PDF or DOCX, max 10 MB</span>
+            <span className="text-xs text-gray-400">PDF or DOCX, max 5 MB</span>
             <input
               type="file"
               accept=".pdf,.docx"

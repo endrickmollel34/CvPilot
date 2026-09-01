@@ -130,7 +130,7 @@ export function NewCvUpload() {
           <span className="text-sm font-medium text-gray-700">
             {phase === 'uploading' ? 'Uploading…' : 'Choose a PDF or DOCX file'}
           </span>
-          <span className="text-xs text-gray-400">Max 10 MB</span>
+          <span className="text-xs text-gray-400">Max 5 MB</span>
           <input
             type="file"
             accept=".pdf,.docx"

@@ -96,7 +96,6 @@ export class CvService {
       Bucket: this.bucket,
       Key: r2ObjectKey,
       ContentType: dto.mimeType,
-      ContentLength: dto.fileSizeBytes,
     });
 
     const uploadUrl = await getSignedUrl(this.s3, command, {
