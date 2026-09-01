@@ -2,6 +2,7 @@ import Link from 'next/link';
 
 import type { SubscriptionDto } from '@/lib/billingApi';
 import { ManageBillingButton } from './ManageBillingButton';
+import { resolvePeriodLabel } from './billingLabels';
 
 const PLAN_LABELS: Record<string, string> = {
   free: 'Free',
@@ -73,7 +74,7 @@ export function BillingSummary({ subscription }: Props) {
   }
 
   const { plan, status, currentPeriodEnd, cancelAtPeriodEnd } = subscription;
-  const renewalLabel = cancelAtPeriodEnd ? 'Access ends' : 'Renews';
+  const renewalLabel = resolvePeriodLabel(cancelAtPeriodEnd);
 
   return (
     <section className="mb-8 flex items-center justify-between rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
