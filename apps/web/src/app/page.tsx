@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { SignedIn, SignedOut } from '@clerk/nextjs';
+import { Show } from '@clerk/nextjs';
 import { ArrowRight, Upload, ClipboardList, BarChart3, Check } from 'lucide-react';
 
 import { PricingCta } from '@/components/billing/PricingCta';
@@ -12,7 +12,7 @@ export default function HomePage() {
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <span className="text-lg font-bold tracking-tight">CVPilot</span>
           <div className="flex items-center gap-3">
-            <SignedOut>
+            <Show when="signed-out">
               <Link href="/sign-in" className="text-sm text-neutral-600 hover:text-neutral-900">
                 Sign in
               </Link>
@@ -22,15 +22,15 @@ export default function HomePage() {
               >
                 Get started free
               </Link>
-            </SignedOut>
-            <SignedIn>
+            </Show>
+            <Show when="signed-in">
               <Link
                 href="/dashboard"
                 className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700"
               >
                 Go to dashboard
               </Link>
-            </SignedIn>
+            </Show>
           </div>
         </div>
       </nav>
@@ -52,7 +52,7 @@ export default function HomePage() {
           </p>
 
           <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
-            <SignedOut>
+            <Show when="signed-out">
               <Link
                 href="/sign-up"
                 className="inline-flex items-center gap-2 rounded-md bg-neutral-900 px-8 py-3 text-base font-semibold text-white hover:bg-neutral-700"
@@ -60,8 +60,8 @@ export default function HomePage() {
                 Get started — it&apos;s free
                 <ArrowRight className="h-4 w-4" />
               </Link>
-            </SignedOut>
-            <SignedIn>
+            </Show>
+            <Show when="signed-in">
               <Link
                 href="/dashboard"
                 className="inline-flex items-center gap-2 rounded-md bg-neutral-900 px-8 py-3 text-base font-semibold text-white hover:bg-neutral-700"
@@ -69,7 +69,7 @@ export default function HomePage() {
                 Go to dashboard
                 <ArrowRight className="h-4 w-4" />
               </Link>
-            </SignedIn>
+            </Show>
           </div>
           <p className="mt-4 text-sm text-neutral-400">No credit card required.</p>
         </section>

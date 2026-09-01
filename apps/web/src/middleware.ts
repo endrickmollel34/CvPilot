@@ -10,11 +10,17 @@ const isPublicRoute = createRouteMatcher([
   '/__clerk(.*)',
 ]);
 
-export default clerkMiddleware(async (auth, request) => {
-  if (!isPublicRoute(request)) {
-    await auth.protect();
-  }
-});
+export default clerkMiddleware(
+  async (auth, request) => {
+    if (!isPublicRoute(request)) {
+      await auth.protect();
+    }
+  },
+  // Clerk's official Frontend API proxy — required for our production Vercel
+  // domain. Enabling this makes clerkMiddleware itself forward matched
+  // /__clerk requests to Clerk's Frontend API before our handler above runs.
+  { frontendApiProxy: { enabled: true } },
+);
 
 export const config = {
   matcher: [
