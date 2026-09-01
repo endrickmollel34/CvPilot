@@ -103,6 +103,7 @@ export class UserService {
     try {
       clerkUser = await this.clerkClient.users.getUser(clerkId);
     } catch {
+      this.logger.log(`No local row and Clerk lookup failed for ${clerkId}`);
       throw new NotFoundException('User not found');
     }
 
@@ -142,6 +143,7 @@ export class UserService {
     cancellationFailure: CancellationFailureBehavior = 'abort',
   ): Promise<void> {
     const user = await this.findByClerkId(clerkId);
+    this.logger.log(`Account erasure: user lookup found ${user.id} for Clerk id ${clerkId}`);
 
     await this.cancelActiveSubscription(user.id, cancellationFailure);
 
@@ -173,13 +175,30 @@ export class UserService {
     // user-row cascade, so the deletion order is self-documenting and
     // testable, and doesn't depend on Postgres's multi-path cascade
     // resolution order being exactly what's assumed above.
-    await this.dataSource.transaction(async (manager) => {
-      await manager.delete(TailoringEntity, { userId: user.id });
-      await manager.delete(CoverLetterEntity, { userId: user.id });
-      await manager.delete(AnalysisEntity, { userId: user.id });
-      await manager.delete(CvEntity, { userId: user.id });
-      await manager.delete(UserEntity, { id: user.id });
-    });
+    // Errors here are deliberately NOT swallowed — this is the one step that
+    // makes erasure irreversible-safe: if the transaction fails (deadlock,
+    // lock-wait timeout, connectivity blip, whatever), we must NOT continue
+    // to R2 cleanup, and the caller (AuthService, for the Clerk webhook path)
+    // must see this failure so it reports non-2xx and Clerk retries — a
+    // silently-swallowed failure here is exactly what previously left rows
+    // permanently un-erased with no signal to retry.
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        await manager.delete(TailoringEntity, { userId: user.id });
+        await manager.delete(CoverLetterEntity, { userId: user.id });
+        await manager.delete(AnalysisEntity, { userId: user.id });
+        await manager.delete(CvEntity, { userId: user.id });
+        await manager.delete(UserEntity, { id: user.id });
+      });
+    } catch (err) {
+      const errorType = err instanceof Error ? err.name : 'UnknownError';
+      this.logger.error(
+        `Account erasure: DB transaction FAILED for user ${user.id} (${errorType}) — ` +
+          'no rows were erased (transaction rolled back); R2 cleanup was not attempted.',
+      );
+      throw err;
+    }
+    this.logger.log(`Account erasure: DB transaction committed for user ${user.id}`);
 
     // R2 deletion only after the DB transaction has committed. Tradeoff:
     // deleting R2 objects first (or inside the transaction) risks a
@@ -194,7 +213,18 @@ export class UserService {
     // reference to a missing file is a broken user-facing one. So erasure
     // is considered successful once the DB transaction commits; R2
     // failures are logged, not thrown.
-    await Promise.all(objectKeys.map((key) => this.deleteR2ObjectSafely(key)));
+    if (objectKeys.length === 0) {
+      this.logger.log(`Account erasure: no R2 objects to delete for user ${user.id}`);
+      return;
+    }
+    this.logger.log(
+      `Account erasure: R2 cleanup attempted — ${objectKeys.length} object(s) for user ${user.id}`,
+    );
+    const results = await Promise.all(objectKeys.map((key) => this.deleteR2ObjectSafely(key)));
+    const succeeded = results.filter(Boolean).length;
+    this.logger.log(
+      `Account erasure: R2 cleanup completed for user ${user.id} — ${succeeded}/${objectKeys.length} object(s) deleted`,
+    );
   }
 
   /**
@@ -212,10 +242,21 @@ export class UserService {
     cancellationFailure: CancellationFailureBehavior,
   ): Promise<void> {
     const sub = await this.subscriptionRepo.findOneBy({ userId });
-    if (!sub?.providerSubscriptionId || sub.status === 'cancelled') return;
+    if (!sub?.providerSubscriptionId || sub.status === 'cancelled') {
+      this.logger.log(
+        `Account erasure: no active Stripe subscription to cancel for user ${userId}`,
+      );
+      return;
+    }
 
+    this.logger.log(
+      `Account erasure: Stripe cancellation attempted for subscription ${sub.providerSubscriptionId} (user ${userId})`,
+    );
     try {
       await this.stripeProvider.cancelSubscription(sub.providerSubscriptionId);
+      this.logger.log(
+        `Account erasure: Stripe cancellation completed for subscription ${sub.providerSubscriptionId} (user ${userId})`,
+      );
     } catch (err) {
       // Only the error's *type* is logged, never its message — an SDK
       // error's message text is not a guaranteed-safe value (it could in
@@ -242,9 +283,10 @@ export class UserService {
     }
   }
 
-  private async deleteR2ObjectSafely(key: string): Promise<void> {
+  private async deleteR2ObjectSafely(key: string): Promise<boolean> {
     try {
       await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+      return true;
     } catch (err) {
       // Log only the object key (a storage path, not a secret) and the
       // error message — never credentials, never file contents.
@@ -252,6 +294,7 @@ export class UserService {
         `Account erasure: failed to delete R2 object "${key}" (${err instanceof Error ? err.message : 'unknown error'}). ` +
           'The database record for this file has already been erased; the object is now orphaned in R2 and unreachable through the app.',
       );
+      return false;
     }
   }
 }

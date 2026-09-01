@@ -311,19 +311,33 @@ export class BillingService {
       return;
     }
 
-    await this.paymentRepo.upsert(
-      {
-        userId: sub.userId,
-        provider: event.provider,
-        providerPaymentId: event.providerPaymentId,
-        providerTransactionReference: event.providerTransactionReference,
-        paymentMethod: event.paymentMethod,
-        amount: event.amountMinorUnits ?? 0,
-        currency: event.currency ?? 'GBP',
-        status: 'succeeded',
-      },
-      { conflictPaths: ['providerPaymentId'] },
-    );
+    try {
+      await this.paymentRepo.upsert(
+        {
+          userId: sub.userId,
+          provider: event.provider,
+          providerPaymentId: event.providerPaymentId,
+          providerTransactionReference: event.providerTransactionReference,
+          paymentMethod: event.paymentMethod,
+          amount: event.amountMinorUnits ?? 0,
+          currency: event.currency ?? 'GBP',
+          status: 'succeeded',
+        },
+        { conflictPaths: ['providerPaymentId'] },
+      );
+    } catch (err) {
+      // A Clerk-triggered account erasure (UserService.deleteByClerkId) can
+      // hard-delete this user — and cascade-delete `sub` with it — in the
+      // narrow window between the findOneBy above and this insert, since
+      // they run on independent DB connections with no shared lock. When
+      // that happens this insert violates payments' FK on user_id. That's
+      // not a bug to retry: the account is gone, so there is nothing left to
+      // record this payment against, and Stripe retrying this webhook
+      // forever would never succeed. Swallow and log rather than 500.
+      this.logger.warn(
+        `Payment record skipped — account likely deleted concurrently (provider customer ${event.providerCustomerId}, ${err instanceof Error ? err.name : 'UnknownError'})`,
+      );
+    }
   }
 
   private async onPaymentFailed(event: InternalBillingEvent): Promise<void> {

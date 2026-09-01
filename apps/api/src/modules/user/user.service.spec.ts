@@ -193,6 +193,25 @@ describe('UserService — account erasure (deleteByClerkId)', () => {
     expect(mockS3Send).toHaveBeenCalledTimes(2);
   });
 
+  // Regression test for the production bug: the DB transaction failing (e.g.
+  // a deadlock or lock-wait timeout from a concurrent Stripe subscription
+  // webhook update) must never be silently absorbed here — AuthService
+  // relies on this rejecting so it can report a non-2xx response and let
+  // Clerk retry, instead of the row being left permanently un-erased with a
+  // webhook that already reported success.
+  it('propagates a DB transaction failure and does not proceed to R2 cleanup', async () => {
+    mockCvRepo.find.mockResolvedValue([
+      { id: 'cv-1', userId: MOCK_USER_A.id, r2ObjectKey: 'cvs/user-a-id/one.pdf' },
+    ]);
+    mockDataSource.transaction.mockRejectedValueOnce(new Error('deadlock detected'));
+
+    await expect(service.deleteByClerkId('clerk-a', 'continue')).rejects.toThrow(
+      'deadlock detected',
+    );
+
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
   it('does not attempt R2 deletion for CVs/cover letters without an object key', async () => {
     mockCvRepo.find.mockResolvedValue([
       { id: 'cv-1', userId: MOCK_USER_A.id, r2ObjectKey: undefined },

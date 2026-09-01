@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Webhook } from 'svix';
 
@@ -81,9 +81,32 @@ export class AuthService {
       // a failed Stripe cancellation through — see
       // UserService.CancellationFailureBehavior.
       await this.userService.deleteByClerkId(data.id, 'continue');
-    } catch {
-      // User may not exist locally yet (e.g., deleted before first sync)
-      this.logger.warn(`Clerk user.deleted: no local record for ${data.id}`);
+      this.logger.log(`Clerk webhook: erasure complete for ${data.id}`);
+    } catch (err) {
+      if (err instanceof NotFoundException) {
+        // Genuinely nothing to erase — either this user was deleted by an
+        // earlier delivery of this same webhook (Clerk retries are common
+        // and must be idempotent), or the local row was never synced in the
+        // first place. Either way there is no local record, so this is a
+        // benign no-op, not a failure.
+        this.logger.log(`Clerk webhook: no local record for ${data.id} — nothing to erase`);
+        return;
+      }
+
+      // Any other failure (DB/transaction error, connectivity issue, etc.)
+      // must NOT be swallowed here: this used to catch everything and
+      // always report success, which meant a real erasure failure left the
+      // user's row (and all their data) permanently un-erased with Clerk
+      // never retrying, because it had already been told the webhook
+      // succeeded. Rethrowing lets the controller surface a non-2xx
+      // response so Clerk's own webhook retry policy kicks in. Only the
+      // error's type is logged — see cancelActiveSubscription's identical
+      // rationale in UserService.
+      const errorType = err instanceof Error ? err.name : 'UnknownError';
+      this.logger.error(
+        `Clerk webhook: erasure FAILED for ${data.id} (${errorType}) — Clerk should retry this delivery`,
+      );
+      throw err;
     }
   }
 }

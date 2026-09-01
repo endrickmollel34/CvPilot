@@ -660,6 +660,38 @@ describe('BillingService', () => {
       expect(mockSubscriptionRepo.update).not.toHaveBeenCalled();
     });
 
+    // Regression test: a Clerk-triggered account erasure can hard-delete the
+    // user (and cascade-delete their subscription) in the narrow window
+    // between this handler's findOneBy and its upsert, since they run on
+    // independent DB connections. The resulting FK violation on
+    // payments.user_id must not crash the Stripe webhook request — there is
+    // nothing left to record the payment against, and Stripe retrying
+    // forever would never succeed.
+    it('swallows a payment upsert failure caused by the account being deleted concurrently, rather than throwing', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'active'));
+      mockPaymentRepo.upsert.mockRejectedValueOnce(
+        Object.assign(
+          new Error('insert or update on table "payments" violates foreign key constraint'),
+          {
+            name: 'QueryFailedError',
+          },
+        ),
+      );
+
+      await expect(
+        fireEvent({
+          type: 'payment.succeeded',
+          provider: 'STRIPE',
+          providerCustomerId: 'cus_1',
+          providerPaymentId: 'pi_1',
+          paymentStatus: 'succeeded',
+          paymentMethod: 'CARD',
+          amountMinorUnits: 999,
+          currency: 'GBP',
+        }),
+      ).resolves.toBeUndefined();
+    });
+
     it('a null (unhandled) parsed webhook event is a no-op', async () => {
       mockStripeProvider.verifyAndParseWebhook.mockReturnValue(null);
 
