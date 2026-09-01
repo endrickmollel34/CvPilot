@@ -3,6 +3,7 @@ import type { TailoringDecision, TailoringSuggestion, TailoringStatus } from '@c
 import type { CvDto } from './cvApi';
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
+import { authFetch, type TokenSource } from './authFetch';
 
 export interface TailoringDto {
   id: string;
@@ -25,15 +26,15 @@ export interface TailoringDto {
 }
 
 export async function submitTailoring(
-  token: string,
+  token: TokenSource,
   cvId: string,
   jobTitle: string | undefined,
   companyName: string | undefined,
   jobDescription: string,
 ): Promise<TailoringDto> {
-  const res = await fetch(`${API_URL}/tailorings`, {
+  const res = await authFetch(`${API_URL}/tailorings`, token, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       cvId,
       jobTitle: jobTitle || undefined,
@@ -48,31 +49,26 @@ export async function submitTailoring(
   return res.json() as Promise<TailoringDto>;
 }
 
-export async function listTailorings(token: string): Promise<TailoringDto[]> {
-  const res = await fetch(`${API_URL}/tailorings`, {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: 'no-store',
-  });
+export async function listTailorings(token: TokenSource): Promise<TailoringDto[]> {
+  const res = await authFetch(`${API_URL}/tailorings`, token, { cache: 'no-store' });
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return res.json() as Promise<TailoringDto[]>;
 }
 
-export async function getTailoring(token: string, tailoringId: string): Promise<TailoringDto> {
-  const res = await fetch(`${API_URL}/tailorings/${tailoringId}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+export async function getTailoring(token: TokenSource, tailoringId: string): Promise<TailoringDto> {
+  const res = await authFetch(`${API_URL}/tailorings/${tailoringId}`, token);
   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
   return res.json() as Promise<TailoringDto>;
 }
 
 export async function applyTailoring(
-  token: string,
+  token: TokenSource,
   tailoringId: string,
   decisions: TailoringDecision[],
 ): Promise<{ tailoredCvId: string }> {
-  const res = await fetch(`${API_URL}/tailorings/${tailoringId}/apply`, {
+  const res = await authFetch(`${API_URL}/tailorings/${tailoringId}/apply`, token, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ decisions }),
   });
   if (!res.ok) {

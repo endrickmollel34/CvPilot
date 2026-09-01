@@ -70,9 +70,8 @@ export function AnalysisWorkspace({
     setUploading(true);
 
     try {
-      const token = await getToken();
       const { uploadUrl, r2ObjectKey } = await getUploadUrl(
-        token!,
+        getToken,
         file.name,
         file.type,
         file.size,
@@ -85,15 +84,16 @@ export function AnalysisWorkspace({
       });
       if (!putRes.ok) throw new Error('File upload to storage failed.');
 
-      const cv = await confirmUpload(token!, r2ObjectKey, file.name, file.size, file.type);
+      // Fresh token requested here (not reused from before the R2 upload
+      // above) since getToken itself is passed through, not a captured value.
+      const cv = await confirmUpload(getToken, r2ObjectKey, file.name, file.size, file.type);
       setParsePollingId(cv.id);
 
       // Poll until parseStatus=done
       parseRef.current = setInterval(() => {
         void (async () => {
           try {
-            const token2 = await getToken();
-            const updated = await getCv(token2!, cv.id);
+            const updated = await getCv(getToken, cv.id);
             if (updated.parseStatus === 'done') {
               clearInterval(parseRef.current!);
               setParsePollingId(null);
@@ -134,9 +134,8 @@ export function AnalysisWorkspace({
     }
 
     try {
-      const token = await getToken();
       const a = await submitAnalysis(
-        token!,
+        getToken,
         selectedCvId,
         jobTitle,
         companyName || undefined,
@@ -148,8 +147,7 @@ export function AnalysisWorkspace({
       pollRef.current = setInterval(() => {
         void (async () => {
           try {
-            const t = await getToken();
-            const updated = await getAnalysis(t!, a.id);
+            const updated = await getAnalysis(getToken, a.id);
             if (updated.status === 'done') {
               clearInterval(pollRef.current!);
               setAnalysis(updated);

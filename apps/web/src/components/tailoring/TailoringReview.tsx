@@ -129,8 +129,7 @@ export function TailoringReview({ tailoring, onCancel }: TailoringReviewProps) {
 
     setApplying(true);
     try {
-      const token = await getToken();
-      const { tailoredCvId } = await applyTailoring(token!, tailoring.id, decisionList);
+      const { tailoredCvId } = await applyTailoring(getToken, tailoring.id, decisionList);
       router.push(`/cvs/${tailoredCvId}/edit`);
     } catch (err) {
       error.setFromError(err, 'Apply failed. Please try again.');

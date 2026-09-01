@@ -238,8 +238,7 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
 
   const saveFn = useCallback(
     async (c: CvContent) => {
-      const token = await getToken();
-      await updateCvContent(token!, cvId, c);
+      await updateCvContent(getToken, cvId, c);
     },
     [getToken, cvId],
   );
@@ -249,9 +248,8 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
   async function handleDownload() {
     setDlState('downloading');
     try {
-      const token = await getToken();
       const name = (content.personalDetails.fullName || 'cv').replace(/\s+/g, '_');
-      await downloadCvPdf(token!, cvId, `${name}.pdf`);
+      await downloadCvPdf(getToken, cvId, `${name}.pdf`);
       setDlState('idle');
     } catch {
       setDlState('error');

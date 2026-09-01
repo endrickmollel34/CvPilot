@@ -18,8 +18,7 @@ export function ManageBillingButton() {
     setLoading(true);
     setError('');
     try {
-      const token = await getToken();
-      const { url } = await createPortalSession(token!);
+      const { url } = await createPortalSession(getToken);
       window.location.href = url;
     } catch (err) {
       setError(getFriendlyErrorMessage(err, 'Could not open billing portal. Please try again.'));

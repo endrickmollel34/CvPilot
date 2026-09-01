@@ -46,9 +46,8 @@ export function NewCvUpload() {
     setPhase('uploading');
 
     try {
-      const token = await getToken();
       const { uploadUrl, r2ObjectKey } = await getUploadUrl(
-        token!,
+        getToken,
         file.name,
         file.type,
         file.size,
@@ -61,15 +60,18 @@ export function NewCvUpload() {
       });
       if (!putRes.ok) throw new Error('File upload to storage failed.');
 
-      const cv = await confirmUpload(token!, r2ObjectKey, file.name, file.size, file.type);
+      // Fetch a fresh token again here rather than reusing whatever
+      // getUploadUrl resolved before the (potentially slow) direct-to-R2
+      // upload above — passing getToken itself (not a captured string)
+      // makes authFetch request a live token immediately before this call.
+      const cv = await confirmUpload(getToken, r2ObjectKey, file.name, file.size, file.type);
       setUploadedCvId(cv.id);
       setPhase('parsing');
 
       parseRef.current = setInterval(() => {
         void (async () => {
           try {
-            const t = await getToken();
-            const updated = await getCv(t!, cv.id);
+            const updated = await getCv(getToken, cv.id);
             if (updated.parseStatus === 'done') {
               clearInterval(parseRef.current!);
               setPhase('ready');
@@ -96,8 +98,7 @@ export function NewCvUpload() {
     setPhase('prefilling');
     error.clear();
     try {
-      const token = await getToken();
-      const cv = await prefillCv(token!, uploadedCvId);
+      const cv = await prefillCv(getToken, uploadedCvId);
       router.push(`/cvs/${cv.id}/edit`);
     } catch (err) {
       error.setFromError(err);

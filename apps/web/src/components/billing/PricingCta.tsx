@@ -35,8 +35,7 @@ export function PricingCta({ plan, label, className }: Props) {
     setLoading(true);
     setError('');
     try {
-      const token = await getToken();
-      const { url } = await createCheckoutSession(token!, plan);
+      const { url } = await createCheckoutSession(getToken, plan);
       if (!url) {
         setError('Could not start checkout. Please try again.');
         return;

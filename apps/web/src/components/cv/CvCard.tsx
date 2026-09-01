@@ -54,8 +54,7 @@ export function CvCard({ cv }: { cv: CvDto }) {
   async function handleDelete() {
     setDeleting(true);
     try {
-      const token = await getToken();
-      await deleteCv(token!, cv.id);
+      await deleteCv(getToken, cv.id);
       router.refresh();
     } catch {
       setDeleting(false);
@@ -67,8 +66,7 @@ export function CvCard({ cv }: { cv: CvDto }) {
     setPrefilling(true);
     prefillError.clear();
     try {
-      const token = await getToken();
-      const prefillCv_result = await prefillCv(token!, cv.id);
+      const prefillCv_result = await prefillCv(getToken, cv.id);
       router.push(`/cvs/${prefillCv_result.id}/edit`);
     } catch (err) {
       prefillError.setFromError(err);

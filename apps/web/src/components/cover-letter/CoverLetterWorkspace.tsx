@@ -84,8 +84,7 @@ export function CoverLetterWorkspace({
     }
 
     try {
-      const token = await getToken();
-      const cl = await submitCoverLetter(token!, {
+      const cl = await submitCoverLetter(getToken, {
         cvId: selectedCvId,
         jobTitle,
         companyName,
@@ -98,8 +97,7 @@ export function CoverLetterWorkspace({
       pollRef.current = setInterval(() => {
         void (async () => {
           try {
-            const t = await getToken();
-            const updated = await getCoverLetter(t!, cl.id);
+            const updated = await getCoverLetter(getToken, cl.id);
             if (updated.status === 'generated' || updated.status === 'downloaded') {
               clearInterval(pollRef.current!);
               setLetter(updated);
@@ -129,8 +127,7 @@ export function CoverLetterWorkspace({
         if (!letter) return;
         setSaving(true);
         try {
-          const token = await getToken();
-          await updateCoverLetter(token!, letter.id, val);
+          await updateCoverLetter(getToken, letter.id, val);
         } catch {
           setSaveError('Auto-save failed.');
         } finally {
@@ -144,8 +141,7 @@ export function CoverLetterWorkspace({
     if (!letter) return;
     setDownloading(true);
     try {
-      const token = await getToken();
-      await downloadCoverLetterPdf(token!, letter.id);
+      await downloadCoverLetterPdf(getToken, letter.id);
     } catch {
       setSaveError('Download failed. Please try again.');
     } finally {

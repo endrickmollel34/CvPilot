@@ -28,8 +28,7 @@ export function CoverLetterViewer({ letter: initialLetter }: { letter: CoverLett
     saveError.clear();
     setSaving(true);
     try {
-      const token = await getToken();
-      const updated = await updateCoverLetter(token!, letter.id, content);
+      const updated = await updateCoverLetter(getToken, letter.id, content);
       setLetter(updated);
       setContent(updated.content);
     } catch (err) {
@@ -43,8 +42,7 @@ export function CoverLetterViewer({ letter: initialLetter }: { letter: CoverLett
     downloadError.clear();
     setDownloading(true);
     try {
-      const token = await getToken();
-      await downloadCoverLetterPdf(token!, letter.id);
+      await downloadCoverLetterPdf(getToken, letter.id);
     } catch (err) {
       downloadError.setFromError(err, 'Download failed. Please try again.');
     } finally {

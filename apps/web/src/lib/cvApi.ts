@@ -2,6 +2,7 @@ import type { CvContent, CvSource } from '@cvpilot/shared';
 
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
+import { authFetch, type TokenSource } from './authFetch';
 
 export interface CvDto {
   id: string;
@@ -15,27 +16,20 @@ export interface CvDto {
   updatedAt: string;
 }
 
-function authHeaders(token: string): HeadersInit {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
-
-export async function listCvs(token: string): Promise<CvDto[]> {
-  const res = await fetch(`${API_URL}/cvs`, {
-    headers: authHeaders(token),
-    cache: 'no-store',
-  });
+export async function listCvs(token: TokenSource): Promise<CvDto[]> {
+  const res = await authFetch(`${API_URL}/cvs`, token, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to list CVs: ${res.status}`);
   return res.json() as Promise<CvDto[]>;
 }
 
 export async function createCv(
-  token: string,
+  token: TokenSource,
   title: string,
   source: 'builder' | 'prefill' = 'builder',
 ): Promise<CvDto> {
-  const res = await fetch(`${API_URL}/cvs`, {
+  const res = await authFetch(`${API_URL}/cvs`, token, {
     method: 'POST',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, source }),
   });
   if (!res.ok) {
@@ -46,31 +40,30 @@ export async function createCv(
 }
 
 export async function updateCvContent(
-  token: string,
+  token: TokenSource,
   cvId: string,
   content: CvContent,
 ): Promise<CvDto> {
-  const res = await fetch(`${API_URL}/cvs/${cvId}`, {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}`, token, {
     method: 'PATCH',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
   });
   if (!res.ok) throw new Error(`Failed to update CV content: ${res.status}`);
   return res.json() as Promise<CvDto>;
 }
 
-export async function deleteCv(token: string, cvId: string): Promise<void> {
-  const res = await fetch(`${API_URL}/cvs/${cvId}`, {
-    method: 'DELETE',
-    headers: authHeaders(token),
-  });
+export async function deleteCv(token: TokenSource, cvId: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}`, token, { method: 'DELETE' });
   if (!res.ok && res.status !== 204) throw new Error(`Failed to delete CV: ${res.status}`);
 }
 
-export async function downloadCvPdf(token: string, cvId: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_URL}/cvs/${cvId}/download`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+export async function downloadCvPdf(
+  token: TokenSource,
+  cvId: string,
+  filename: string,
+): Promise<void> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}/download`, token);
   if (!res.ok) throw new Error(`PDF download failed: ${res.status}`);
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
@@ -83,24 +76,21 @@ export async function downloadCvPdf(token: string, cvId: string, filename: strin
   URL.revokeObjectURL(url);
 }
 
-export async function getCv(token: string, cvId: string): Promise<CvDto> {
-  const res = await fetch(`${API_URL}/cvs/${cvId}`, {
-    headers: authHeaders(token),
-    cache: 'no-store',
-  });
+export async function getCv(token: TokenSource, cvId: string): Promise<CvDto> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}`, token, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to fetch CV: ${res.status}`);
   return res.json() as Promise<CvDto>;
 }
 
 export async function getUploadUrl(
-  token: string,
+  token: TokenSource,
   fileName: string,
   mimeType: string,
   fileSizeBytes: number,
 ): Promise<{ uploadUrl: string; r2ObjectKey: string }> {
-  const res = await fetch(`${API_URL}/cvs/upload-url`, {
+  const res = await authFetch(`${API_URL}/cvs/upload-url`, token, {
     method: 'POST',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fileName, mimeType, fileSizeBytes }),
   });
   if (!res.ok) {
@@ -111,15 +101,15 @@ export async function getUploadUrl(
 }
 
 export async function confirmUpload(
-  token: string,
+  token: TokenSource,
   r2ObjectKey: string,
   fileName: string,
   fileSizeBytes: number,
   mimeType: string,
 ): Promise<CvDto> {
-  const res = await fetch(`${API_URL}/cvs/confirm`, {
+  const res = await authFetch(`${API_URL}/cvs/confirm`, token, {
     method: 'POST',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ r2ObjectKey, fileName, fileSizeBytes, mimeType }),
   });
   if (!res.ok) {
@@ -129,21 +119,18 @@ export async function confirmUpload(
   return res.json() as Promise<CvDto>;
 }
 
-export async function renameCv(token: string, cvId: string, title: string): Promise<CvDto> {
-  const res = await fetch(`${API_URL}/cvs/${cvId}/title`, {
+export async function renameCv(token: TokenSource, cvId: string, title: string): Promise<CvDto> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}/title`, token, {
     method: 'PATCH',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
   });
   if (!res.ok) throw new Error(`Failed to rename CV: ${res.status}`);
   return res.json() as Promise<CvDto>;
 }
 
-export async function prefillCv(token: string, uploadCvId: string): Promise<CvDto> {
-  const res = await fetch(`${API_URL}/cvs/${uploadCvId}/prefill`, {
-    method: 'POST',
-    headers: authHeaders(token),
-  });
+export async function prefillCv(token: TokenSource, uploadCvId: string): Promise<CvDto> {
+  const res = await authFetch(`${API_URL}/cvs/${uploadCvId}/prefill`, token, { method: 'POST' });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throwApiError(body, `Failed to prefill CV: ${res.status}`, res.status);

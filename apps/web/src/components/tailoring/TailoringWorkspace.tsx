@@ -66,9 +66,8 @@ export function TailoringWorkspace({
 
     setSubmitting(true);
     try {
-      const token = await getToken();
       const t = await submitTailoring(
-        token!,
+        getToken,
         masterCvId,
         jobTitle || undefined,
         companyName || undefined,
@@ -89,8 +88,7 @@ export function TailoringWorkspace({
     pollRef.current = setInterval(() => {
       void (async () => {
         try {
-          const token = await getToken();
-          const t = await getTailoring(token!, tailoringId);
+          const t = await getTailoring(getToken, tailoringId);
           setTailoring(t);
 
           if (t.status === 'done') {

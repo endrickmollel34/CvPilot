@@ -73,8 +73,7 @@ export function NewCvChooser({ usage }: { usage?: UsageCounter }) {
     setLoading('scratch');
     error.clear();
     try {
-      const token = await getToken();
-      const cv = await createCv(token!, 'Untitled CV');
+      const cv = await createCv(getToken, 'Untitled CV');
       router.push(`/cvs/${cv.id}/edit`);
     } catch (err) {
       error.setFromError(err);
@@ -86,9 +85,8 @@ export function NewCvChooser({ usage }: { usage?: UsageCounter }) {
     setLoading('example');
     error.clear();
     try {
-      const token = await getToken();
-      const cv = await createCv(token!, 'Example CV');
-      await updateCvContent(token!, cv.id, EXAMPLE_CONTENT);
+      const cv = await createCv(getToken, 'Example CV');
+      await updateCvContent(getToken, cv.id, EXAMPLE_CONTENT);
       router.push(`/cvs/${cv.id}/edit`);
     } catch (err) {
       error.setFromError(err);

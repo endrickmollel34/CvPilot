@@ -1,10 +1,7 @@
 import type { CvDto } from './cvApi';
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
-
-function authHeaders(token: string): HeadersInit {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
+import { authFetch, type TokenSource } from './authFetch';
 
 export interface CoverLetterDto {
   id: string;
@@ -34,12 +31,12 @@ export interface SubmitCoverLetterParams {
 }
 
 export async function submitCoverLetter(
-  token: string,
+  token: TokenSource,
   params: SubmitCoverLetterParams,
 ): Promise<CoverLetterDto> {
-  const res = await fetch(`${API_URL}/cover-letters`, {
+  const res = await authFetch(`${API_URL}/cover-letters`, token, {
     method: 'POST',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
   if (!res.ok) {
@@ -49,22 +46,18 @@ export async function submitCoverLetter(
   return res.json() as Promise<CoverLetterDto>;
 }
 
-export async function getCoverLetter(token: string, id: string): Promise<CoverLetterDto> {
-  const res = await fetch(`${API_URL}/cover-letters/${id}`, {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: 'no-store',
-  });
+export async function getCoverLetter(token: TokenSource, id: string): Promise<CoverLetterDto> {
+  const res = await authFetch(`${API_URL}/cover-letters/${id}`, token, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
   return res.json() as Promise<CoverLetterDto>;
 }
 
 export async function listCoverLetters(
-  token: string,
+  token: TokenSource,
   page = 1,
   limit = 20,
 ): Promise<{ items: CoverLetterDto[]; total: number; page: number; limit: number }> {
-  const res = await fetch(`${API_URL}/cover-letters?page=${page}&limit=${limit}`, {
-    headers: { Authorization: `Bearer ${token}` },
+  const res = await authFetch(`${API_URL}/cover-letters?page=${page}&limit=${limit}`, token, {
     cache: 'no-store',
   });
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
@@ -77,23 +70,22 @@ export async function listCoverLetters(
 }
 
 export async function updateCoverLetter(
-  token: string,
+  token: TokenSource,
   id: string,
   content: string,
 ): Promise<CoverLetterDto> {
-  const res = await fetch(`${API_URL}/cover-letters/${id}`, {
+  const res = await authFetch(`${API_URL}/cover-letters/${id}`, token, {
     method: 'PATCH',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
   });
   if (!res.ok) throw new Error(`Update failed: ${res.status}`);
   return res.json() as Promise<CoverLetterDto>;
 }
 
-export async function downloadCoverLetterPdf(token: string, id: string): Promise<void> {
-  const res = await fetch(`${API_URL}/cover-letters/${id}/download`, {
+export async function downloadCoverLetterPdf(token: TokenSource, id: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/cover-letters/${id}/download`, token, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error(`Download request failed: ${res.status}`);
   const { downloadUrl } = (await res.json()) as { downloadUrl: string };

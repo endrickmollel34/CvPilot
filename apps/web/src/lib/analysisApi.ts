@@ -1,10 +1,7 @@
 import type { CvDto } from './cvApi';
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
-
-function authHeaders(token: string): HeadersInit {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
+import { authFetch, type TokenSource } from './authFetch';
 
 export interface AtsReportDto {
   atsScore?: number;
@@ -29,15 +26,15 @@ export interface AnalysisDto {
 }
 
 export async function submitAnalysis(
-  token: string,
+  token: TokenSource,
   cvId: string,
   jobTitle: string,
   companyName: string | undefined,
   jobDescription: string,
 ): Promise<AnalysisDto> {
-  const res = await fetch(`${API_URL}/analyses`, {
+  const res = await authFetch(`${API_URL}/analyses`, token, {
     method: 'POST',
-    headers: authHeaders(token),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cvId, jobTitle, companyName: companyName || undefined, jobDescription }),
   });
   if (!res.ok) {
@@ -47,20 +44,14 @@ export async function submitAnalysis(
   return res.json() as Promise<AnalysisDto>;
 }
 
-export async function getAnalysis(token: string, id: string): Promise<AnalysisDto> {
-  const res = await fetch(`${API_URL}/analyses/${id}`, {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: 'no-store',
-  });
+export async function getAnalysis(token: TokenSource, id: string): Promise<AnalysisDto> {
+  const res = await authFetch(`${API_URL}/analyses/${id}`, token, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
   return res.json() as Promise<AnalysisDto>;
 }
 
-export async function listAnalyses(token: string): Promise<AnalysisDto[]> {
-  const res = await fetch(`${API_URL}/analyses`, {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: 'no-store',
-  });
+export async function listAnalyses(token: TokenSource): Promise<AnalysisDto[]> {
+  const res = await authFetch(`${API_URL}/analyses`, token, { cache: 'no-store' });
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return res.json() as Promise<AnalysisDto[]>;
 }
