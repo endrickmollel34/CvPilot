@@ -236,9 +236,19 @@ describe('StripePaymentProvider', () => {
               customer: 'cus_1',
               status: stripeStatus,
               cancel_at_period_end: false,
-              current_period_start: 1_700_000_000,
-              current_period_end: 1_702_592_000,
-              items: { data: [{ price: { id: 'price_pro_real123' } }] },
+              // Since API version 2025-03-31.basil, current_period_start/end no
+              // longer exist on the Subscription object itself — only on each
+              // subscription item. See docs.stripe.com/changelog/basil/2025-03-31/
+              // deprecate-subscription-current-period-start-and-end.
+              items: {
+                data: [
+                  {
+                    price: { id: 'price_pro_real123' },
+                    current_period_start: 1_700_000_000,
+                    current_period_end: 1_702_592_000,
+                  },
+                ],
+              },
             },
           },
         });
@@ -256,6 +266,8 @@ describe('StripePaymentProvider', () => {
             plan: 'pro',
             subscriptionStatus: expectedStatus,
             cancelAtPeriodEnd: false,
+            currentPeriodStart: new Date(1_700_000_000 * 1000),
+            currentPeriodEnd: new Date(1_702_592_000 * 1000),
           }),
         );
       },
@@ -271,9 +283,15 @@ describe('StripePaymentProvider', () => {
             customer: 'cus_1',
             status: 'active',
             cancel_at_period_end: true,
-            current_period_start: 1_700_000_000,
-            current_period_end: 1_702_592_000,
-            items: { data: [{ price: { id: 'price_student_real123' } }] },
+            items: {
+              data: [
+                {
+                  price: { id: 'price_student_real123' },
+                  current_period_start: 1_700_000_000,
+                  current_period_end: 1_702_592_000,
+                },
+              ],
+            },
           },
         },
       });
@@ -302,9 +320,15 @@ describe('StripePaymentProvider', () => {
             customer: 'cus_1',
             status: 'active',
             cancel_at_period_end: false,
-            current_period_start: 1_700_000_000,
-            current_period_end: 1_702_592_000,
-            items: { data: [{ price: { id: 'price_unknown' } }] },
+            items: {
+              data: [
+                {
+                  price: { id: 'price_unknown' },
+                  current_period_start: 1_700_000_000,
+                  current_period_end: 1_702_592_000,
+                },
+              ],
+            },
           },
         },
       });
@@ -315,6 +339,30 @@ describe('StripePaymentProvider', () => {
       });
 
       expect(result).toEqual(expect.objectContaining({ plan: 'free' }));
+    });
+
+    it('omits currentPeriodStart/End on customer.subscription.updated when the subscription has no items', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'customer.subscription.updated',
+        data: {
+          object: {
+            id: 'sub_1',
+            customer: 'cus_1',
+            status: 'active',
+            cancel_at_period_end: false,
+            items: { data: [] },
+          },
+        },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).not.toHaveProperty('currentPeriodStart');
+      expect(result).not.toHaveProperty('currentPeriodEnd');
     });
 
     it('maps a customer.subscription.deleted event to subscription.cancelled', async () => {
@@ -349,9 +397,17 @@ describe('StripePaymentProvider', () => {
         type: 'invoice.payment_succeeded',
         data: {
           object: {
+            id: 'in_1',
             customer: 'cus_1',
-            subscription: 'sub_1',
-            payment_intent: 'pi_1',
+            // Since basil, invoice.subscription no longer exists — the
+            // generating subscription now lives at
+            // parent.subscription_details.subscription. See
+            // docs.stripe.com/changelog/basil/2025-03-31/
+            // adds-new-parent-field-to-invoicing-objects.
+            parent: {
+              type: 'subscription_details',
+              subscription_details: { subscription: 'sub_1' },
+            },
             amount_paid: 999,
             currency: 'gbp',
           },
@@ -368,12 +424,43 @@ describe('StripePaymentProvider', () => {
         provider: 'STRIPE',
         providerCustomerId: 'cus_1',
         providerSubscriptionId: 'sub_1',
-        providerPaymentId: 'pi_1',
+        // Since basil, invoice.payment_intent no longer exists (an invoice can
+        // settle via multiple partial payments now) — the invoice's own id is
+        // the stable idempotency key instead.
+        providerPaymentId: 'in_1',
         paymentStatus: 'succeeded',
         paymentMethod: 'CARD',
         amountMinorUnits: 999,
         currency: 'GBP',
       });
+    });
+
+    it('maps an invoice.payment_succeeded event with no parent (manually created invoice) to an undefined subscription id', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'invoice.payment_succeeded',
+        data: {
+          object: {
+            id: 'in_2',
+            customer: 'cus_1',
+            parent: null,
+            amount_paid: 500,
+            currency: 'gbp',
+          },
+        },
+      });
+
+      const result = provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          providerSubscriptionId: undefined,
+          providerPaymentId: 'in_2',
+        }),
+      );
     });
 
     it('maps an invoice.payment_failed event', async () => {
@@ -382,8 +469,12 @@ describe('StripePaymentProvider', () => {
         type: 'invoice.payment_failed',
         data: {
           object: {
+            id: 'in_3',
             customer: 'cus_1',
-            subscription: 'sub_1',
+            parent: {
+              type: 'subscription_details',
+              subscription_details: { subscription: 'sub_1' },
+            },
           },
         },
       });

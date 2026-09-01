@@ -136,6 +136,13 @@ export class StripePaymentProvider implements PaymentProvider {
 
       case 'customer.subscription.updated': {
         const sub = event.data.object as Stripe.Subscription;
+        // Since API version 2025-03-31.basil, Stripe moved the billing period
+        // off the Subscription object entirely — current_period_start/end now
+        // live per subscription item (docs.stripe.com/changelog/basil/2025-03-31/
+        // deprecate-subscription-current-period-start-and-end). CVPilot only ever
+        // sells single-price subscriptions, so the first item's period is the
+        // subscription's period.
+        const periodItem = sub.items.data[0];
         return {
           type: 'subscription.updated',
           provider: 'STRIPE',
@@ -143,8 +150,10 @@ export class StripePaymentProvider implements PaymentProvider {
           providerSubscriptionId: sub.id,
           plan: this.resolvePlanFromSubscription(sub),
           subscriptionStatus: this.mapStripeStatus(sub.status),
-          currentPeriodStart: new Date(sub.current_period_start * 1000),
-          currentPeriodEnd: new Date(sub.current_period_end * 1000),
+          ...(periodItem && {
+            currentPeriodStart: new Date(periodItem.current_period_start * 1000),
+            currentPeriodEnd: new Date(periodItem.current_period_end * 1000),
+          }),
           cancelAtPeriodEnd: sub.cancel_at_period_end,
         };
       }
@@ -166,8 +175,13 @@ export class StripePaymentProvider implements PaymentProvider {
           type: 'payment.succeeded',
           provider: 'STRIPE',
           providerCustomerId: invoice.customer as string,
-          providerSubscriptionId: invoice.subscription as string | undefined,
-          providerPaymentId: invoice.payment_intent as string,
+          providerSubscriptionId: this.resolveSubscriptionIdFromInvoice(invoice),
+          // Since basil, Invoice.payment_intent no longer exists (an invoice can
+          // now settle via multiple partial payments — see Invoice.payments,
+          // which requires an expand we don't request on webhook payloads). The
+          // Invoice id itself is always present and unique per billing-cycle
+          // charge, so it's the stable idempotency key here instead.
+          providerPaymentId: invoice.id,
           paymentStatus: 'succeeded',
           paymentMethod: 'CARD',
           amountMinorUnits: invoice.amount_paid,
@@ -181,7 +195,7 @@ export class StripePaymentProvider implements PaymentProvider {
           type: 'payment.failed',
           provider: 'STRIPE',
           providerCustomerId: invoice.customer as string,
-          providerSubscriptionId: invoice.subscription as string | undefined,
+          providerSubscriptionId: this.resolveSubscriptionIdFromInvoice(invoice),
           paymentStatus: 'failed',
         };
       }
@@ -189,6 +203,17 @@ export class StripePaymentProvider implements PaymentProvider {
       default:
         return null;
     }
+  }
+
+  // Since basil, Invoice.subscription no longer exists — the generating
+  // subscription now lives at invoice.parent.subscription_details.subscription,
+  // gated behind invoice.parent.type (docs.stripe.com/changelog/basil/
+  // 2025-03-31/adds-new-parent-field-to-invoicing-objects). A manually-created
+  // invoice (parent.type === 'quote_details', or no parent at all) has none.
+  private resolveSubscriptionIdFromInvoice(invoice: Stripe.Invoice): string | undefined {
+    if (invoice.parent?.type !== 'subscription_details') return undefined;
+    const subscription = invoice.parent.subscription_details?.subscription;
+    return typeof subscription === 'string' ? subscription : subscription?.id;
   }
 
   private resolvePlanFromSubscription(sub: Stripe.Subscription): Plan {

@@ -40,7 +40,7 @@
     "reflect-metadata": "^0.2.2",
     "resend": "^4.0.1",
     "rxjs": "^7.8.1",
-    "stripe": "^17.4.0",
+    "stripe": "^22.6.0",
     "svix": "^1.45.0",
     "typeorm": "^0.3.20",
     "zod": "^3.24.1"
