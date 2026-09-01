@@ -37,7 +37,11 @@ export async function getSubscription(token: string): Promise<SubscriptionDto | 
     cache: 'no-store',
   });
   if (!res.ok) throw new Error(`Failed to fetch subscription: ${res.status}`);
-  return res.json() as Promise<SubscriptionDto | null>;
+  // Nest sends an empty body (not JSON `null`) when the controller returns
+  // null — e.g. a Free-plan user with no subscription row. res.json() would
+  // throw a SyntaxError parsing that empty body, so read as text first.
+  const text = await res.text();
+  return (text ? JSON.parse(text) : null) as SubscriptionDto | null;
 }
 
 export async function getUsage(token: string): Promise<UsageSummary> {
