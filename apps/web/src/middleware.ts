@@ -5,6 +5,9 @@ const isPublicRoute = createRouteMatcher([
   '/sign-in(.*)',
   '/sign-up(.*)',
   '/api/webhooks(.*)',
+  // Clerk's own Vercel proxy requests (health checks, proxied clerk-js
+  // assets) — not an application route, so it must never hit auth.protect().
+  '/__clerk(.*)',
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
