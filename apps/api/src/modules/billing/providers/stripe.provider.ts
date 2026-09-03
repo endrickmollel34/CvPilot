@@ -74,7 +74,7 @@ export class StripePaymentProvider implements PaymentProvider {
     return { url: session.url };
   }
 
-  verifyAndParseWebhook(params: WebhookParams): InternalBillingEvent | null {
+  async verifyAndParseWebhook(params: WebhookParams): Promise<InternalBillingEvent | null> {
     this.ensureConfigured();
 
     let event: Stripe.Event;
@@ -112,7 +112,7 @@ export class StripePaymentProvider implements PaymentProvider {
     }
   }
 
-  private mapStripeEvent(event: Stripe.Event): InternalBillingEvent | null {
+  private async mapStripeEvent(event: Stripe.Event): Promise<InternalBillingEvent | null> {
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session;
@@ -135,7 +135,41 @@ export class StripePaymentProvider implements PaymentProvider {
       }
 
       case 'customer.subscription.updated': {
-        const sub = event.data.object as Stripe.Subscription;
+        // Stripe explicitly does NOT guarantee webhook delivery order, and
+        // explicitly warns against using event.created to reconcile order —
+        // "Snapshot events record created in seconds, so distinct events can
+        // share a timestamp" (docs.stripe.com/webhooks#event-ordering). A
+        // production incident proved this isn't theoretical: cancelling via
+        // the Customer Portal produced two customer.subscription.updated
+        // deliveries ~1 second apart, and the one carrying the STALE
+        // cancel_at_period_end: false snapshot was processed after the one
+        // carrying the correct cancel_at_period_end: true — so a plain
+        // last-write-wins persist of whichever event's embedded payload
+        // arrives last silently reverted the user's cancellation in our DB
+        // while Stripe's own records (and the Customer Portal) stayed
+        // correct throughout.
+        //
+        // Fix: never trust the payload embedded in this event for what to
+        // persist. Re-fetch the subscription's current live state from
+        // Stripe's API — the id is the one piece of the embedded payload
+        // that's safe to trust (it's an immutable identifier, not mutable
+        // state) — and derive every field from that live object instead.
+        // This makes processing order-independent: whichever of two
+        // out-of-order deliveries for the same subscription is processed
+        // last, both re-fetch the same live state and persist the same
+        // (correct, current) result.
+        const eventSub = event.data.object as Stripe.Subscription;
+        const sub = await this.stripe.subscriptions.retrieve(eventSub.id);
+
+        this.logger.log(
+          `customer.subscription.updated (event ${event.id}, sub ...${eventSub.id.slice(-8)}): ` +
+            `embedded cancel_at_period_end=${eventSub.cancel_at_period_end}, ` +
+            `live cancel_at_period_end=${sub.cancel_at_period_end}` +
+            (eventSub.cancel_at_period_end !== sub.cancel_at_period_end
+              ? ' — MISMATCH, embedded payload was stale, using live value'
+              : ''),
+        );
+
         // Since API version 2025-03-31.basil, Stripe moved the billing period
         // off the Subscription object entirely — current_period_start/end now
         // live per subscription item (docs.stripe.com/changelog/basil/2025-03-31/

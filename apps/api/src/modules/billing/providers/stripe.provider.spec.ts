@@ -13,6 +13,12 @@ const mockCheckoutSessionsCreate = jest.fn();
 const mockPortalSessionsCreate = jest.fn();
 const mockWebhooksConstructEvent = jest.fn();
 const mockSubscriptionsCancel = jest.fn();
+// Stripe explicitly does not guarantee webhook delivery order (see
+// docs.stripe.com/webhooks#event-ordering) — the provider re-fetches the
+// live subscription rather than trusting the payload embedded in a
+// customer.subscription.updated event, so every test for that event type
+// must mock this, not just the webhook payload.
+const mockSubscriptionsRetrieve = jest.fn();
 
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
@@ -21,9 +27,35 @@ jest.mock('stripe', () =>
       sessions: { create: (...args: unknown[]) => mockPortalSessionsCreate(...args) },
     },
     webhooks: { constructEvent: (...args: unknown[]) => mockWebhooksConstructEvent(...args) },
-    subscriptions: { cancel: (...args: unknown[]) => mockSubscriptionsCancel(...args) },
+    subscriptions: {
+      cancel: (...args: unknown[]) => mockSubscriptionsCancel(...args),
+      retrieve: (...args: unknown[]) => mockSubscriptionsRetrieve(...args),
+    },
   })),
 );
+
+// A representative live Stripe.Subscription as returned by
+// stripe.subscriptions.retrieve() — this is what the provider now derives
+// every customer.subscription.updated field from, never the webhook's own
+// embedded (possibly stale/out-of-order) event.data.object snapshot.
+function liveSubscription(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'sub_1',
+    customer: 'cus_1',
+    status: 'active',
+    cancel_at_period_end: false,
+    items: {
+      data: [
+        {
+          price: { id: 'price_pro_real123' },
+          current_period_start: 1_700_000_000,
+          current_period_end: 1_702_592_000,
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
 
 function makeConfig(overrides: Record<string, string> = {}) {
   const vals: Record<string, string> = {
@@ -91,9 +123,9 @@ describe('StripePaymentProvider', () => {
     it('rejects verifyAndParseWebhook when Stripe is not configured', async () => {
       const provider = await buildProvider(makeConfig({ STRIPE_WEBHOOK_SECRET: 'placeholder' }));
 
-      expect(() =>
+      await expect(
         provider.verifyAndParseWebhook({ rawBody: Buffer.from('{}'), signature: 'sig' }),
-      ).toThrow(ServiceUnavailableException);
+      ).rejects.toThrow(ServiceUnavailableException);
       expect(mockWebhooksConstructEvent).not.toHaveBeenCalled();
     });
 
@@ -202,7 +234,7 @@ describe('StripePaymentProvider', () => {
         },
       });
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -228,36 +260,24 @@ describe('StripePaymentProvider', () => {
       'maps a customer.subscription.updated event with Stripe status "%s" to "%s"',
       async (stripeStatus, expectedStatus) => {
         const provider = await buildProvider(makeConfig());
+        // The embedded webhook payload only needs to carry the subscription
+        // id — every other field is deliberately NOT set here, to prove the
+        // result comes from the live re-fetch below, not this snapshot.
         mockWebhooksConstructEvent.mockReturnValue({
+          id: 'evt_1',
           type: 'customer.subscription.updated',
-          data: {
-            object: {
-              id: 'sub_1',
-              customer: 'cus_1',
-              status: stripeStatus,
-              cancel_at_period_end: false,
-              // Since API version 2025-03-31.basil, current_period_start/end no
-              // longer exist on the Subscription object itself — only on each
-              // subscription item. See docs.stripe.com/changelog/basil/2025-03-31/
-              // deprecate-subscription-current-period-start-and-end.
-              items: {
-                data: [
-                  {
-                    price: { id: 'price_pro_real123' },
-                    current_period_start: 1_700_000_000,
-                    current_period_end: 1_702_592_000,
-                  },
-                ],
-              },
-            },
-          },
+          data: { object: { id: 'sub_1' } },
         });
+        mockSubscriptionsRetrieve.mockResolvedValue(
+          liveSubscription({ status: stripeStatus, cancel_at_period_end: false }),
+        );
 
-        const result = provider.verifyAndParseWebhook({
+        const result = await provider.verifyAndParseWebhook({
           rawBody: Buffer.from('{}'),
           signature: 'sig',
         });
 
+        expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith('sub_1');
         expect(result).toEqual(
           expect.objectContaining({
             type: 'subscription.updated',
@@ -276,27 +296,26 @@ describe('StripePaymentProvider', () => {
     it('maps a customer.subscription.updated event with cancel_at_period_end true', async () => {
       const provider = await buildProvider(makeConfig());
       mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_2',
         type: 'customer.subscription.updated',
-        data: {
-          object: {
-            id: 'sub_1',
-            customer: 'cus_1',
-            status: 'active',
-            cancel_at_period_end: true,
-            items: {
-              data: [
-                {
-                  price: { id: 'price_student_real123' },
-                  current_period_start: 1_700_000_000,
-                  current_period_end: 1_702_592_000,
-                },
-              ],
-            },
-          },
-        },
+        data: { object: { id: 'sub_1' } },
       });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          cancel_at_period_end: true,
+          items: {
+            data: [
+              {
+                price: { id: 'price_student_real123' },
+                current_period_start: 1_700_000_000,
+                current_period_end: 1_702_592_000,
+              },
+            ],
+          },
+        }),
+      );
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -313,27 +332,25 @@ describe('StripePaymentProvider', () => {
     it('maps an unrecognised price id on customer.subscription.updated to plan "free"', async () => {
       const provider = await buildProvider(makeConfig());
       mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_3',
         type: 'customer.subscription.updated',
-        data: {
-          object: {
-            id: 'sub_1',
-            customer: 'cus_1',
-            status: 'active',
-            cancel_at_period_end: false,
-            items: {
-              data: [
-                {
-                  price: { id: 'price_unknown' },
-                  current_period_start: 1_700_000_000,
-                  current_period_end: 1_702_592_000,
-                },
-              ],
-            },
-          },
-        },
+        data: { object: { id: 'sub_1' } },
       });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          items: {
+            data: [
+              {
+                price: { id: 'price_unknown' },
+                current_period_start: 1_700_000_000,
+                current_period_end: 1_702_592_000,
+              },
+            ],
+          },
+        }),
+      );
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -344,25 +361,89 @@ describe('StripePaymentProvider', () => {
     it('omits currentPeriodStart/End on customer.subscription.updated when the subscription has no items', async () => {
       const provider = await buildProvider(makeConfig());
       mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_4',
         type: 'customer.subscription.updated',
-        data: {
-          object: {
-            id: 'sub_1',
-            customer: 'cus_1',
-            status: 'active',
-            cancel_at_period_end: false,
-            items: { data: [] },
-          },
-        },
+        data: { object: { id: 'sub_1' } },
       });
+      mockSubscriptionsRetrieve.mockResolvedValue(liveSubscription({ items: { data: [] } }));
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
 
       expect(result).not.toHaveProperty('currentPeriodStart');
       expect(result).not.toHaveProperty('currentPeriodEnd');
+    });
+
+    // ─── Out-of-order webhook delivery (production incident regression) ────────
+    // Stripe explicitly does not guarantee delivery order and explicitly warns
+    // against relying on event.created to reconcile it (distinct events can
+    // share the same second) — docs.stripe.com/webhooks#event-ordering. A
+    // real production incident: cancelling via the Customer Portal produced
+    // two customer.subscription.updated deliveries ~1 second apart; the one
+    // whose OWN embedded payload still said cancel_at_period_end: false was
+    // processed after the one saying true, and a plain last-write-wins
+    // persist of the embedded snapshot silently reverted the cancellation in
+    // our DB. The fix: never trust the embedded snapshot — re-fetch the live
+    // subscription and derive the result from that instead, which is
+    // order-independent by construction (any processing order converges on
+    // the same live state).
+
+    it('uses the LIVE Stripe subscription for cancelAtPeriodEnd, not the embedded webhook payload — regression test for the production incident where a stale out-of-order delivery reverted a real cancellation', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_stale',
+        type: 'customer.subscription.updated',
+        data: {
+          object: {
+            id: 'sub_1',
+            // Stale/lagging embedded snapshot — must be ignored entirely.
+            cancel_at_period_end: false,
+          },
+        },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(liveSubscription({ cancel_at_period_end: true }));
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(expect.objectContaining({ cancelAtPeriodEnd: true }));
+    });
+
+    it('also uses the live state when the embedded payload OVER-reports cancellation — proves order-independence, not just a one-directional bias toward true', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_stale_2',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1', cancel_at_period_end: true } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({ cancel_at_period_end: false }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(expect.objectContaining({ cancelAtPeriodEnd: false }));
+    });
+
+    it('re-fetches using the subscription id carried by the webhook event, not a stale/previous id', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_5',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_specific_id' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(liveSubscription({ id: 'sub_specific_id' }));
+
+      await provider.verifyAndParseWebhook({ rawBody: Buffer.from('{}'), signature: 'sig' });
+
+      expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith('sub_specific_id');
     });
 
     it('maps a customer.subscription.deleted event to subscription.cancelled', async () => {
@@ -377,7 +458,7 @@ describe('StripePaymentProvider', () => {
         },
       });
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -414,7 +495,7 @@ describe('StripePaymentProvider', () => {
         },
       });
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -450,7 +531,7 @@ describe('StripePaymentProvider', () => {
         },
       });
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -479,7 +560,7 @@ describe('StripePaymentProvider', () => {
         },
       });
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -500,7 +581,7 @@ describe('StripePaymentProvider', () => {
         data: { object: {} },
       });
 
-      const result = provider.verifyAndParseWebhook({
+      const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
         signature: 'sig',
       });
@@ -514,9 +595,9 @@ describe('StripePaymentProvider', () => {
         throw new Error('signature mismatch');
       });
 
-      expect(() =>
+      await expect(
         provider.verifyAndParseWebhook({ rawBody: Buffer.from('{}'), signature: 'bad-sig' }),
-      ).toThrow(BadRequestException);
+      ).rejects.toThrow(BadRequestException);
     });
 
     // ─── Diagnostics (Production Readiness Phase 1) ──────────────────────────
@@ -531,7 +612,7 @@ describe('StripePaymentProvider', () => {
       });
 
       try {
-        provider.verifyAndParseWebhook({
+        await provider.verifyAndParseWebhook({
           rawBody: Buffer.from('{"secret":"do-not-log-me"}'),
           signature: 'super-secret-signature-value',
         });
@@ -554,7 +635,7 @@ describe('StripePaymentProvider', () => {
       });
 
       try {
-        provider.verifyAndParseWebhook({
+        await provider.verifyAndParseWebhook({
           rawBody: Buffer.from('{"secret":"do-not-log-me"}'),
           signature: 'super-secret-signature-value',
         });

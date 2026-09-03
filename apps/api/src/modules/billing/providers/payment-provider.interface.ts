@@ -58,8 +58,16 @@ export interface PaymentProvider {
    * Verifies the provider signature and maps the raw payload to an
    * InternalBillingEvent. Throws BadRequestException on invalid signature.
    * Returns null for valid-but-unhandled event types.
+   *
+   * Async: some event types (subscription updates — see StripePaymentProvider)
+   * re-fetch the live object from the provider's API rather than trusting the
+   * payload embedded in the webhook delivery, because webhook delivery order
+   * is never guaranteed (Stripe explicitly documents this and explicitly
+   * recommends re-fetching for exactly this reason). Trusting the embedded
+   * snapshot for a field that can flip back and forth (e.g. cancel-at-period-
+   * end) risks a stale, out-of-order delivery overwriting a fresher one.
    */
-  verifyAndParseWebhook(params: WebhookParams): InternalBillingEvent | null;
+  verifyAndParseWebhook(params: WebhookParams): Promise<InternalBillingEvent | null>;
 
   /** Optional — only meaningful for providers with recurring subscription support. */
   cancelSubscription?(providerSubscriptionId: string): Promise<void>;

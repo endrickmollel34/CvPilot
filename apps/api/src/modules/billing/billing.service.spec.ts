@@ -510,7 +510,7 @@ describe('BillingService', () => {
 
   describe('handleWebhook() — subscription state transitions', () => {
     async function fireEvent(event: Record<string, unknown>) {
-      mockStripeProvider.verifyAndParseWebhook.mockReturnValue(event);
+      mockStripeProvider.verifyAndParseWebhook.mockResolvedValue(event);
       await service.handleWebhook('STRIPE', Buffer.from('{}'), 'sig');
     }
 
@@ -693,7 +693,7 @@ describe('BillingService', () => {
     });
 
     it('a null (unhandled) parsed webhook event is a no-op', async () => {
-      mockStripeProvider.verifyAndParseWebhook.mockReturnValue(null);
+      mockStripeProvider.verifyAndParseWebhook.mockResolvedValue(null);
 
       await service.handleWebhook('STRIPE', Buffer.from('{}'), 'sig');
 

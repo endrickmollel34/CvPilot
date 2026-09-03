@@ -220,7 +220,7 @@ export class BillingService {
     signature: string,
   ): Promise<void> {
     const provider = this.getProvider(providerType);
-    const event = provider.verifyAndParseWebhook({ rawBody, signature });
+    const event = await provider.verifyAndParseWebhook({ rawBody, signature });
     if (!event) return;
     await this.applyBillingEvent(event);
   }
@@ -276,6 +276,13 @@ export class BillingService {
 
   private async onSubscriptionUpdated(event: InternalBillingEvent): Promise<void> {
     if (!event.providerCustomerId) return;
+
+    this.logger.log(
+      `Persisting subscription.updated for sub ...${event.providerSubscriptionId?.slice(-8) ?? 'unknown'}: ` +
+        `status=${event.subscriptionStatus ?? '(unchanged)'}, ` +
+        `cancelAtPeriodEnd=${event.cancelAtPeriodEnd ?? '(unchanged)'}, ` +
+        `currentPeriodEnd=${event.currentPeriodEnd?.toISOString() ?? '(unchanged)'}`,
+    );
 
     await this.subscriptionRepo.update(
       { providerCustomerId: event.providerCustomerId },
