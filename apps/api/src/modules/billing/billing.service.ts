@@ -281,7 +281,8 @@ export class BillingService {
       `Persisting subscription.updated for sub ...${event.providerSubscriptionId?.slice(-8) ?? 'unknown'}: ` +
         `status=${event.subscriptionStatus ?? '(unchanged)'}, ` +
         `cancelAtPeriodEnd=${event.cancelAtPeriodEnd ?? '(unchanged)'}, ` +
-        `currentPeriodEnd=${event.currentPeriodEnd?.toISOString() ?? '(unchanged)'}`,
+        `currentPeriodEnd=${event.currentPeriodEnd?.toISOString() ?? '(unchanged)'}, ` +
+        `cancelAt=${event.cancelAt?.toISOString() ?? '(none)'}`,
     );
 
     await this.subscriptionRepo.update(

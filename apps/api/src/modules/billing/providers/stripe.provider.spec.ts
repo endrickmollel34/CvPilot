@@ -446,6 +446,171 @@ describe('StripePaymentProvider', () => {
       expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith('sub_specific_id');
     });
 
+    // ─── cancel_at-based period-end cancellation (2026-09-03 incident) ─────────
+    // Definitive production evidence: for a Pro subscription the Stripe
+    // Dashboard displayed as "Cancels Oct 3, 2026", the real
+    // customer.subscription.updated payload was:
+    //   status: "active", cancel_at_period_end: false,
+    //   cancel_at: 1791043725, canceled_at: 1788457549,
+    //   cancellation_details.reason: "cancellation_requested",
+    //   items.data[0].current_period_end: 1791043725, schedule: null
+    // cancel_at_period_end: false yet cancel_at === current_period_end. Under
+    // CVPilot's current Stripe API version/billing mode, the Customer
+    // Portal's period-end cancellation flow apparently represents this via
+    // `cancel_at` rather than the classic boolean. The commit c4022b7 live
+    // re-fetch fix alone was not sufficient — it correctly fetches the live
+    // object, but the live object's OWN cancel_at_period_end is false here,
+    // so a direct-mirror mapping still produced the wrong (false) result.
+
+    it('treats cancel_at equal to the current period end as a period-end cancellation — exact production incident payload', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_cancel_at',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          status: 'active',
+          cancel_at_period_end: false,
+          cancel_at: 1_791_043_725,
+          canceled_at: 1_788_457_549,
+          cancellation_details: { reason: 'cancellation_requested' },
+          schedule: null,
+          items: {
+            data: [
+              {
+                price: { id: 'price_pro_real123' },
+                current_period_start: 1_788_451_725,
+                current_period_end: 1_791_043_725,
+              },
+            ],
+          },
+        }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          subscriptionStatus: 'active',
+          cancelAtPeriodEnd: true,
+          cancelAt: new Date(1_791_043_725 * 1000),
+          currentPeriodEnd: new Date(1_791_043_725 * 1000),
+        }),
+      );
+    });
+
+    it('does not classify as a period-end cancellation when cancel_at is null and cancel_at_period_end is false', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_no_cancel',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({ cancel_at_period_end: false, cancel_at: null }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(expect.objectContaining({ cancelAtPeriodEnd: false }));
+      expect(result).not.toHaveProperty('cancelAt');
+    });
+
+    it('is true when cancel_at_period_end is true, independent of cancel_at', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_classic',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({ cancel_at_period_end: true, cancel_at: null }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(expect.objectContaining({ cancelAtPeriodEnd: true }));
+    });
+
+    it('does NOT blindly classify a cancel_at that differs from the current period end as a period-end cancellation', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_future_cancel',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          cancel_at_period_end: false,
+          // Scheduled to cancel at some future point that is NOT the current
+          // period's end (e.g. a multi-period-out cancellation) — must not
+          // be conflated with "ends at the current period boundary".
+          cancel_at: 1_800_000_000,
+          items: {
+            data: [
+              {
+                price: { id: 'price_pro_real123' },
+                current_period_start: 1_700_000_000,
+                current_period_end: 1_702_592_000,
+              },
+            ],
+          },
+        }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          cancelAtPeriodEnd: false,
+          cancelAt: new Date(1_800_000_000 * 1000),
+        }),
+      );
+    });
+
+    it('does not treat a populated canceled_at as ended access while status remains active — exact production payload has both', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_canceled_at',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          status: 'active',
+          cancel_at_period_end: false,
+          cancel_at: null,
+          // canceled_at populated (cancellation requested) while the
+          // subscription is still fully active/entitled — must not by
+          // itself flip cancelAtPeriodEnd or subscriptionStatus.
+          canceled_at: 1_788_457_549,
+        }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({ subscriptionStatus: 'active', cancelAtPeriodEnd: false }),
+      );
+    });
+
     it('maps a customer.subscription.deleted event to subscription.cancelled', async () => {
       const provider = await buildProvider(makeConfig());
       mockWebhooksConstructEvent.mockReturnValue({

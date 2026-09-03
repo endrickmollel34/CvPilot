@@ -161,10 +161,14 @@ export class StripePaymentProvider implements PaymentProvider {
         const eventSub = event.data.object as Stripe.Subscription;
         const sub = await this.stripe.subscriptions.retrieve(eventSub.id);
 
+        const periodEndSeconds = this.resolveCurrentPeriodEndSeconds(sub);
+        const cancelAtPeriodEnd = this.resolveCancelAtPeriodEnd(sub, periodEndSeconds);
+
         this.logger.log(
           `customer.subscription.updated (event ${event.id}, sub ...${eventSub.id.slice(-8)}): ` +
             `embedded cancel_at_period_end=${eventSub.cancel_at_period_end}, ` +
-            `live cancel_at_period_end=${sub.cancel_at_period_end}` +
+            `live cancel_at_period_end=${sub.cancel_at_period_end}, cancel_at=${sub.cancel_at ?? 'null'}, ` +
+            `resolved period end=${periodEndSeconds ?? 'unknown'}, derived cancelAtPeriodEnd=${cancelAtPeriodEnd}` +
             (eventSub.cancel_at_period_end !== sub.cancel_at_period_end
               ? ' — MISMATCH, embedded payload was stale, using live value'
               : ''),
@@ -175,8 +179,12 @@ export class StripePaymentProvider implements PaymentProvider {
         // live per subscription item (docs.stripe.com/changelog/basil/2025-03-31/
         // deprecate-subscription-current-period-start-and-end). CVPilot only ever
         // sells single-price subscriptions, so the first item's period is the
-        // subscription's period.
-        const periodItem = sub.items.data[0];
+        // subscription's period. resolveCurrentPeriodEndSeconds() above is the
+        // single source of truth for this — reused below rather than reading
+        // sub.items.data[0] a second time, so the period-end value compared
+        // against cancel_at is guaranteed to be the exact same one reported
+        // as currentPeriodEnd.
+        const periodStartSeconds = sub.items.data[0]?.current_period_start;
         return {
           type: 'subscription.updated',
           provider: 'STRIPE',
@@ -184,11 +192,13 @@ export class StripePaymentProvider implements PaymentProvider {
           providerSubscriptionId: sub.id,
           plan: this.resolvePlanFromSubscription(sub),
           subscriptionStatus: this.mapStripeStatus(sub.status),
-          ...(periodItem && {
-            currentPeriodStart: new Date(periodItem.current_period_start * 1000),
-            currentPeriodEnd: new Date(periodItem.current_period_end * 1000),
-          }),
-          cancelAtPeriodEnd: sub.cancel_at_period_end,
+          ...(periodStartSeconds !== undefined &&
+            periodEndSeconds !== undefined && {
+              currentPeriodStart: new Date(periodStartSeconds * 1000),
+              currentPeriodEnd: new Date(periodEndSeconds * 1000),
+            }),
+          cancelAtPeriodEnd,
+          ...(sub.cancel_at != null && { cancelAt: new Date(sub.cancel_at * 1000) }),
         };
       }
 
@@ -248,6 +258,44 @@ export class StripePaymentProvider implements PaymentProvider {
     if (invoice.parent?.type !== 'subscription_details') return undefined;
     const subscription = invoice.parent.subscription_details?.subscription;
     return typeof subscription === 'string' ? subscription : subscription?.id;
+  }
+
+  // Since basil, current_period_start/end live per subscription item, not on
+  // the Subscription object itself (see the customer.subscription.updated
+  // case above). CVPilot only ever sells single-price subscriptions, so the
+  // first item's period end is THE subscription's period end. Single source
+  // of truth, reused both for the currentPeriodEnd field and for the
+  // cancel_at-equals-period-end comparison in resolveCancelAtPeriodEnd —
+  // duplicating this lookup would risk the two ever going out of sync.
+  private resolveCurrentPeriodEndSeconds(sub: Stripe.Subscription): number | undefined {
+    return sub.items.data[0]?.current_period_end;
+  }
+
+  // Internal meaning: "this subscription is scheduled to lose paid access at
+  // the current billing period's end" — deliberately NOT a direct mirror of
+  // Stripe's own cancel_at_period_end boolean. See InternalBillingEvent's
+  // cancelAtPeriodEnd docstring for the full rationale; summary of the
+  // production evidence that proved the direct-mirror assumption wrong
+  // (2026-09-03 incident, a real webhook payload for a subscription the
+  // Stripe Dashboard displayed as "Cancels Oct 3, 2026"):
+  //   status: "active", cancel_at_period_end: false,
+  //   cancel_at: 1791043725, canceled_at: 1788457549,
+  //   cancellation_details.reason: "cancellation_requested",
+  //   items.data[0].current_period_end: 1791043725
+  // cancel_at exactly equals the period end here — under CVPilot's current
+  // Stripe API version/billing mode, the Customer Portal's "cancel at
+  // period end" flow apparently sets cancel_at to a timestamp rather than
+  // setting the classic cancel_at_period_end=true boolean.
+  //
+  // Deliberately NOT using canceled_at for this at all: canceled_at is
+  // populated the moment cancellation is *requested*, not when access
+  // actually ends — the exact production payload above has canceled_at set
+  // while status is still "active" and the subscription is still fully
+  // entitled. Treating canceled_at as "access has ended" would immediately
+  // downgrade a still-paying, still-entitled customer.
+  private resolveCancelAtPeriodEnd(sub: Stripe.Subscription, periodEndSeconds?: number): boolean {
+    if (sub.cancel_at_period_end) return true;
+    return sub.cancel_at != null && periodEndSeconds != null && sub.cancel_at === periodEndSeconds;
   }
 
   private resolvePlanFromSubscription(sub: Stripe.Subscription): Plan {

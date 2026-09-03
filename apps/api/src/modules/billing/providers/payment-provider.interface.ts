@@ -42,7 +42,31 @@ export interface InternalBillingEvent {
   currency?: Currency;
   currentPeriodStart?: Date;
   currentPeriodEnd?: Date;
+  /**
+   * "This subscription is scheduled to lose paid access at the current
+   * billing period's end" — an intentionally *interpreted* meaning, not a
+   * direct mirror of the provider's own cancel-at-period-end boolean.
+   * Production evidence (2026-09-03 incident) proved a subscription can be
+   * genuinely scheduled to end at the current period boundary while
+   * Stripe's cancel_at_period_end field itself stays false — Stripe's
+   * Customer Portal cancellation flow, under CVPilot's current API
+   * version/billing mode, represents this via `cancel_at` (a timestamp)
+   * landing exactly on the period end instead. See
+   * StripePaymentProvider.resolveCancelAtPeriodEnd for the exact derivation
+   * every provider implementation must reproduce.
+   */
   cancelAtPeriodEnd?: boolean;
+  /**
+   * The provider's raw scheduled-cancellation timestamp, if any — present
+   * whenever the provider reports one, regardless of whether it lines up
+   * with the current period end (i.e. even when cancelAtPeriodEnd above is
+   * false, because it was scheduled for a future period boundary instead).
+   * Not yet persisted to the subscriptions table or surfaced to the
+   * frontend — kept here for diagnostic logging and so a future feature
+   * (e.g. displaying a cancellation scheduled for a non-current period)
+   * doesn't need another round of Stripe-shape archaeology to add.
+   */
+  cancelAt?: Date;
   metadata?: Record<string, unknown>;
 }
 
