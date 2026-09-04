@@ -22,6 +22,7 @@ import { UserService } from '../user/user.service';
 import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
 import { AiService } from './ai.service';
+import { groundSuggestions } from './recommendation-grounding.util';
 import type { CreateAnalysisDto } from './dto/create-analysis.dto';
 
 @Processor('cv-analysis')
@@ -52,8 +53,22 @@ export class AnalysisService extends WorkerHost {
     if (cv.userId !== user.id) {
       throw new ForbiddenException('CV not found');
     }
-    if (cv.parseStatus !== 'done' || !cv.parsedContent) {
+    // Analysis is intentionally scoped to uploaded, parsed CVs — unlike
+    // Cover Letter, it does not (yet) accept structured-only content from
+    // builder/prefill/tailored CVs. The frontend already only ever offers
+    // uploaded CVs for analysis and points users at Job Tailoring for the
+    // others (see AnalysisWorkspace.tsx), so this case is not reachable
+    // through the product UI today — but the message must still be accurate
+    // for any direct API caller, rather than claiming a structured CV (whose
+    // parseStatus is already 'done') is "still being parsed".
+    if (cv.parseStatus !== 'done') {
       throw new UnprocessableEntityException('CV is still being parsed. Please try again shortly.');
+    }
+    if (!cv.parsedContent) {
+      throw new UnprocessableEntityException(
+        'Analysis requires an uploaded CV with extracted text. Builder, prefilled, or tailored CVs ' +
+          'are not yet supported for analysis — use Job Tailoring instead.',
+      );
     }
 
     const canAnalyse = await this.billingService.canPerformAction(user.id, 'analyse');
@@ -97,9 +112,28 @@ export class AnalysisService extends WorkerHost {
         analysis.jobDescription,
       );
 
+      // Deterministic backstop on top of the prompt's grounding instructions
+      // (see ai.service.ts) — never trusts the model's wording or its own
+      // ats_keywords `found` flags at face value. Only touches suggestion
+      // text; match_score and ats_keywords/atsScore below are still computed
+      // from result.ats_keywords exactly as the model returned it, so a
+      // suggestion's phrasing being corrected never moves the score.
+      const { suggestions: groundedSuggestions, stats } = groundSuggestions(
+        result.suggestions,
+        cv.parsedContent,
+        result.ats_keywords,
+      );
+      if (stats.rewritten || stats.filteredFormatting || stats.deduped) {
+        this.logger.log(
+          `Analysis ${analysisId}: recommendation grounding rewrote ${stats.rewritten}, ` +
+            `filtered ${stats.filteredFormatting} unsupported formatting claim(s), ` +
+            `removed ${stats.deduped} duplicate(s)`,
+        );
+      }
+
       await this.analysisRepo.update(analysisId, {
         matchScore: result.match_score,
-        suggestions: result.suggestions,
+        suggestions: groundedSuggestions,
         modelUsed,
         tokensUsed,
         status: 'done',

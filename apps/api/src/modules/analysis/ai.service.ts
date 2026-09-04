@@ -6,8 +6,32 @@ import { z } from 'zod';
 
 import { resolveOptionalApiKey } from '../../common/utils/optional-api-key.util';
 
+// CV_CONTENT is the only source of truth about what the candidate has
+// actually done — JOB_DESCRIPTION describes what the employer wants, and a
+// term appearing there is never, by itself, evidence the candidate has it.
+// This mirrors the grounding conventions already used for cover letters
+// (cover-letter-ai.service.ts) and tailoring (tailoring-ai.service.ts).
+// AnalysisService.process() also re-checks every suggestion deterministically
+// against CV_CONTENT after this call returns (see
+// recommendation-grounding.util.ts) — this prompt is the first line of
+// defense, not the only one.
 const ANALYSIS_SYSTEM_PROMPT =
-  'You are an expert CV/resume analyst. Analyse the candidate CV against the job description and return structured feedback. ' +
+  'You are an expert CV/resume analyst. CV_CONTENT is the only source of truth about what the candidate has ' +
+  'actually done. JOB_DESCRIPTION describes what the employer wants — mentioning a term there is NEVER, by ' +
+  'itself, evidence the candidate has it. ' +
+  'Never write a suggestion that tells the candidate to add, claim, or imply possession of a skill, ' +
+  'responsibility, achievement, qualification, employer, industry, metric, certification, or event type unless ' +
+  'it is genuinely supported by CV_CONTENT. ' +
+  'When a job requirement has no support in CV_CONTENT, phrase the suggestion conditionally — e.g. "If you have ' +
+  'experience with X, add a concrete example of it" — never as a plain instruction to add or claim X. ' +
+  'When CV_CONTENT already supports something, you may suggest strengthening or clarifying how it is expressed, ' +
+  'but never invent details (dates, metrics, employers, tools) beyond what is written. ' +
+  'Only raise formatting/structure issues that plain extracted text can actually establish — missing sections, ' +
+  'section order, wording, length. Never claim visual/layout details such as tables, columns, graphics, images, ' +
+  'fonts, or colors: you only receive plain extracted text, never the original file layout. ' +
+  'Each suggestion must be specific and tied to an identifiable CV section, bullet, skill, or job requirement — ' +
+  'avoid generic boilerplate advice, and never produce more than one suggestion about the same missing keyword ' +
+  'or gap. ' +
   'Respond with ONLY valid JSON — no markdown fences, no explanation, no preamble.';
 
 function buildUserPrompt(cvText: string, jobDescription: string): string {
@@ -26,10 +50,15 @@ Return a JSON object with this exact structure:
     { "category": "MISSING_KEYWORD"|"WEAK_LANGUAGE"|"STRUCTURE"|"ATS_WARNING", "priority": "HIGH"|"MEDIUM"|"LOW", "text": "<string 10-500 chars>" }
   ],
   "ats_keywords": [
-    { "keyword": "<key term from job description>", "found": <true if present in CV, else false> }
+    { "keyword": "<key term from job description>", "found": <true only if the term, or a clear equivalent, genuinely appears in CV_CONTENT> }
   ]
 }
-Rules: suggestions must have 3-20 items. List all key terms from the job description in ats_keywords.`;
+Rules:
+- suggestions must have 3-20 items, each specific and non-repetitive — never produce multiple suggestions about the same missing keyword or gap.
+- MISSING_KEYWORD suggestions must be phrased conditionally (e.g. "If you have experience with X, add a concrete example showing it") — never as an instruction to simply add or claim X, since that would encourage misrepresenting the candidate's background.
+- WEAK_LANGUAGE suggestions must only target language already present in CV_CONTENT — never introduce a new, unsupported claim under this category.
+- STRUCTURE and ATS_WARNING suggestions must only describe issues inferable from plain text (missing sections, ordering, wording, length) — never claim visual/layout details such as tables, columns, graphics, or fonts.
+- List all key terms from the job description in ats_keywords.`;
 }
 
 export const AnalysisResponseSchema = z.object({
