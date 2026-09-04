@@ -18,6 +18,7 @@ import { NotificationModule } from './modules/notification/notification.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { TailoringModule } from './modules/tailoring/tailoring.module';
 import { HealthModule } from './modules/health/health.module';
+import { ContactModule } from './modules/contact/contact.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { HealthModule } from './modules/health/health.module';
     AuditModule,
     TailoringModule,
     HealthModule,
+    ContactModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

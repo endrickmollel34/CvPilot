@@ -9,6 +9,9 @@ const isPublicRoute = createRouteMatcher([
   // for real visitors and for Google OAuth production-branding review.
   '/privacy',
   '/terms',
+  // Public contact form — linked from Privacy/Terms and must work for
+  // signed-out visitors, including anyone submitting a privacy/data request.
+  '/contact',
   // Clerk's own Vercel proxy requests (health checks, proxied clerk-js
   // assets) — not an application route, so it must never hit auth.protect().
   '/__clerk(.*)',

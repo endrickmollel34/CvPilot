@@ -53,6 +53,9 @@ export function LegalPageLayout({ title, lastUpdated, children }: Props) {
             <Link href="/terms" className="hover:text-neutral-600">
               Terms
             </Link>
+            <Link href="/contact" className="hover:text-neutral-600">
+              Contact
+            </Link>
           </div>
         </div>
       </footer>

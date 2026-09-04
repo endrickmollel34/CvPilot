@@ -53,6 +53,13 @@ export default function PrivacyPage() {
             handled by our payment processor, Stripe. CVPilot does not receive or store your full
             card number; Stripe processes payment details directly.
           </li>
+          <li>
+            <strong>Contact form submissions</strong> — if you use our{' '}
+            <a href="/contact">contact form</a>, the name, email address, category, and message you
+            provide. This is sent directly to us by email via our transactional email provider,
+            Resend, and is not stored in our database. We use your email address only to reply to
+            your enquiry.
+          </li>
         </ul>
       </section>
 
@@ -221,8 +228,10 @@ export default function PrivacyPage() {
       <section>
         <h2>13. Contact us</h2>
         <p>
-          If you have questions about this Privacy Policy or how your information is handled,
-          contact us at <a href="mailto:endrickmollel34@gmail.com">endrickmollel34@gmail.com</a>.
+          If you have questions about this Privacy Policy, how your information is handled, or you
+          want to make a data request (for example, to access, correct, or delete your personal
+          information), contact us via our <a href="/contact">contact form</a>, selecting
+          &ldquo;Privacy / data request&rdquo; as the category.
         </p>
       </section>
     </LegalPageLayout>

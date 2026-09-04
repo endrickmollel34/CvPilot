@@ -25,7 +25,17 @@ export class NotificationService {
     // TODO: fetch user email from UserService, send result-ready email via Resend
   }
 
-  async sendTransactional(to: string, subject: string, html: string): Promise<void> {
+  // replyTo is optional and additive — e.g. the contact form sets it to the
+  // visitor's own address so a reply from the recipient's inbox reaches
+  // them directly, without ever using the visitor's address as `from`
+  // (which would fail SPF/DMARC checks, since we don't control their
+  // domain).
+  async sendTransactional(
+    to: string,
+    subject: string,
+    html: string,
+    replyTo?: string,
+  ): Promise<void> {
     if (!this.resend) {
       this.logger.warn(
         `Email not sent — Resend is not configured (to: ${to}, subject: "${subject}")`,
@@ -38,6 +48,7 @@ export class NotificationService {
       to,
       subject,
       html,
+      ...(replyTo && { replyTo }),
     });
   }
 }

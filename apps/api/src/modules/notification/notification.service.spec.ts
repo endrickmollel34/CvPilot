@@ -76,6 +76,26 @@ describe('NotificationService', () => {
     });
   });
 
+  it('includes replyTo when supplied, without changing the from/to addresses — used by the contact form to route replies to the visitor', async () => {
+    const service = buildService('re_real_key');
+    mockSend.mockResolvedValue({ data: { id: 'email-1' }, error: null });
+
+    await service.sendTransactional(
+      'owner@example.com',
+      'Subject',
+      '<p>Body</p>',
+      'visitor@example.com',
+    );
+
+    expect(mockSend).toHaveBeenCalledWith({
+      from: 'noreply@cvpilot.app',
+      to: 'owner@example.com',
+      subject: 'Subject',
+      html: '<p>Body</p>',
+      replyTo: 'visitor@example.com',
+    });
+  });
+
   it('boots and no-ops on analysis.completed without a configured Resend key', async () => {
     const service = buildService(undefined);
 

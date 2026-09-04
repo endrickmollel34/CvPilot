@@ -210,8 +210,7 @@ export default function TermsPage() {
       <section>
         <h2>15. Contact us</h2>
         <p>
-          Questions about these Terms can be sent to{' '}
-          <a href="mailto:endrickmollel34@gmail.com">endrickmollel34@gmail.com</a>.
+          Questions about these Terms can be sent via our <a href="/contact">contact form</a>.
         </p>
       </section>
     </LegalPageLayout>
