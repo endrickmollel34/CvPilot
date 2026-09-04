@@ -114,11 +114,68 @@ describe('CoverLetterService', () => {
     ).rejects.toThrow(ForbiddenException);
   });
 
-  it('throws UnprocessableEntityException when CV parsing is not complete', async () => {
+  it('throws UnprocessableEntityException when CV parsing is not complete and has no structured content', async () => {
     mockCvService.findById.mockResolvedValue({
       ...MOCK_CV,
       parseStatus: 'pending',
       parsedContent: undefined,
+    });
+
+    await expect(
+      service.submit('clerk-1', {
+        cvId: 'cv-1',
+        jobTitle: 'Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Build things.',
+      }),
+    ).rejects.toThrow(UnprocessableEntityException);
+  });
+
+  it('accepts a builder/prefilled CV with structured content even though parsedContent was never populated (regression)', async () => {
+    mockCvService.findById.mockResolvedValue({
+      ...MOCK_CV,
+      source: 'prefill',
+      parseStatus: 'done',
+      parsedContent: undefined,
+      content: {
+        version: 1,
+        personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+        summary: 'Experienced engineer.',
+        workExperience: [],
+        education: [],
+        skills: [],
+        languages: [],
+        certifications: [],
+        sectionOrder: [],
+      },
+    });
+
+    await expect(
+      service.submit('clerk-1', {
+        cvId: 'cv-1',
+        jobTitle: 'Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Build things.',
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('throws UnprocessableEntityException for structured content that is present but empty (malformed/empty content must not bypass validation)', async () => {
+    mockCvService.findById.mockResolvedValue({
+      ...MOCK_CV,
+      source: 'builder',
+      parseStatus: 'done',
+      parsedContent: undefined,
+      content: {
+        version: 1,
+        personalDetails: { fullName: '', email: '' },
+        workExperience: [],
+        education: [],
+        skills: [],
+        languages: [],
+        certifications: [],
+        sectionOrder: [],
+      },
     });
 
     await expect(
@@ -199,14 +256,18 @@ describe('CoverLetterService', () => {
     });
   });
 
-  it("passes the CV's structured skills to the AI service when the CV has structured content", async () => {
+  it('generates from a builder/prefilled CV whose usable content lives only in structured content, never in parsedContent (regression)', async () => {
     mockAiService.generateCoverLetter.mockResolvedValue({
       content: 'Dear Hiring Manager, ... Acme Corp ... Senior Engineer ...',
       modelUsed: 'gpt-4o',
       tokensUsed: 300,
     });
+    // Matches the real shape CvService produces for source 'builder' /
+    // 'prefill' / 'tailored': parsedContent is never populated for these —
+    // only content is. See cv-text-resolver.util.ts.
     mockCvService.findById.mockResolvedValue({
       ...MOCK_CV,
+      parsedContent: undefined,
       content: {
         version: 1,
         personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
@@ -234,14 +295,83 @@ describe('CoverLetterService', () => {
       },
     } as unknown as Job<CoverLetterJobData>);
 
+    const [cvTextArg] = mockAiService.generateCoverLetter.mock.calls[0] as [string];
+    expect(cvTextArg).toContain('Jane Doe');
+    expect(cvTextArg).toContain('TypeScript');
     expect(mockAiService.generateCoverLetter).toHaveBeenCalledWith(
-      MOCK_CV.parsedContent,
+      cvTextArg,
       'Lead backend development.',
       'Senior Engineer',
       'Acme Corp',
       'professional',
       ['TypeScript', 'React'],
     );
+    expect(mockRepo.update).toHaveBeenCalledWith(
+      'letter-1',
+      expect.objectContaining({ status: 'generated' }),
+    );
+  });
+
+  it('prefers current structured content over a stale original extraction when both happen to be present', async () => {
+    mockAiService.generateCoverLetter.mockResolvedValue({
+      content: 'Dear Hiring Manager, ... Acme Corp ... Senior Engineer ...',
+      modelUsed: 'gpt-4o',
+      tokensUsed: 300,
+    });
+    mockCvService.findById.mockResolvedValue({
+      ...MOCK_CV, // parsedContent: 'Software engineer with 3 years experience in TypeScript.'
+      content: {
+        version: 1,
+        personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+        workExperience: [],
+        education: [],
+        skills: [],
+        languages: [],
+        certifications: [],
+        sectionOrder: [],
+      },
+    });
+
+    await service.process({
+      data: {
+        coverLetterId: 'letter-1',
+        userId: 'user-1',
+        cvId: 'cv-1',
+        jobTitle: 'Senior Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Lead backend development.',
+        tone: 'professional',
+      },
+    } as unknown as Job<CoverLetterJobData>);
+
+    const [cvTextArg] = mockAiService.generateCoverLetter.mock.calls[0] as [string];
+    expect(cvTextArg).toContain('Jane Doe');
+    expect(cvTextArg).not.toBe(MOCK_CV.parsedContent);
+  });
+
+  it('updates entity to failed without calling the AI service when the CV genuinely has no usable content', async () => {
+    mockCvService.findById.mockResolvedValue({
+      ...MOCK_CV,
+      parseStatus: 'pending',
+      parsedContent: undefined,
+    });
+
+    await expect(
+      service.process({
+        data: {
+          coverLetterId: 'letter-1',
+          userId: 'user-1',
+          cvId: 'cv-1',
+          jobTitle: 'Senior Engineer',
+          companyName: 'Acme Corp',
+          jobDescription: 'Lead backend development.',
+          tone: 'professional',
+        },
+      } as unknown as Job<CoverLetterJobData>),
+    ).resolves.toBeUndefined();
+
+    expect(mockAiService.generateCoverLetter).not.toHaveBeenCalled();
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
   });
 
   it('passes undefined skills for upload-only CVs with no structured content (must still work)', async () => {

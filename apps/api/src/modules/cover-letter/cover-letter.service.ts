@@ -28,6 +28,7 @@ import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
 import { AnalysisService } from '../analysis/analysis.service';
 import { CoverLetterAiService } from './cover-letter-ai.service';
+import { resolveCoverLetterCvText } from './cv-text-resolver.util';
 import type { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
 import type { UpdateCoverLetterDto } from './dto/update-cover-letter.dto';
 import type { ListCoverLettersDto } from './dto/list-cover-letters.dto';
@@ -84,7 +85,11 @@ export class CoverLetterService extends WorkerHost {
     if (cv.userId !== user.id) {
       throw new ForbiddenException('CV not found');
     }
-    if (cv.parseStatus !== 'done' || !cv.parsedContent) {
+    // A CV is usable for cover-letter generation once it has usable text
+    // from EITHER source — see resolveCoverLetterCvText for why upload CVs
+    // (parsedContent) and builder/prefill/tailored CVs (structured content)
+    // never populate the same field.
+    if (!resolveCoverLetterCvText(cv)) {
       throw new UnprocessableEntityException('CV is still being parsed. Please try again shortly.');
     }
 
@@ -136,18 +141,19 @@ export class CoverLetterService extends WorkerHost {
 
     try {
       const cv = await this.cvService.findById(cvId);
-      if (!cv.parsedContent) {
-        throw new Error(`CV ${cvId} has no parsed content`);
+      const cvText = resolveCoverLetterCvText(cv);
+      if (!cvText) {
+        throw new Error(`CV ${cvId} has no usable content`);
       }
 
       // Structured skills, when available (builder/prefill/tailored CVs),
-      // are supplied as an extra evidence block alongside the raw parsed
-      // text. Upload-only CVs with no structured content simply pass
-      // undefined here and generation proceeds off parsedContent alone.
+      // are supplied as an extra evidence block alongside the CV text.
+      // Upload-only CVs with no structured content simply pass undefined
+      // here and generation proceeds off the raw parsed text alone.
       const candidateSkills = cv.content?.skills.map((s) => s.name);
 
       const { content, modelUsed, tokensUsed } = await this.aiService.generateCoverLetter(
-        cv.parsedContent,
+        cvText,
         jobDescription,
         jobTitle,
         companyName,
