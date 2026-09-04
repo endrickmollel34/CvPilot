@@ -5,6 +5,10 @@ const isPublicRoute = createRouteMatcher([
   '/sign-in(.*)',
   '/sign-up(.*)',
   '/api/webhooks(.*)',
+  // Public legal pages — required to be reachable without signing in, both
+  // for real visitors and for Google OAuth production-branding review.
+  '/privacy',
+  '/terms',
   // Clerk's own Vercel proxy requests (health checks, proxied clerk-js
   // assets) — not an application route, so it must never hit auth.protect().
   '/__clerk(.*)',

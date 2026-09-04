@@ -176,9 +176,17 @@ export default function HomePage() {
 
       {/* ── Footer ─────────────────────────────────────────────────────────── */}
       <footer className="border-t border-neutral-100 px-6 py-8">
-        <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-2 text-sm text-neutral-400 sm:flex-row">
+        <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-3 text-sm text-neutral-400 sm:flex-row">
           <span>© 2026 CVPilot</span>
           <span>Helping you land more interviews.</span>
+          <div className="flex items-center gap-4">
+            <Link href="/privacy" className="hover:text-neutral-600">
+              Privacy
+            </Link>
+            <Link href="/terms" className="hover:text-neutral-600">
+              Terms
+            </Link>
+          </div>
         </div>
       </footer>
     </div>
