@@ -27,6 +27,7 @@ import { BillingService } from '../billing/billing.service';
 import { CvService } from '../cv/cv.service';
 import { TailoringAiService } from './tailoring-ai.service';
 import { isNewSkillGrounded } from './skill-grounding.util';
+import { classifySuggestionGrounding } from './tailoring-grounding.util';
 import type { CreateTailoringDto } from './dto/create-tailoring.dto';
 import type { ApplySuggestionsDto } from './dto/apply-suggestions.dto';
 
@@ -91,15 +92,25 @@ export class TailoringService {
         tokensUsed,
       } = await this.tailoringAiService.runTailoring(masterCv.content, tailoring.jobDescription);
 
-      const grounded = raw.filter((s) => {
-        if (s.section !== 'skills' && s.section !== 'languages') return true;
-        return isNewSkillGrounded(s.suggestedContent, s.evidence, masterCv.content!);
-      });
+      // Grounding V2 — every suggestion is classified regardless of section
+      // (see tailoring-grounding.util.ts for why the previous skills/
+      // languages-only check let summary/workExperience/education
+      // suggestions through completely unvalidated). A suggestion whose
+      // `reason` alone named an unsupported claim is kept with a sanitized
+      // reason rather than dropped — `reason` is never applied to the CV
+      // (see applyDecisions below), so a fabricated justification doesn't
+      // justify discarding an otherwise-safe, useful CV change.
+      const grounded: TailoringSuggestion[] = [];
+      for (const s of raw) {
+        const verdict = classifySuggestionGrounding(s, masterCv.content);
+        if (!verdict.allowed) continue;
+        grounded.push(verdict.sanitizedReason ? { ...s, reason: verdict.sanitizedReason } : s);
+      }
       const droppedCount = raw.length - grounded.length;
       if (droppedCount > 0) {
         this.logger.warn(
-          `Tailoring ${tailoringId}: dropped ${droppedCount} skill/language suggestion(s) not ` +
-            'grounded in the source CV (see skill-grounding.util.ts)',
+          `Tailoring ${tailoringId}: dropped ${droppedCount} suggestion(s) not grounded in the ` +
+            'source CV (see tailoring-grounding.util.ts)',
         );
       }
 

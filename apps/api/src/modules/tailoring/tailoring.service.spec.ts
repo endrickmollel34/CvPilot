@@ -597,7 +597,12 @@ describe('TailoringService', () => {
           id: 'x1',
           section: 'certifications',
           originalContent: '',
-          suggestedContent: 'AWS cert',
+          // Grounded in MOCK_CONTENT's 'Built REST APIs' bullet (same quote
+          // x3 uses) — this test is about sort order, not grounding, so the
+          // fixture must survive the grounding filter (Tailoring Grounding
+          // V2 now validates certifications suggestions too, unlike before).
+          suggestedContent: 'REST APIs',
+          evidence: 'Built REST APIs',
           reason: 'Listed in JD.',
           priority: 'HIGH',
         },
@@ -724,6 +729,60 @@ describe('TailoringService', () => {
         suggestions: TailoringSuggestion[];
       };
       expect(saved.suggestions.map((s) => s.suggestedContent)).toEqual(['REST APIs']);
+    });
+
+    // Tailoring Grounding V2 regression: before this fix, only 'skills'/
+    // 'languages' suggestions were validated — a summary rewrite like this
+    // one passed straight through into production untouched.
+    it('drops a summary suggestion that strengthens intensity and injects an unsupported teamwork claim', async () => {
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [
+          {
+            id: 'g2',
+            section: 'summary',
+            originalContent: MOCK_CONTENT.summary!,
+            suggestedContent:
+              'Experienced engineer with a strong background in backend development.',
+            reason:
+              'Enhances the summary by emphasizing teamwork and aligns with collaboration within an agile team.',
+            priority: 'HIGH',
+          },
+        ],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 150,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+        suggestions: TailoringSuggestion[];
+      };
+      expect(saved.suggestions).toHaveLength(0);
+    });
+
+    it('keeps a summary suggestion that only rewords existing content without strengthening or broadening it', async () => {
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [
+          {
+            id: 'g3',
+            section: 'summary',
+            originalContent: MOCK_CONTENT.summary!,
+            suggestedContent:
+              'Backend engineer with hands-on experience building and shipping APIs.',
+            reason: 'Aligns terminology with the job description.',
+            priority: 'MEDIUM',
+          },
+        ],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 150,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+        suggestions: TailoringSuggestion[];
+      };
+      expect(saved.suggestions).toHaveLength(1);
     });
 
     it('completes successfully with status "done" when the AI legitimately returns zero suggestions', async () => {
