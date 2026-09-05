@@ -145,7 +145,7 @@ ${jobDescription}
 ${cvText}${skillsLine}
 </CANDIDATE_EVIDENCE>
 
-Write only the body paragraphs of the cover letter. Do not add placeholders. Mention the company name and job title naturally in the letter.`;
+Write only the body paragraphs of the cover letter. Do not add placeholders. Mention the company name naturally in the letter, and include the exact job title text given above — "${jobTitle}" — verbatim at least once (you may still discuss the role in your own words elsewhere; this exact phrase must appear somewhere).`;
 }
 
 /** Falls back to treating the whole CV text as (undifferentiated) experience

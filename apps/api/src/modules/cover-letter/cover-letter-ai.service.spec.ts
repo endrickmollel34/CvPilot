@@ -383,6 +383,35 @@ describe('CoverLetterAiService', () => {
     expect(systemPrompt).toMatch(/dynamic and innovative environment/i); // boilerplate example listed
   });
 
+  // (I) Job-title validation investigation: the prompt's prior wording
+  // ("mention the job title naturally") did not require the model to
+  // reproduce the exact given string, which — combined with the tone
+  // contracts' encouragement to vary sentence structure — plausibly let a
+  // compound title like "Backend Software Engineer" get paraphrased into
+  // something validateOutput()'s exact-substring check would reject. This
+  // asserts the strengthened instruction actually reaches the model.
+  it('(I) instructs the model to include the exact given job title verbatim', async () => {
+    mockOpenAICreate.mockResolvedValue(
+      openAiResponse(cleanLetter('Acme Corp', 'Backend Software Engineer')),
+    );
+
+    await service.generateCoverLetter(
+      NO_TECH_CV_TEXT,
+      JOB_DESCRIPTION,
+      'Backend Software Engineer',
+      'Acme Corp',
+      'professional',
+    );
+
+    const call = mockOpenAICreate.mock.calls[0] as [
+      { messages: { role: string; content: string }[] },
+    ];
+    const userPrompt = call[0].messages[1]!.content;
+
+    expect(userPrompt).toMatch(/verbatim at least once/i);
+    expect(userPrompt).toContain('"Backend Software Engineer"');
+  });
+
   // ─── Existing happy path is preserved ──────────────────────────────────────
 
   it('returns a clean letter on the first attempt with no retries (happy path)', async () => {

@@ -59,6 +59,33 @@ import type { CvEvidence } from './cv-evidence.util';
  *     unconditionally — explicitly disclaiming a technology is inherently
  *     honest regardless of what else the sentence says.
  *
+ * V2.1.1: V2.1's tier classification was still WHOLE-SENTENCE — the moment
+ * any part of a sentence matched an experience/capability pattern, EVERY
+ * checked term anywhere else in that same sentence was required to be
+ * experience-grounded, even a genuinely separate, honestly-phrased
+ * knowledge-only mention. In production this caused a real availability
+ * regression: "My familiarity with Python, Java, and REST APIs, along with
+ * my knowledge of database design and MySQL, provides a strong foundation
+ * for tackling the responsibilities of this role." was rejected outright,
+ * because "a strong foundation" (an EXPERIENCE_CLAIM_PATTERN) appearing
+ * anywhere in the sentence promoted Python/Java/REST APIs/database
+ * design/MySQL — all genuinely skills-only, all honestly phrased via
+ * "familiarity with"/"knowledge of" — into an experience-tier requirement
+ * they could never satisfy, exhausting all 3 retries on every attempt
+ * regardless of what the model actually wrote.
+ *
+ * The fix: claim-pattern matches are now POSITIONAL (findClaimSpans), and
+ * each checked-term OCCURRENCE is graded only against its NEAREST governing
+ * claim pattern (resolveGoverningTier) — preferring the nearest one that
+ * precedes the term (natural English word order puts the governing phrase
+ * before its object: "familiarity with Python," "can implement
+ * authentication"). This is still fully deterministic/regex-based (no NLP),
+ * reuses every existing pattern list unchanged, and correctly separates
+ * "My knowledge of MySQL [safe knowledge claim], and I can contribute to
+ * implementing authentication [unsafe capability claim]" into two
+ * independently-graded claims about two different terms, even with no
+ * clause-boundary punctuation between them.
+ *
  * This deliberately does NOT attempt general free-form factual verification
  * (that is a semantic-entailment problem regex cannot solve reliably — see
  * the investigation report). It only flags a sentence when BOTH:
@@ -212,11 +239,177 @@ function containsWholePhrase(haystack: string, phrase: string): boolean {
   return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(haystack);
 }
 
+/** All start indices of `phrase` in `text` as a whole word/phrase — same
+ *  boundary rule as containsWholePhrase, but position-aware (global scan). */
+function findWholePhraseIndices(text: string, phrase: string): number[] {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`(^|[^a-z0-9])(${escaped})($|[^a-z0-9])`, 'gi');
+  const indices: number[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    indices.push(match.index + match[1]!.length);
+    // The boundary chars around the phrase are shared with any adjacent
+    // match — step back so an immediately-following occurrence isn't missed.
+    regex.lastIndex = match.index + match[1]!.length + match[2]!.length;
+  }
+  return indices;
+}
+
+interface PatternMatch {
+  index: number;
+  length: number;
+}
+
+/** Every match of any of `patterns` within `text`, with position and length. */
+function findAllPatternMatches(patterns: readonly RegExp[], text: string): PatternMatch[] {
+  const matches: PatternMatch[] = [];
+  for (const pattern of patterns) {
+    const global = new RegExp(
+      pattern.source,
+      pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`,
+    );
+    let match: RegExpExecArray | null;
+    while ((match = global.exec(text)) !== null) {
+      matches.push({ index: match.index, length: match[0].length });
+      if (match[0].length === 0) global.lastIndex++; // guard against a zero-width match looping forever
+    }
+  }
+  return matches;
+}
+
+type ClaimTier = 'experience' | 'knowledge' | 'aspirational' | 'negation';
+
+function isExemptTier(tier: ClaimTier): boolean {
+  return tier === 'aspirational' || tier === 'negation';
+}
+
+interface ClaimSpan {
+  index: number;
+  length: number;
+  tier: ClaimTier;
+}
+
+/** Clause-boundary start offsets, approximated by splitting on commas and
+ *  semicolons — deliberately simple (not a real parser), used only to bound
+ *  how far negation's shielding effect (see below) can reach. */
+function clauseBoundaries(sentence: string): number[] {
+  const starts = [0];
+  const regex = /[,;]\s*/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(sentence)) !== null) starts.push(match.index + match[0].length);
+  return starts;
+}
+
+function clauseIndexOf(position: number, boundaries: readonly number[]): number {
+  let clause = 0;
+  for (let i = 0; i < boundaries.length; i++) {
+    if (position >= boundaries[i]!) clause = i;
+  }
+  return clause;
+}
+
+/**
+ * Finds every claim-pattern match in `sentence` (V2.1.1) — every EXPERIENCE,
+ * CAPABILITY, KNOWLEDGE, ASPIRATIONAL, and NEGATION pattern occurrence, each
+ * tagged with its tier and *position*. Positions are what let
+ * `resolveGoverningTier` associate a specific checked-term occurrence with
+ * the claim phrase that actually governs it, instead of letting one
+ * claim-pattern match anywhere in the sentence apply to every term in it.
+ *
+ * Two bounded refinements on top of the raw matches:
+ *  1. A KNOWLEDGE/EXPERIENCE match nested INSIDE an ASPIRATIONAL/NEGATION
+ *     match's own matched text is dropped, not treated as a second,
+ *     independent claim — e.g. "develop my knowledge" (aspirational) and
+ *     "knowledge of" (knowledge) both match on the shared word "knowledge"
+ *     in "develop my knowledge of Kubernetes," but there is only one claim
+ *     here (aspirational growth language), not two.
+ *  2. An EXPERIENCE/CAPABILITY match in the SAME clause (comma/semicolon-
+ *     delimited) as a NEGATION match is treated as negated too — "haven't
+ *     directly built X" must not let "built" survive as its own,
+ *     ungoverned experience claim just because it is a few words away from
+ *     "haven't." This never reaches into a later, independent clause
+ *     ("..., but I have experience with Y" is unaffected).
+ */
+function findClaimSpans(sentence: string): ClaimSpan[] {
+  const rawSpans: ClaimSpan[] = [];
+  const collect = (patterns: readonly RegExp[], tier: ClaimTier) => {
+    for (const { index, length } of findAllPatternMatches(patterns, sentence)) {
+      rawSpans.push({ index, length, tier });
+    }
+  };
+
+  collect(NEGATION_OVERRIDE_PATTERNS, 'negation');
+  collect(ASPIRATIONAL_OVERRIDE_PATTERNS, 'aspirational');
+  collect(EXPERIENCE_CLAIM_PATTERNS, 'experience');
+  collect(CAPABILITY_CLAIM_PATTERNS, 'experience');
+  collect(KNOWLEDGE_CLAIM_PATTERNS, 'knowledge');
+
+  const exemptSpans = rawSpans.filter((s) => isExemptTier(s.tier));
+  const withoutNestedMatches = rawSpans.filter((span) => {
+    if (isExemptTier(span.tier)) return true;
+    return !exemptSpans.some((e) => span.index >= e.index && span.index < e.index + e.length);
+  });
+
+  const boundaries = clauseBoundaries(sentence);
+  const negatedClauses = new Set(
+    withoutNestedMatches
+      .filter((s) => s.tier === 'negation')
+      .map((s) => clauseIndexOf(s.index, boundaries)),
+  );
+
+  return withoutNestedMatches.map((span) =>
+    (span.tier === 'experience' || span.tier === 'knowledge') &&
+    negatedClauses.has(clauseIndexOf(span.index, boundaries))
+      ? { ...span, tier: 'negation' }
+      : span,
+  );
+}
+
+/**
+ * Resolves which claim tier governs a specific term occurrence at
+ * `termIndex` — the *nearest* claim-pattern span, preferring one that
+ * precedes the term (natural English word order: "familiarity with
+ * Python," "can implement authentication" — the governing phrase comes
+ * before its object) and falling back to the nearest one that follows only
+ * if none precedes it. Returns undefined if no claim pattern exists
+ * anywhere in the sentence (an unclaimed, bare mention — left unflagged, as
+ * before).
+ */
+function resolveGoverningTier(
+  termIndex: number,
+  spans: readonly ClaimSpan[],
+): ClaimTier | undefined {
+  let nearestPreceding: ClaimSpan | undefined;
+  let nearestFollowing: ClaimSpan | undefined;
+
+  for (const span of spans) {
+    if (span.index <= termIndex) {
+      if (!nearestPreceding || span.index > nearestPreceding.index) nearestPreceding = span;
+    } else if (!nearestFollowing || span.index < nearestFollowing.index) {
+      nearestFollowing = span;
+    }
+  }
+
+  return (nearestPreceding ?? nearestFollowing)?.tier;
+}
+
 /**
  * Returns a human-readable description of each unsupported possession claim
  * found in `letterText`, checked against `evidence` — the candidate's CV
  * split into experience vs skills-only tiers (see cv-evidence.util.ts), never
  * the job description. An empty array means no violation was found.
+ *
+ * V2.1.1: each checked-term OCCURRENCE is graded against the claim pattern
+ * that actually governs *it* (by nearest position — see
+ * resolveGoverningTier), not by whichever claim pattern happens to appear
+ * anywhere in the same sentence. Production QA found the prior whole-sentence
+ * classification treated an entire sentence as one experience-strength claim
+ * the moment ANY part of it matched an experience/capability pattern — e.g.
+ * "...provides a strong foundation for tackling the responsibilities of this
+ * role" — which wrongly promoted unrelated, genuinely skills-only mentions
+ * earlier in the same sentence ("my familiarity with Python, Java...") into
+ * a requirement for work-history evidence, rejecting valid letters until all
+ * retries were exhausted.
  */
 export function findUnsupportedPossessionClaims(
   letterText: string,
@@ -226,33 +419,18 @@ export function findUnsupportedPossessionClaims(
   const fullEvidenceText = `${evidence.experienceText}\n${evidence.skillsOnlyTerms.join(', ')}`;
 
   for (const sentence of splitIntoSentences(letterText)) {
-    // Negation always wins, unconditionally — explicitly disclaiming a
-    // technology is inherently honest no matter what else the sentence says.
-    if (NEGATION_OVERRIDE_PATTERNS.some((p) => p.test(sentence))) continue;
-
-    const isExperienceClaim =
-      EXPERIENCE_CLAIM_PATTERNS.some((p) => p.test(sentence)) ||
-      CAPABILITY_CLAIM_PATTERNS.some((p) => p.test(sentence));
-
-    // Aspirational framing ("eager to," "interested in," ...) only exempts
-    // the sentence when it ISN'T also asserting an experience/capability
-    // claim — otherwise the aspirational opener could be used to smuggle in
-    // an unearned capability claim later in the same sentence (V2.1).
-    if (!isExperienceClaim && ASPIRATIONAL_OVERRIDE_PATTERNS.some((p) => p.test(sentence))) {
-      continue;
-    }
-
-    const isKnowledgeClaim =
-      !isExperienceClaim && KNOWLEDGE_CLAIM_PATTERNS.some((p) => p.test(sentence));
-    if (!isExperienceClaim && !isKnowledgeClaim) continue;
-
-    // An experience-strength claim can only be satisfied by experienceText
-    // — a knowledge-strength claim accepts either tier.
-    const requiredEvidence = isExperienceClaim ? evidence.experienceText : fullEvidenceText;
+    const spans = findClaimSpans(sentence);
+    if (spans.length === 0) continue; // no claim pattern anywhere — nothing to check
 
     for (const term of ALL_CHECKED_TERMS) {
-      if (containsWholePhrase(sentence, term) && !containsWholePhrase(requiredEvidence, term)) {
-        violations.push(`"${term}" in: "${sentence}"`);
+      for (const termIndex of findWholePhraseIndices(sentence, term)) {
+        const tier = resolveGoverningTier(termIndex, spans);
+        if (tier === undefined || isExemptTier(tier)) continue;
+
+        const requiredEvidence = tier === 'experience' ? evidence.experienceText : fullEvidenceText;
+        if (!containsWholePhrase(requiredEvidence, term)) {
+          violations.push(`"${term}" in: "${sentence}"`);
+        }
       }
     }
   }
