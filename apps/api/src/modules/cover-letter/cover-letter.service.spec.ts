@@ -304,7 +304,7 @@ describe('CoverLetterService', () => {
       'Senior Engineer',
       'Acme Corp',
       'professional',
-      ['TypeScript', 'React'],
+      { experienceText: '', skillsOnlyTerms: ['TypeScript', 'React'] },
     );
     expect(mockRepo.update).toHaveBeenCalledWith(
       'letter-1',
@@ -374,7 +374,7 @@ describe('CoverLetterService', () => {
     expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
   });
 
-  it('passes undefined skills for upload-only CVs with no structured content (must still work)', async () => {
+  it('passes plain-text evidence with no skills-only terms for upload-only CVs with no structured content (must still work)', async () => {
     mockAiService.generateCoverLetter.mockResolvedValue({
       content: 'Dear Hiring Manager, ... Acme Corp ... Senior Engineer ...',
       modelUsed: 'gpt-4o',
@@ -394,13 +394,16 @@ describe('CoverLetterService', () => {
       },
     } as unknown as Job<CoverLetterJobData>);
 
+    // MOCK_CV.parsedContent has no recognisable section header, so the
+    // plain-text evidence builder falls back to treating it all as
+    // experience evidence (see cv-evidence.util.ts).
     expect(mockAiService.generateCoverLetter).toHaveBeenCalledWith(
       MOCK_CV.parsedContent,
       'Lead backend development.',
       'Senior Engineer',
       'Acme Corp',
       'professional',
-      undefined,
+      { experienceText: MOCK_CV.parsedContent, skillsOnlyTerms: [] },
     );
   });
 

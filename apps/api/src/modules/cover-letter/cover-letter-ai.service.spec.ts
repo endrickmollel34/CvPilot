@@ -80,16 +80,19 @@ function anthropicResponse(text: string, inputTokens = 100, outputTokens = 100) 
 }
 
 // A clean, always-valid letter body (long enough, no brackets, mentions
-// company/title, mentions only genuinely-supported experience).
+// company/title, mentions only genuinely-supported experience). Deliberately
+// avoids any soft-skill/possession phrasing not established by NO_TECH_CV_TEXT
+// (e.g. "problem-solving," "attention to detail") — those are exactly what
+// the V2 soft-skill guard now catches, so this fixture must stay genuinely
+// clean rather than relying on any of the checked terms.
 function cleanLetter(companyName: string, jobTitle: string): string {
   return (
     `Dear Hiring Manager,\n\nI am writing to apply for the ${jobTitle} position at ${companyName}. ` +
     'My academic background in Computer Science, combined with hands-on project work building an ' +
-    'inventory tracking tool, has given me a solid foundation in problem-solving and structured ' +
-    'thinking. In my retail role I regularly balanced competing priorities while staying attentive ' +
-    'to detail, a habit I bring to every project I take on.\n\nI would welcome the chance to bring ' +
-    `this mindset to ${companyName} and grow alongside the team. Thank you for your consideration.\n\n` +
-    'Sincerely'
+    'inventory tracking tool, has given me a solid foundation to build on. In my retail role I ' +
+    'regularly balanced competing priorities while handling customer queries.\n\nI would welcome the ' +
+    `chance to bring this mindset to ${companyName} and grow alongside the team. Thank you for your ` +
+    'consideration.\n\nSincerely'
   );
 }
 
@@ -220,14 +223,23 @@ describe('CoverLetterAiService', () => {
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
   });
 
-  it('accepts a possession claim about a skill supplied via the structured skills list, not just parsedContent', async () => {
+  // ─── V2: skill-list evidence supports knowledge claims, not experience ─────
+
+  it('accepts a modest knowledge claim about a skill supplied only via the structured skills-only evidence', async () => {
     // NO_TECH_CV_TEXT never mentions Docker — this only passes validation
-    // because 'Docker' is supplied via the structured candidateSkills
-    // parameter, proving that list is actually wired into the evidence the
-    // guard checks against (not just into the prompt).
+    // because 'Docker' is supplied as skills-only evidence, and the letter's
+    // phrasing ("I have knowledge of") is a modest knowledge claim, which a
+    // skills-list entry alone is sufficient to ground — proving the evidence
+    // object is actually wired into the guard (not just into the prompt).
+    // Kept as two separate sentences deliberately: the guard operates at
+    // sentence granularity, so a single run-on sentence combining this
+    // knowledge claim with an unrelated experience-pattern phrase (e.g.
+    // "...and a strong foundation...") would have the stricter tier apply
+    // to the whole sentence — a known, accepted limitation (see
+    // possession-claim-guard.util.ts's header comment).
     const letter =
       'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role at Acme Corp. ' +
-      'I am well-versed in Docker, and my academic background gives me a strong foundation to build on.' +
+      'I have knowledge of Docker. My academic background gives me a foundation to build on.' +
       '\n\nI look forward to bringing this experience to Acme Corp. Sincerely';
     mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
 
@@ -237,11 +249,35 @@ describe('CoverLetterAiService', () => {
       'Backend Engineer',
       'Acme Corp',
       'professional',
-      ['Docker'],
+      { experienceText: '', skillsOnlyTerms: ['Docker'] },
     );
 
     expect(result.content).toBe(letter);
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
+  it('still rejects an experience-level claim about a skill that is only listed, never demonstrated (skill → experience inflation)', async () => {
+    // Regression for the exact production QA finding: a skills-list-only
+    // term (Docker) must not ground a *stronger* claim like "well-versed
+    // in" — that requires actual work-experience evidence, not just a
+    // skill tag, even when the term is supplied as evidence at all.
+    const badLetter =
+      'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role at Acme Corp. ' +
+      'I am well-versed in Docker from my professional work.' +
+      '\n\nI look forward to bringing this experience to Acme Corp. Sincerely';
+    mockOpenAICreate.mockResolvedValue(openAiResponse(badLetter));
+    mockAnthropicCreate.mockResolvedValue(anthropicResponse(badLetter));
+
+    await expect(
+      service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        'We need a backend engineer skilled in Docker.',
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        { experienceText: '', skillsOnlyTerms: ['Docker'] },
+      ),
+    ).rejects.toThrow('all AI providers exhausted');
   });
 
   // ─── Tone descriptors must be distinct ─────────────────────────────────────
@@ -273,6 +309,78 @@ describe('CoverLetterAiService', () => {
 
     // All four prompts must be pairwise distinct.
     expect(new Set(prompts).size).toBe(prompts.length);
+  });
+
+  // (E) Tone differentiation: each tone contract must specify concretely
+  // different sentence-rhythm/structure/warmth instructions — not just a
+  // different label — so the model cannot satisfy all four with the same
+  // underlying structure and a swapped adjective (the exact production QA
+  // finding: tones differed only via "I am writing" vs "I am excited").
+  it('(E) gives each tone a distinct, substantive contract covering contractions, rhythm, and closing style', async () => {
+    const prompts: Record<(typeof TONES)[number], string> = {} as never;
+
+    for (const tone of TONES) {
+      mockOpenAICreate.mockResolvedValueOnce(
+        openAiResponse(cleanLetter('Acme Corp', 'Backend Engineer')),
+      );
+      await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        tone,
+      );
+      const call = mockOpenAICreate.mock.calls[mockOpenAICreate.mock.calls.length - 1] as [
+        { messages: { role: string; content: string }[] },
+      ];
+      prompts[tone] = call[0].messages[1]!.content;
+    }
+
+    // Formal: explicitly bans contractions and caps emotional intensity.
+    expect(prompts.formal).toMatch(/avoid contractions/i);
+    expect(prompts.formal).toMatch(/no exclamation marks/i);
+
+    // Enthusiastic: explicitly allows contractions and bounds exclamation use.
+    expect(prompts.enthusiastic).toMatch(/contractions are welcome/i);
+    expect(prompts.enthusiastic).toMatch(/one exclamation mark/i);
+
+    // Conversational: explicitly expects contractions throughout.
+    expect(prompts.conversational).toMatch(/contractions are expected/i);
+
+    // Professional: sits between the two, sparing rather than banned/expected.
+    expect(prompts.professional).toMatch(/contractions are acceptable but used sparingly/i);
+
+    // Each tone specifies its own opening and closing behavior distinctly.
+    expect(prompts.formal).toMatch(/measured statement of purpose/i);
+    expect(prompts.conversational).toMatch(/direct, human way/i);
+  });
+
+  // Grounding rules (Task 3) must actually reach the model as part of the
+  // system prompt, not just live in code comments.
+  it('sends the evidence-type and soft-skill grounding rules in the system prompt', async () => {
+    mockOpenAICreate.mockResolvedValue(
+      openAiResponse(cleanLetter('Acme Corp', 'Backend Engineer')),
+    );
+
+    await service.generateCoverLetter(
+      NO_TECH_CV_TEXT,
+      JOB_DESCRIPTION,
+      'Backend Engineer',
+      'Acme Corp',
+      'professional',
+    );
+
+    const call = mockOpenAICreate.mock.calls[0] as [
+      { messages: { role: string; content: string }[] },
+    ];
+    const systemPrompt = call[0].messages[0]!.content;
+
+    expect(systemPrompt).toMatch(
+      /never convert a listed skill into a claim of professional\/work experience/i,
+    );
+    expect(systemPrompt).toMatch(/never infer a soft skill, team methodology/i);
+    expect(systemPrompt).toMatch(/frame it as genuine interest or willingness to grow/i);
+    expect(systemPrompt).toMatch(/dynamic and innovative environment/i); // boilerplate example listed
   });
 
   // ─── Existing happy path is preserved ──────────────────────────────────────

@@ -29,6 +29,7 @@ import { BillingService } from '../billing/billing.service';
 import { AnalysisService } from '../analysis/analysis.service';
 import { CoverLetterAiService } from './cover-letter-ai.service';
 import { resolveCoverLetterCvText } from './cv-text-resolver.util';
+import { buildCvEvidenceFromContent, buildCvEvidenceFromPlainText } from './cv-evidence.util';
 import type { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
 import type { UpdateCoverLetterDto } from './dto/update-cover-letter.dto';
 import type { ListCoverLettersDto } from './dto/list-cover-letters.dto';
@@ -146,11 +147,16 @@ export class CoverLetterService extends WorkerHost {
         throw new Error(`CV ${cvId} has no usable content`);
       }
 
-      // Structured skills, when available (builder/prefill/tailored CVs),
-      // are supplied as an extra evidence block alongside the CV text.
-      // Upload-only CVs with no structured content simply pass undefined
-      // here and generation proceeds off the raw parsed text alone.
-      const candidateSkills = cv.content?.skills.map((s) => s.name);
+      // Splits the CV into experience-vs-skills-only evidence tiers so the
+      // AI service's grounding guard can tell "demonstrated experience"
+      // apart from "listed skill only" (see cv-evidence.util.ts) — structured
+      // CVs (builder/prefill/tailored) split exactly via their typed fields;
+      // upload CVs get a lightweight heuristic split of the raw extracted
+      // text (falls back to treating it all as experience evidence if no
+      // recognisable section header is found).
+      const evidence = cv.content
+        ? buildCvEvidenceFromContent(cv.content)
+        : buildCvEvidenceFromPlainText(cvText);
 
       const { content, modelUsed, tokensUsed } = await this.aiService.generateCoverLetter(
         cvText,
@@ -158,7 +164,7 @@ export class CoverLetterService extends WorkerHost {
         jobTitle,
         companyName,
         tone,
-        candidateSkills,
+        evidence,
       );
 
       await this.repo.update(coverLetterId, {
