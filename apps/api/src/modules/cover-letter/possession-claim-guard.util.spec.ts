@@ -207,4 +207,125 @@ describe('findUnsupportedPossessionClaims()', () => {
       expect(violations).toEqual([]);
     });
   });
+
+  // ─── V2.1 — unsupported FUTURE CAPABILITY claims ───────────────────────────
+  // Production QA finding: the model stopped claiming unsupported PAST
+  // experience but started implying unsupported FUTURE capability instead —
+  // "I can contribute to implementing X" — and the old aspirational override
+  // ("eager to," "interested in") exempted the whole sentence even when a
+  // capability claim followed later in it.
+
+  describe('V2.1 — future-capability claims', () => {
+    // (1) JD-only authentication + capability claim → rejected.
+    it('flags "I can contribute to implementing authentication" when authentication is JD-only', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I can contribute to implementing secure authentication systems.',
+        SKILL_ONLY_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('authentication'))).toBe(true);
+    });
+
+    // The exact production QA sentence — an aspirational opener ("eager to")
+    // must not exempt the capability claim ("implementing ...") that follows.
+    it('flags the exact production QA sentence despite its aspirational opener', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am also eager to leverage my database design and MySQL knowledge to contribute to ' +
+          'optimizing database queries and implementing secure authentication systems.',
+        SKILL_ONLY_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('authentication'))).toBe(true);
+    });
+
+    it('flags the second production QA sentence ("...where I know I can contribute and grow")', () => {
+      const violations = findUnsupportedPossessionClaims(
+        "I'm particularly interested in exploring authentication systems and database design " +
+          'further, areas where I know I can contribute and grow.',
+        SKILL_ONLY_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('authentication'))).toBe(true);
+    });
+
+    it('flags other equivalent capability phrasings ("ready to implement", "can help build")', () => {
+      expect(
+        findUnsupportedPossessionClaims(
+          'I am ready to implement authentication for your platform.',
+          SKILL_ONLY_EVIDENCE,
+        ).some((v) => v.includes('authentication')),
+      ).toBe(true);
+
+      expect(
+        findUnsupportedPossessionClaims(
+          'I can help build out your authentication systems.',
+          SKILL_ONLY_EVIDENCE,
+        ).some((v) => v.includes('authentication')),
+      ).toBe(true);
+    });
+
+    // (2) JD-only authentication + genuine learning-interest framing (no
+    // capability claim) → allowed.
+    it('does not flag "I am interested in learning authentication" — genuine learning interest, no capability claim', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am interested in learning authentication and growing my skills in this area.',
+        SKILL_ONLY_EVIDENCE,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('does not flag any of the SAFE growth-language examples for a JD-only requirement', () => {
+      const safeSentences = [
+        'I am interested in learning Kubernetes.',
+        'I would welcome the opportunity to develop my knowledge of Kubernetes.',
+        'I am keen to gain experience with Kubernetes.',
+        'I am interested in exploring Kubernetes further.',
+        'I would like to strengthen my skills in Kubernetes.',
+      ];
+      for (const sentence of safeSentences) {
+        expect(findUnsupportedPossessionClaims(sentence, SKILL_ONLY_EVIDENCE)).toEqual([]);
+      }
+    });
+
+    // (3) CV explicitly demonstrates the requirement + contribution claim →
+    // allowed, per the task's explicit carve-out.
+    it('allows a capability claim when the CV explicitly demonstrates the requirement', () => {
+      const evidenceWithAuth: CvEvidence = {
+        experienceText: `${SKILL_ONLY_EVIDENCE.experienceText} Implemented authentication using OAuth.`,
+        skillsOnlyTerms: SKILL_ONLY_EVIDENCE.skillsOnlyTerms,
+      };
+      const violations = findUnsupportedPossessionClaims(
+        'I can contribute to implementing secure authentication systems.',
+        evidenceWithAuth,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    // (4) Skill-only evidence must not become unsupported implementation
+    // capability, even for a term that genuinely IS listed as a skill —
+    // "database design" is a real skills-list entry, but a capability claim
+    // about it still requires work-history evidence, not just the skill tag.
+    it('flags a capability claim about a skills-list-only term, not just terms absent from the whole CV', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I can deliver database design improvements from day one.',
+        SKILL_ONLY_EVIDENCE, // "database design" is skills-only, never in a work bullet
+      );
+      expect(violations.some((v) => v.includes('database design'))).toBe(true);
+    });
+
+    it('still allows a modest knowledge claim about the same skills-list-only term', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I have knowledge of database design.',
+        SKILL_ONLY_EVIDENCE,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    // Negation must still win unconditionally even when an experience claim
+    // follows in the same sentence (unaffected by the V2.1 override split).
+    it('still allows an explicit disclaimer even when experience language follows', () => {
+      const violations = findUnsupportedPossessionClaims(
+        "While I haven't directly built authentication systems, I have strong experience with similar security concepts.",
+        SKILL_ONLY_EVIDENCE,
+      );
+      expect(violations).toEqual([]);
+    });
+  });
 });

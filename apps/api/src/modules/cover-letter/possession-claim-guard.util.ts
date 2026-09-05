@@ -33,6 +33,32 @@ import type { CvEvidence } from './cv-evidence.util';
  * checked with the same tiered logic (e.g. "I have agile experience"
  * requires "agile" to actually appear in experienceText, not just anywhere).
  *
+ * V2.1: production QA found a subtler loophole — the model stopped claiming
+ * unsupported PAST experience, but started implying unsupported FUTURE
+ * CAPABILITY instead, e.g. "I am eager to leverage my database design and
+ * MySQL knowledge to contribute to ... implementing secure authentication
+ * systems" (no CV evidence of authentication at all). The old
+ * NON_CLAIM_OVERRIDE_PATTERNS exempted the *entire* sentence unconditionally
+ * once it spotted an aspirational opener like "eager to" or "interested
+ * in" — so a genuinely unsafe capability claim later in the same sentence
+ * was never even checked. Two changes fix this:
+ *   - A new CAPABILITY_CLAIM_PATTERNS category ("I can/could/am able to/am
+ *     ready to contribute/implement/deliver/handle/lead/apply/build/help")
+ *     — present-tense capability claims, distinct from past-tense
+ *     experience claims but held to the same bar: grounded in
+ *     experienceText specifically, never by a skills-list entry alone (a
+ *     skill only ever supports "I'd like to develop this," never "I can
+ *     deliver this").
+ *   - The former NON_CLAIM_OVERRIDE_PATTERNS is split into
+ *     ASPIRATIONAL_OVERRIDE_PATTERNS (soft — "interested in," "eager to,"
+ *     ...) and NEGATION_OVERRIDE_PATTERNS (hard — "haven't," "without,"
+ *     ...). Aspirational framing no longer exempts a sentence that ALSO
+ *     matches an experience/capability claim pattern — the capability claim
+ *     wins, since aspirational language can otherwise be used to smuggle in
+ *     an unearned capability claim. Negation framing still always wins
+ *     unconditionally — explicitly disclaiming a technology is inherently
+ *     honest regardless of what else the sentence says.
+ *
  * This deliberately does NOT attempt general free-form factual verification
  * (that is a semantic-entailment problem regex cannot solve reliably — see
  * the investigation report). It only flags a sentence when BOTH:
@@ -81,6 +107,15 @@ const KNOWN_TECH_TERMS: readonly string[] = [
   'database query optimization',
   'query optimization',
   'database optimization',
+  // Deliberately just the bare word, not "authentication system(s)" /
+  // "secure authentication" as separate entries — containsWholePhrase's
+  // whole-word matching already finds "authentication" inside any of those
+  // longer phrases, so a CV that says "Implemented authentication using
+  // OAuth" correctly grounds a claim about "authentication systems" too;
+  // adding the longer phrases as their OWN separate terms would instead
+  // require an exact-phrase match and wrongly reject that case.
+  'authentication',
+  'authorization',
 ];
 
 // Commonly-hallucinated soft skills / team methodologies — never inferable
@@ -118,8 +153,20 @@ const EXPERIENCE_CLAIM_PATTERNS: readonly RegExp[] = [
   /\bresponsible for\b/i,
 ];
 
-// Sentence matches ANY of these (and no EXPERIENCE_CLAIM_PATTERNS) → a
-// modest knowledge/familiarity claim — a skills-list entry alone is
+// V2.1: present-tense/future CAPABILITY claims — "I can contribute to X,"
+// "I am ready to implement X." Distinct from EXPERIENCE_CLAIM_PATTERNS
+// (which match past-tense/gerund evidence of having actually done
+// something), but held to the same bar: a capability claim about a
+// requirement is only honest if the candidate has genuinely demonstrated
+// evidence for it, never a bare skills-list entry (see the module header
+// comment's production QA example: "eager to leverage my ... knowledge to
+// contribute to ... implementing secure authentication systems").
+const CAPABILITY_CLAIM_PATTERNS: readonly RegExp[] = [
+  /\b(can|could|am able to|is able to|am ready to|is ready to)\s+(\S+\s+){0,4}(contribute|implement|deliver|handle|lead|apply|build|help)\b/i,
+];
+
+// Sentence matches ANY of these (and no EXPERIENCE/CAPABILITY_CLAIM_PATTERNS)
+// → a modest knowledge/familiarity claim — a skills-list entry alone is
 // sufficient grounding.
 const KNOWLEDGE_CLAIM_PATTERNS: readonly RegExp[] = [
   /\b(proficient|skilled|fluent|competent)\s+(in|with)\b/i,
@@ -132,14 +179,22 @@ const KNOWLEDGE_CLAIM_PATTERNS: readonly RegExp[] = [
   /\b(have|has|had)\s+([a-z0-9-]+\s+){0,3}skills?\b/i,
 ];
 
-// Sentence matches ANY of these → never flagged, regardless of tech terms or
-// claim patterns also present. Covers aspirational/learning-interest
-// framing and explicit negation/disclaimer framing.
-const NON_CLAIM_OVERRIDE_PATTERNS: readonly RegExp[] = [
+// "Soft" override — genuinely aspirational/learning-interest framing, but
+// (V2.1) it must NOT exempt a sentence that also asserts an experience or
+// capability claim: aspirational language can otherwise be used to smuggle
+// in an unearned capability claim later in the same sentence (see the
+// module header comment).
+const ASPIRATIONAL_OVERRIDE_PATTERNS: readonly RegExp[] = [
   /\b(interested in|keen to|eager to|excited to|hope to|hoping to|looking to|aim to|would love to|would welcome the opportunity to|look forward to)\b/i,
   /\b(develop|expand|build|grow|strengthen|deepen)(ing)?\s+(my\s+)?(knowledge|skills?|experience|understanding)\b/i,
   /\bnew to\b/i,
   /\bstill learning\b/i,
+];
+
+// "Hard" override — explicit negation/disclaimer framing always wins,
+// regardless of anything else in the sentence: disclaiming a technology is
+// inherently honest no matter what else is said.
+const NEGATION_OVERRIDE_PATTERNS: readonly RegExp[] = [
   /\b(haven'?t|hasn'?t|have not|has not|don'?t have|do not have|without|lack(ing)?)\b/i,
 ];
 
@@ -171,9 +226,22 @@ export function findUnsupportedPossessionClaims(
   const fullEvidenceText = `${evidence.experienceText}\n${evidence.skillsOnlyTerms.join(', ')}`;
 
   for (const sentence of splitIntoSentences(letterText)) {
-    if (NON_CLAIM_OVERRIDE_PATTERNS.some((p) => p.test(sentence))) continue;
+    // Negation always wins, unconditionally — explicitly disclaiming a
+    // technology is inherently honest no matter what else the sentence says.
+    if (NEGATION_OVERRIDE_PATTERNS.some((p) => p.test(sentence))) continue;
 
-    const isExperienceClaim = EXPERIENCE_CLAIM_PATTERNS.some((p) => p.test(sentence));
+    const isExperienceClaim =
+      EXPERIENCE_CLAIM_PATTERNS.some((p) => p.test(sentence)) ||
+      CAPABILITY_CLAIM_PATTERNS.some((p) => p.test(sentence));
+
+    // Aspirational framing ("eager to," "interested in," ...) only exempts
+    // the sentence when it ISN'T also asserting an experience/capability
+    // claim — otherwise the aspirational opener could be used to smuggle in
+    // an unearned capability claim later in the same sentence (V2.1).
+    if (!isExperienceClaim && ASPIRATIONAL_OVERRIDE_PATTERNS.some((p) => p.test(sentence))) {
+      continue;
+    }
+
     const isKnowledgeClaim =
       !isExperienceClaim && KNOWLEDGE_CLAIM_PATTERNS.some((p) => p.test(sentence));
     if (!isExperienceClaim && !isKnowledgeClaim) continue;
