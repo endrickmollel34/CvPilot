@@ -466,6 +466,97 @@ describe('AnalysisService — submit() / process()', () => {
     );
   });
 
+  // ─── ATS Keyword Quality V2 — production-shaped regression ────────────────
+  // Reproduces the exact reported Backend Software Engineer production case:
+  // a JD-derived keyword list mixing concrete hard skills, technical
+  // concepts, a role/title phrase, soft skills, and bare generic verbs — for
+  // a CV that only genuinely supports PostgreSQL (via MOCK_CV.parsedContent,
+  // 'Experienced backend engineer with 5 years of Node.js and PostgreSQL
+  // experience.'), missing nearly every real technical requirement.
+  it('production regression: meaningful technical requirements dominate ATS scoring, generic/soft noise does not, and recommendations are not flooded', async () => {
+    const productionKeywords = [
+      { keyword: 'Python', found: false },
+      { keyword: 'Java', found: false },
+      { keyword: 'TypeScript', found: false },
+      { keyword: 'REST APIs', found: false },
+      { keyword: 'PostgreSQL', found: true }, // genuinely supported
+      { keyword: 'MySQL', found: false },
+      { keyword: 'Git', found: false },
+      { keyword: 'Docker', found: false },
+      { keyword: 'authentication', found: false },
+      { keyword: 'database design', found: false },
+      { keyword: 'cloud platforms', found: false },
+      { keyword: 'CI/CD', found: false },
+      { keyword: 'automated testing', found: false },
+      { keyword: 'Redis', found: false },
+      { keyword: 'message queues', found: false },
+      { keyword: 'microservices', found: false },
+      { keyword: 'AI API integrations', found: false },
+      { keyword: 'problem solving', found: false },
+      { keyword: 'communication', found: false },
+      { keyword: 'attention to detail', found: false },
+      { keyword: 'developing', found: false },
+      { keyword: 'maintaining', found: false },
+      { keyword: 'designing', found: false },
+      { keyword: 'testing', found: false },
+    ];
+
+    mockAiService.runAnalysis.mockResolvedValue({
+      result: {
+        match_score: 55,
+        suggestions: [
+          ...productionKeywords
+            .filter((k) => !k.found)
+            .map((k, i) => ({
+              category: 'MISSING_KEYWORD' as const,
+              priority: 'MEDIUM' as const,
+              text: `If you have experience with ${k.keyword}, add a concrete example of it. (${i})`,
+            })),
+          {
+            category: 'STRUCTURE',
+            priority: 'LOW',
+            text: 'Consider adding a dedicated Skills section.',
+          },
+        ],
+        ats_keywords: productionKeywords,
+      },
+      modelUsed: 'gpt-4o',
+      tokensUsed: 400,
+    });
+
+    await runProcess();
+
+    const [atsPayload] = mockAtsRepo.create.mock.calls[0] as [
+      { missingKeywords: string[]; keywordHits: Array<{ keyword: string }>; atsScore: number },
+    ];
+
+    // Generic verbs never appear as high-value (or any) ATS requirement.
+    for (const verb of ['developing', 'maintaining', 'designing', 'testing']) {
+      expect(atsPayload.missingKeywords).not.toContain(verb);
+      expect(atsPayload.keywordHits.map((k) => k.keyword)).not.toContain(verb);
+    }
+
+    // Missing technical requirements remain visible.
+    expect(atsPayload.missingKeywords).toEqual(
+      expect.arrayContaining(['Docker', 'REST APIs', 'microservices', 'Redis']),
+    );
+
+    // Score remains appropriately low — only 1 of ~16 real weighted
+    // requirements (PostgreSQL) is genuinely supported; soft skills present
+    // in the JD but missing from the CV must not be the reason it's low.
+    expect(atsPayload.atsScore).toBeLessThan(20);
+
+    // Recommendation output is not flooded with one card per keyword.
+    const [, updatePayload] = mockAnalysisRepo.update.mock.calls.find(
+      ([, payload]) => (payload as { status?: string }).status === 'done',
+    ) as [string, { suggestions: Array<{ text: string }> }];
+    expect(updatePayload.suggestions.length).toBeLessThanOrEqual(8);
+    // No surviving suggestion is about a purely generic verb.
+    for (const verb of ['developing', 'maintaining', 'designing', 'testing']) {
+      expect(updatePayload.suggestions.some((s) => s.text.includes(`with ${verb},`))).toBe(false);
+    }
+  });
+
   it('marks the analysis failed and never persists suggestions when the CV has no parsed content at process time', async () => {
     mockCvService.findById.mockResolvedValue({ ...MOCK_CV, parsedContent: undefined });
 

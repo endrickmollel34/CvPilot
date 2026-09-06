@@ -23,6 +23,7 @@ import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
 import { AiService } from './ai.service';
 import { groundSuggestions } from './recommendation-grounding.util';
+import { classifyAndVerifyKeywords, computeAtsScore } from './ats-keyword.util';
 import type { CreateAnalysisDto } from './dto/create-analysis.dto';
 
 @Processor('cv-analysis')
@@ -114,20 +115,21 @@ export class AnalysisService extends WorkerHost {
 
       // Deterministic backstop on top of the prompt's grounding instructions
       // (see ai.service.ts) — never trusts the model's wording or its own
-      // ats_keywords `found` flags at face value. Only touches suggestion
-      // text; match_score and ats_keywords/atsScore below are still computed
-      // from result.ats_keywords exactly as the model returned it, so a
-      // suggestion's phrasing being corrected never moves the score.
+      // ats_keywords `found` flags at face value. match_score (the model's
+      // own holistic 0-100 estimate) is left untouched — this only affects
+      // suggestion text and, via classifyAndVerifyKeywords/computeAtsScore
+      // below, the separate ATS keyword score.
       const { suggestions: groundedSuggestions, stats } = groundSuggestions(
         result.suggestions,
         cv.parsedContent,
         result.ats_keywords,
       );
-      if (stats.rewritten || stats.filteredFormatting || stats.deduped) {
+      if (stats.rewritten || stats.filteredFormatting || stats.deduped || stats.lowValueDropped) {
         this.logger.log(
           `Analysis ${analysisId}: recommendation grounding rewrote ${stats.rewritten}, ` +
             `filtered ${stats.filteredFormatting} unsupported formatting claim(s), ` +
-            `removed ${stats.deduped} duplicate(s)`,
+            `removed ${stats.deduped} duplicate(s), dropped ${stats.lowValueDropped} low-value ` +
+            'keyword recommendation(s)',
         );
       }
 
@@ -140,12 +142,23 @@ export class AnalysisService extends WorkerHost {
         completedAt: new Date(),
       });
 
-      const keywordHits = result.ats_keywords.filter((k) => k.found);
-      const missingKeywords = result.ats_keywords.filter((k) => !k.found).map((k) => k.keyword);
-      const atsScore =
-        result.ats_keywords.length > 0
-          ? Math.round((keywordHits.length / result.ats_keywords.length) * 100)
-          : 0;
+      // ATS Keyword Quality V2 — never trusts the model's raw keyword list
+      // or `found` flags for scoring: classifyAndVerifyKeywords merges
+      // near-duplicate phrasings, independently re-verifies `found` against
+      // the actual CV text, and classifies each into an importance category
+      // (see ats-keyword.util.ts). computeAtsScore then weights genuine
+      // technical requirements far more heavily than generic/contextual
+      // noise, which is excluded from scoring entirely rather than
+      // depressing the score just for being absent.
+      const classifiedKeywords = classifyAndVerifyKeywords(result.ats_keywords, cv.parsedContent);
+      const meaningfulKeywords = classifiedKeywords.filter(
+        (k) => k.category !== 'GENERIC_OR_CONTEXTUAL',
+      );
+      const keywordHits = meaningfulKeywords
+        .filter((k) => k.found)
+        .map((k) => ({ keyword: k.keyword, found: k.found }));
+      const missingKeywords = meaningfulKeywords.filter((k) => !k.found).map((k) => k.keyword);
+      const atsScore = computeAtsScore(classifiedKeywords);
 
       await this.atsRepo.save(
         this.atsRepo.create({ analysisId, keywordHits, missingKeywords, atsScore }),

@@ -58,7 +58,10 @@ Rules:
 - MISSING_KEYWORD suggestions must be phrased conditionally (e.g. "If you have experience with X, add a concrete example showing it") — never as an instruction to simply add or claim X, since that would encourage misrepresenting the candidate's background.
 - WEAK_LANGUAGE suggestions must only target language already present in CV_CONTENT — never introduce a new, unsupported claim under this category.
 - STRUCTURE and ATS_WARNING suggestions must only describe issues inferable from plain text (missing sections, ordering, wording, length) — never claim visual/layout details such as tables, columns, graphics, or fonts.
-- List all key terms from the job description in ats_keywords.`;
+- ats_keywords must reflect genuine, job-specific requirements ATS software actually screens for — prioritize: programming languages, frameworks/libraries, databases, cloud platforms, infrastructure/DevOps tools, protocols and API technologies, security/authentication concepts, architecture patterns, testing technologies/practices, explicit domain expertise, certifications, and other concrete role-specific technical requirements.
+- Do NOT list a bare generic verb (e.g. "developing", "maintaining", "designing", "testing", "supporting", "building") as its own keyword unless it is part of a specific technical phrase.
+- Do NOT list a verbose contextual fragment (e.g. "good communication skills", "dynamic development team", "reliable backend services") as its own keyword — use the shortest normalized form of the underlying concept instead (e.g. "communication", "backend engineering").
+- Use the shortest common canonical form for each keyword (e.g. "REST API" not "REST APIs"; "PostgreSQL" not "Postgres/PostgreSQL"; "CI/CD" not "CI/CD pipeline") and never list the same underlying requirement twice under different wording.`;
 }
 
 export const AnalysisResponseSchema = z.object({

@@ -1,4 +1,5 @@
 import type { AtsKeyword, Suggestion } from '@cvpilot/shared';
+import { classifyKeyword } from './ats-keyword.util';
 
 /**
  * Deterministic, non-LLM post-processing for analysis recommendations.
@@ -26,6 +27,16 @@ import type { AtsKeyword, Suggestion } from '@cvpilot/shared';
  *  3. Suggestions that end up duplicating another suggestion — either by
  *     naming the same key term in the same category, or by being
  *     near-identical text — are collapsed to the first occurrence.
+ *  4. ATS Keyword Quality V2 — a MISSING_KEYWORD suggestion named after a
+ *     keyword ats-keyword.util.ts classifies as GENERIC_OR_CONTEXTUAL (a
+ *     bare verb like "maintaining", filler like "reliable backend
+ *     services") is dropped outright — a "missing requirement" card about
+ *     something that was never a real requirement is pure noise, not a
+ *     genuine gap. The remaining suggestions are then ranked so the most
+ *     important missing technical requirements surface first (a
+ *     MISSING_KEYWORD suggestion's rank is the highest weight among the
+ *     keywords it names; every other suggestion gets a fixed mid-tier
+ *     rank), and capped to a manageable total (see prioritizeSuggestions).
  *
  * This never touches match_score or the ats_keywords/found flags used for
  * the ATS score — scores and recommendation wording are intentionally kept
@@ -36,6 +47,7 @@ export interface GroundingStats {
   rewritten: number;
   filteredFormatting: number;
   deduped: number;
+  lowValueDropped: number;
 }
 
 export interface GroundedSuggestions {
@@ -220,6 +232,54 @@ function dedupeSuggestions(
   return { kept, removed };
 }
 
+// ATS Keyword Quality V2 — target from the design brief: 5-8 high-value
+// recommendations rather than one card per low-value keyword. Applied only
+// when the (already deduped) list exceeds this, trimming the lowest-ranked
+// tail — never pads a short, genuinely-earned list back up to this size.
+const MAX_SUGGESTIONS = 8;
+
+// Rank assigned to a suggestion that names no tracked keyword at all (most
+// WEAK_LANGUAGE/STRUCTURE/ATS_WARNING suggestions) — deliberately between
+// ROLE_OR_DOMAIN (1.5) and TECHNICAL_CONCEPT (2), so these are neither
+// buried beneath every keyword-tagged suggestion nor allowed to crowd out
+// a genuinely important missing hard skill.
+const NON_KEYWORD_RANK = 1.75;
+
+/** Ranks and caps suggestions so the most important missing technical
+ *  requirements surface first and low-value keyword noise doesn't pad out
+ *  the list — see the module header ("4. ATS Keyword Quality V2"). Only
+ *  MISSING_KEYWORD suggestions naming a tracked keyword are ranked/dropped
+ *  by keyword importance; every other suggestion keeps its original
+ *  relative order via the stable sort's index tiebreaker. */
+function prioritizeSuggestions(
+  suggestions: readonly Suggestion[],
+  keywords: readonly string[],
+): { kept: Suggestion[]; dropped: number } {
+  const ranked = suggestions
+    .map((suggestion, index) => {
+      const mentioned =
+        suggestion.category === 'MISSING_KEYWORD'
+          ? mentionedKeywords(suggestion.text, keywords)
+          : [];
+      const rank =
+        mentioned.length > 0
+          ? Math.max(...mentioned.map((kw) => classifyKeyword(kw).weight))
+          : NON_KEYWORD_RANK;
+      return {
+        suggestion,
+        index,
+        rank,
+        isLowValueKeywordSuggestion: mentioned.length > 0 && rank === 0,
+      };
+    })
+    .filter((entry) => !entry.isLowValueKeywordSuggestion);
+
+  ranked.sort((a, b) => b.rank - a.rank || a.index - b.index);
+
+  const dropped = suggestions.length - ranked.length + Math.max(0, ranked.length - MAX_SUGGESTIONS);
+  return { kept: ranked.slice(0, MAX_SUGGESTIONS).map((entry) => entry.suggestion), dropped };
+}
+
 /**
  * Applies all deterministic grounding safeguards to a raw set of AI-produced
  * suggestions. `cvText` must be exactly the text the AI was given (so a
@@ -242,10 +302,11 @@ export function groundSuggestions(
   );
   const rewritten = groundedList.filter((s, i) => s !== withoutFormattingClaims[i]).length;
 
-  const { kept, removed } = dedupeSuggestions(groundedList, keywords);
+  const { kept: deduped, removed } = dedupeSuggestions(groundedList, keywords);
+  const { kept, dropped: lowValueDropped } = prioritizeSuggestions(deduped, keywords);
 
   return {
     suggestions: kept,
-    stats: { rewritten, filteredFormatting, deduped: removed },
+    stats: { rewritten, filteredFormatting, deduped: removed, lowValueDropped },
   };
 }

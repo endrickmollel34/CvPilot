@@ -229,4 +229,71 @@ describe('groundSuggestions()', () => {
     expect(suggestions).toHaveLength(2);
     expect(suggestions.some((s) => s.text.includes('PostgreSQL'))).toBe(true);
   });
+
+  // ─── I. Recommendation prioritization (ATS Keyword Quality V2) ─────────────
+
+  it('(I) drops a MISSING_KEYWORD suggestion whose only named keyword is generic/contextual noise', () => {
+    const keywords: AtsKeyword[] = [{ keyword: 'maintaining', found: false }];
+    const { suggestions, stats } = groundSuggestions(
+      [
+        suggestion({
+          text: 'If you have experience with maintaining systems, add a concrete example of it.',
+        }),
+      ],
+      CV_TEXT,
+      keywords,
+    );
+
+    expect(suggestions).toHaveLength(0);
+    expect(stats.lowValueDropped).toBe(1);
+  });
+
+  it('(I) ranks a MISSING_KEYWORD suggestion about a hard skill above one about a soft skill', () => {
+    const keywords: AtsKeyword[] = [
+      { keyword: 'Docker', found: false },
+      { keyword: 'attention to detail', found: false },
+    ];
+    const { suggestions } = groundSuggestions(
+      [
+        suggestion({
+          text: 'If you have experience with attention to detail, add a concrete example of it.',
+        }),
+        suggestion({ text: 'If you have experience with Docker, add a concrete example of it.' }),
+      ],
+      CV_TEXT,
+      keywords,
+    );
+
+    expect(suggestions).toHaveLength(2);
+    expect(suggestions[0]?.text).toContain('Docker');
+    expect(suggestions[1]?.text).toContain('attention to detail');
+  });
+
+  it('(I) caps the total suggestion count and keeps the highest-ranked ones', () => {
+    const keywords: AtsKeyword[] = Array.from({ length: 10 }, (_, i) => ({
+      keyword: `Tool${i}`,
+      found: false,
+    }));
+    const suggestions = keywords.map((k) =>
+      suggestion({
+        text: `If you have experience with ${k.keyword}, add a concrete example of it.`,
+      }),
+    );
+    const { suggestions: kept, stats } = groundSuggestions(suggestions, CV_TEXT, keywords);
+
+    expect(kept.length).toBeLessThanOrEqual(8);
+    expect(stats.lowValueDropped).toBeGreaterThan(0);
+  });
+
+  it('(I) does not drop or reorder non-keyword suggestions (WEAK_LANGUAGE/STRUCTURE)', () => {
+    const original = suggestion({
+      category: 'STRUCTURE',
+      text: 'Your CV has no dedicated Skills section — consider adding one.',
+    });
+    const { suggestions, stats } = groundSuggestions([original], CV_TEXT, []);
+
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toBe(original);
+    expect(stats.lowValueDropped).toBe(0);
+  });
 });
