@@ -100,17 +100,33 @@ export class TailoringService {
       // reason rather than dropped — `reason` is never applied to the CV
       // (see applyDecisions below), so a fabricated justification doesn't
       // justify discarding an otherwise-safe, useful CV change.
+      //
+      // EXACT-level suggestions (suggestedContent identical to
+      // originalContent) are also dropped as no-ops — applying one would
+      // change nothing, so showing it is pure noise rather than a genuine
+      // improvement. This is a UX/usefulness filter, not a grounding safety
+      // one: EXACT is still a fully "allowed" evidence level.
       const grounded: TailoringSuggestion[] = [];
+      let noOpCount = 0;
       for (const s of raw) {
         const verdict = classifySuggestionGrounding(s, masterCv.content);
         if (!verdict.allowed) continue;
+        if (verdict.level === 'EXACT') {
+          noOpCount++;
+          continue;
+        }
         grounded.push(verdict.sanitizedReason ? { ...s, reason: verdict.sanitizedReason } : s);
       }
-      const droppedCount = raw.length - grounded.length;
+      const droppedCount = raw.length - grounded.length - noOpCount;
       if (droppedCount > 0) {
         this.logger.warn(
           `Tailoring ${tailoringId}: dropped ${droppedCount} suggestion(s) not grounded in the ` +
             'source CV (see tailoring-grounding.util.ts)',
+        );
+      }
+      if (noOpCount > 0) {
+        this.logger.log(
+          `Tailoring ${tailoringId}: dropped ${noOpCount} no-op suggestion(s) (EXACT match)`,
         );
       }
 

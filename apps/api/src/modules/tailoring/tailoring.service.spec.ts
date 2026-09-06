@@ -785,6 +785,65 @@ describe('TailoringService', () => {
       expect(saved.suggestions).toHaveLength(1);
     });
 
+    // V2.2 production regression: a "Company | Job Title" suggestion that
+    // silently renamed the employer-issued job title to better match the
+    // target job description must be dropped end-to-end.
+    it('drops a workExperience suggestion that renames the job title identity field', async () => {
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [
+          {
+            id: 'g4',
+            section: 'workExperience',
+            field: 'Acme | Engineer',
+            originalContent: 'Engineer at Acme [2022-01 – Present]',
+            // A title with no word overlap with "Engineer" — the case that
+            // motivated V2.2. The V2.3 fix (exact normalized identity
+            // comparison) additionally catches elaborated titles that
+            // retain the old title as a substring (e.g. "Senior Backend
+            // Engineer") — see the dedicated coverage in
+            // tailoring-grounding.util.spec.ts's "V2.3 exact normalized
+            // identity comparison" suite.
+            suggestedContent: 'Product Manager at Acme [2022-01 – Present]',
+            reason: 'Aligns the job title with the target role.',
+            priority: 'HIGH',
+          },
+        ],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 150,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+        suggestions: TailoringSuggestion[];
+      };
+      expect(saved.suggestions).toHaveLength(0);
+    });
+
+    it('drops a no-op suggestion whose suggestedContent is identical to originalContent', async () => {
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [
+          {
+            id: 'g5',
+            section: 'summary',
+            originalContent: MOCK_CONTENT.summary!,
+            suggestedContent: MOCK_CONTENT.summary!,
+            reason: 'No change needed.',
+            priority: 'LOW',
+          },
+        ],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 100,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+        suggestions: TailoringSuggestion[];
+      };
+      expect(saved.suggestions).toHaveLength(0);
+    });
+
     it('completes successfully with status "done" when the AI legitimately returns zero suggestions', async () => {
       // e.g. a CV that already matches the job description well, or one
       // where grounding leaves nothing safe to suggest.

@@ -85,6 +85,44 @@ import { isNewSkillGrounded } from './skill-grounding.util';
  * itself. Instead the reason is replaced with a generic, safe explanation
  * — see sanitizeReason.
  *
+ * V2.2 (factual identity field protection): none of the checks above catch
+ * an AI-generated "Company | Job Title" suggestion that silently renames
+ * the employer-issued job title itself (e.g. "Junior Developer" →
+ * "Backend Developer" to better match a target job description) — job
+ * titles, company names, and dates aren't a fixed vocabulary the way
+ * "conferences" or "Docker" are, so no curated term list can catch an
+ * arbitrary swap. A new IDENTITY_CHANGED level (see
+ * identityFieldsPreserved) independently protects each resolved entry's
+ * factual identity fields — job title/company/dates for workExperience,
+ * degree/institution/dates for education — regardless of what the
+ * "reason" claims about relevance to the target role. Content-transforming
+ * checks (STRENGTHENED/BROADENED/etc.) remain about bullet WORDING; this
+ * is about entry IDENTITY, checked first.
+ *
+ * V2.3 (exact normalized identity comparison): V2.2's identityFieldsPreserved
+ * asked "does the OLD value still appear as a whole phrase ANYWHERE in the
+ * new text?" — which incorrectly PASSED suggestions like "Engineer" ->
+ * "Senior Backend Engineer", "Acme" -> "Acme Corporation International", or
+ * "Computer Science" -> "Advanced Computer Science", because the short old
+ * value is still a whole word inside the longer new phrase, even though the
+ * identity itself changed. This is now replaced with schema-aware
+ * extraction: workExperience/education suggestions render as known
+ * composite display strings (see serializeCvContent in
+ * tailoring-ai.service.ts — "TITLE at COMPANY (LOCATION) [DATES]" / "DEGREE
+ * in FIELD at INSTITUTION"), so extractWorkIdentityFields /
+ * extractEducationIdentityFields parse suggestedContent's title/company (or
+ * degree/field/institution) slot using that same schema — tolerating
+ * harmless reformatting (comma-separated instead of "at", "to" instead of
+ * "–", reordered punctuation) — and the EXTRACTED value at each slot is
+ * compared for exact normalized equality against the resolved entry's real
+ * value from resolveWorkEntry/resolveEducationEntry, never mere substring
+ * containment. Employment/education dates are checked separately via bare
+ * YYYY-MM token extraction, which was already exact-value-based (not
+ * substring-vulnerable) and needed no change. A composite line whose
+ * structure is no longer recognizable at all fails closed (rejected) rather
+ * than falling back to the old permissive check — see
+ * workIdentityPreserved/educationIdentityPreserved.
+ *
  * Like possession-claim-guard.util.ts (Cover Letter) and
  * recommendation-grounding.util.ts (Analysis), this is a small, bounded,
  * deterministic term-list/whole-phrase check — never a general NLP/semantic
@@ -103,7 +141,8 @@ export type EvidenceLevel =
   | 'EMPHASIS'
   | 'UNSUPPORTED'
   | 'STRENGTHENED'
-  | 'BROADENED';
+  | 'BROADENED'
+  | 'IDENTITY_CHANGED';
 
 export interface GroundingVerdict {
   level: EvidenceLevel;
@@ -303,53 +342,229 @@ function splitField(field: string | null | undefined): [string, string | undefin
 }
 
 /**
- * Resolves the evidence scope for a workExperience/education suggestion —
- * the SPECIFIC entry it targets, never the whole CV (see the module header
- * for why: a term evidenced in a different job/degree must not ground a
- * claim about this one). Two resolution strategies, tried in order:
+ * Resolves the SPECIFIC work-experience entry a suggestion targets. Two
+ * strategies, tried in order:
  *
  *  1. Exact bullet-text match on `originalContent` — the same mechanism
  *     TailoringService.applyDecisions() already relies on to know which
- *     bullet to replace when a suggestion is applied (workExperience only;
- *     education entries have no bullets array to match against).
- *  2. The "Company | Title" / "Institution | Degree" `field` identifier
- *     documented in the tailoring prompt's schema.
- *
- * Falls back to `originalContent` alone — never the rest of the CV — when
- * neither strategy identifies an entry, so an unresolvable suggestion is
- * graded conservatively rather than permissively.
+ *     bullet to replace when a suggestion is applied.
+ *  2. The "Company | Title" `field` identifier documented in the tailoring
+ *     prompt's schema.
+ */
+function resolveWorkEntry(
+  suggestion: GroundableSuggestion,
+  content: CvContent,
+): CvWorkEntry | undefined {
+  let entry = suggestion.originalContent
+    ? content.workExperience.find((e) => e.bullets.includes(suggestion.originalContent))
+    : undefined;
+
+  if (!entry) {
+    const field = splitField(suggestion.field);
+    if (field) {
+      const [company, title] = field;
+      entry = content.workExperience.find(
+        (e) => e.company === company && (!title || e.title === title),
+      );
+    }
+  }
+
+  return entry;
+}
+
+/** Resolves the SPECIFIC education entry a suggestion targets, via the
+ *  "Institution | Degree" `field` identifier — education entries have no
+ *  bullets array to exact-match against, so `field` is the only strategy. */
+function resolveEducationEntry(
+  suggestion: GroundableSuggestion,
+  content: CvContent,
+): CvEducationEntry | undefined {
+  const field = splitField(suggestion.field);
+  if (!field) return undefined;
+  const [institution, degree] = field;
+  return content.education.find(
+    (e) => e.institution === institution && (!degree || e.degree === degree),
+  );
+}
+
+/**
+ * Resolves the evidence scope for a workExperience/education suggestion —
+ * the SPECIFIC entry it targets, never the whole CV (see the module header
+ * for why: a term evidenced in a different job/degree must not ground a
+ * claim about this one). Falls back to `originalContent` alone — never the
+ * rest of the CV — when the entry cannot be resolved, so an unresolvable
+ * suggestion is graded conservatively rather than permissively.
  */
 function resolveEntryCorpus(suggestion: GroundableSuggestion, content: CvContent): string {
   if (suggestion.section === 'workExperience') {
-    let entry = suggestion.originalContent
-      ? content.workExperience.find((e) => e.bullets.includes(suggestion.originalContent))
-      : undefined;
-
-    if (!entry) {
-      const field = splitField(suggestion.field);
-      if (field) {
-        const [company, title] = field;
-        entry = content.workExperience.find(
-          (e) => e.company === company && (!title || e.title === title),
-        );
-      }
-    }
-
+    const entry = resolveWorkEntry(suggestion, content);
     if (entry) return workEntryCorpus(entry);
   }
 
   if (suggestion.section === 'education') {
-    const field = splitField(suggestion.field);
-    if (field) {
-      const [institution, degree] = field;
-      const entry = content.education.find(
-        (e) => e.institution === institution && (!degree || e.degree === degree),
-      );
-      if (entry) return educationEntryCorpus(entry);
-    }
+    const entry = resolveEducationEntry(suggestion, content);
+    if (entry) return educationEntryCorpus(entry);
   }
 
   return suggestion.originalContent ?? '';
+}
+
+/** Bare YYYY-MM date tokens present anywhere in `text`, in order. Dates are
+ *  unambiguous numeric tokens with no "expansion" risk the way titles have,
+ *  so exact-token extraction (not phrase parsing) is sufficient here. */
+function extractDateTokens(text: string): string[] {
+  return text.match(/\d{4}-\d{2}/g) ?? [];
+}
+
+/**
+ * Parses the composite work-experience identity line ("TITLE at COMPANY
+ * (LOCATION) [DATES]", per serializeCvContent in tailoring-ai.service.ts)
+ * into its title/company slots, tolerating harmless reformatting (comma-
+ * separated instead of "at", "to" instead of "–", reordered date range,
+ * missing brackets, etc). Returns undefined when no recognizable
+ * title/company structure is found, so callers fail closed rather than
+ * guess.
+ */
+function extractWorkIdentityFields(text: string): { title: string; company: string } | undefined {
+  const cleaned = text
+    // Bracketed date range, e.g. "[2024-11 – 2025-09]".
+    .replace(/\[[^\]]*\]/g, ' ')
+    // Bare date range/single date, with any connector, e.g.
+    // "2024-11 to 2025-09" or "2024-11 – 2025-09".
+    .replace(/\d{4}-\d{2}(\s*(?:–|-|to)\s*\d{4}-\d{2})?/gi, ' ')
+    .replace(/\bpresent\b/gi, ' ')
+    // First parenthetical — location, e.g. "(Dar es Salaam)".
+    .replace(/\([^)]*\)/, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*,\s*/g, ', ')
+    .trim()
+    .replace(/^,\s*/, '')
+    .replace(/,\s*$/, '');
+
+  const atParts = cleaned.split(/\s+at\s+/i);
+  if (atParts.length >= 2 && atParts[0] && atParts[1]) {
+    return { title: atParts[0].trim(), company: atParts.slice(1).join(' at ').trim() };
+  }
+
+  const commaParts = cleaned
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (commaParts.length >= 2) {
+    return { title: commaParts[0]!, company: commaParts[1]! };
+  }
+
+  return undefined;
+}
+
+/**
+ * Parses the composite education identity line ("DEGREE in FIELD at
+ * INSTITUTION", per serializeCvContent) into its slots. Deliberately does
+ * NOT touch parentheses — unlike work-experience location, a degree value
+ * can itself legitimately contain parentheses (e.g. "Bachelor of Science
+ * (In Progress)"), so stripping them would corrupt the degree rather than
+ * isolate a wrapper.
+ */
+function extractEducationIdentityFields(
+  text: string,
+): { degree: string; field?: string; institution: string } | undefined {
+  const atIdx = text.toLowerCase().lastIndexOf(' at ');
+  let before: string;
+  let institution: string;
+
+  if (atIdx !== -1) {
+    before = text.slice(0, atIdx).trim();
+    institution = text.slice(atIdx + 4).trim();
+  } else {
+    // Harmless reformatting fallback, e.g. "DEGREE in FIELD, INSTITUTION"
+    // instead of "... at INSTITUTION" — same tolerance as
+    // extractWorkIdentityFields' comma fallback.
+    const commaParts = text
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (commaParts.length < 2) return undefined;
+    institution = commaParts[commaParts.length - 1]!;
+    before = commaParts.slice(0, -1).join(', ');
+  }
+  if (!before || !institution) return undefined;
+
+  const inMatch = /^(.*?)\s+in\s+(.+)$/i.exec(before);
+  if (inMatch) {
+    return { degree: inMatch[1]!.trim(), field: inMatch[2]!.trim(), institution };
+  }
+  return { degree: before, institution };
+}
+
+/**
+ * V2.2/V2.3 — factual identity field protection. Production QA found a
+ * "Company | Job Title" suggestion silently renaming "Junior Developer" to
+ * "Backend Developer" to better match a target job description. No curated
+ * term list can catch an arbitrary job-title swap the way it catches
+ * "conferences" or "Docker" — job titles aren't a fixed vocabulary. An
+ * employer-issued job title, company name, and employment dates are
+ * factual employment history — none of these are AI tailoring's to
+ * rewrite, no matter how well-intentioned the reason given. (This does not
+ * restrict the USER from manually editing their own CV afterwards — it
+ * only bounds what AI-GENERATED suggestions may change.)
+ *
+ * For each protected field: if the field's CURRENT value appears in
+ * `originalContent` (i.e. this suggestion is even talking about that
+ * field), the value EXTRACTED from the same slot in `suggestedContent`
+ * (via extractWorkIdentityFields — see module header for why this replaced
+ * a plain substring check) must be exactly equal, modulo normalization.
+ * Dates are checked via exact token extraction instead (see
+ * extractDateTokens). If the composite structure can't be parsed at all
+ * but the field applies, the suggestion is rejected — never given the
+ * benefit of the doubt.
+ */
+function workIdentityPreserved(
+  originalContent: string,
+  suggestedContent: string,
+  entry: CvWorkEntry,
+): boolean {
+  for (const date of [entry.startDate, entry.endDate]) {
+    if (!date || !containsWholePhrase(originalContent, date)) continue;
+    if (!extractDateTokens(suggestedContent).includes(date)) return false;
+  }
+
+  const titleApplies = containsWholePhrase(originalContent, entry.title);
+  const companyApplies = containsWholePhrase(originalContent, entry.company);
+  if (!titleApplies && !companyApplies) return true;
+
+  const parsed = extractWorkIdentityFields(suggestedContent);
+  if (!parsed) return false;
+
+  if (titleApplies && normalize(parsed.title) !== normalize(entry.title)) return false;
+  if (companyApplies && normalize(parsed.company) !== normalize(entry.company)) return false;
+  return true;
+}
+
+/** Education counterpart of workIdentityPreserved — see its doc comment. */
+function educationIdentityPreserved(
+  originalContent: string,
+  suggestedContent: string,
+  entry: CvEducationEntry,
+): boolean {
+  for (const date of [entry.startDate, entry.endDate]) {
+    if (!date || !containsWholePhrase(originalContent, date)) continue;
+    if (!extractDateTokens(suggestedContent).includes(date)) return false;
+  }
+
+  const degreeApplies = containsWholePhrase(originalContent, entry.degree);
+  const institutionApplies = containsWholePhrase(originalContent, entry.institution);
+  const fieldApplies = entry.field ? containsWholePhrase(originalContent, entry.field) : false;
+  if (!degreeApplies && !institutionApplies && !fieldApplies) return true;
+
+  const parsed = extractEducationIdentityFields(suggestedContent);
+  if (!parsed) return false;
+
+  if (degreeApplies && normalize(parsed.degree) !== normalize(entry.degree)) return false;
+  if (institutionApplies && normalize(parsed.institution) !== normalize(entry.institution)) {
+    return false;
+  }
+  if (fieldApplies && normalize(parsed.field ?? '') !== normalize(entry.field ?? '')) return false;
+  return true;
 }
 
 type GroundableSuggestion = Pick<
@@ -440,6 +655,25 @@ export function classifySuggestionGrounding(
   }
   if (original && isSameWordsReordered(original, proposed)) {
     return allow('REORDER', suggestion, fullCorpus);
+  }
+
+  // Factual identity fields (job title, company, employment dates for
+  // workExperience; degree, field of study, institution, education dates
+  // for education) — see workIdentityPreserved/educationIdentityPreserved's
+  // doc comments. Checked before the term-list-based checks below since
+  // this is a structurally different, higher-priority concern (a wholesale
+  // factual swap, not a risk phrase).
+  if (suggestion.section === 'workExperience') {
+    const entry = resolveWorkEntry(suggestion, content);
+    if (entry && !workIdentityPreserved(original, proposed, entry)) {
+      return { level: 'IDENTITY_CHANGED', allowed: false };
+    }
+  }
+  if (suggestion.section === 'education') {
+    const entry = resolveEducationEntry(suggestion, content);
+    if (entry && !educationIdentityPreserved(original, proposed, entry)) {
+      return { level: 'IDENTITY_CHANGED', allowed: false };
+    }
   }
 
   for (const term of INTENSITY_ESCALATION_TERMS) {

@@ -460,7 +460,11 @@ describe('classifySuggestionGrounding() — cross-entry evidence scoping', () =>
       MULTI_ENTRY_CONTENT,
     );
     expect(verdict.allowed).toBe(false);
-    expect(verdict.level).toBe('BROADENED');
+    // V2.2: this now trips the more specific IDENTITY_CHANGED check first
+    // (the degree field itself — "Undergraduate degree" — was swapped for
+    // a different one), rather than the generic BROADENED term check.
+    // Either way the suggestion is still correctly rejected.
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
   });
 
   it('falls back to originalContent-only scoping (never the whole CV) when the entry cannot be identified', () => {
@@ -478,5 +482,374 @@ describe('classifySuggestionGrounding() — cross-entry evidence scoping', () =>
     );
     expect(verdict.allowed).toBe(false);
     expect(verdict.level).toBe('BROADENED');
+  });
+});
+
+// ─── V2.2 — factual identity field protection (production regression) ───────
+// Production QA: an AI "Company | Job Title" suggestion silently renamed
+// "Junior Developer" to "Backend Developer" to better match the target job
+// description. Root cause: no curated term list can catch an arbitrary
+// job-title swap the way it catches "conferences" or "Docker" — job titles
+// aren't a fixed vocabulary, so the suggestion fell through every existing
+// check straight to PARAPHRASE (allowed). Reproduces the exact production
+// CV shape (Toyota Tanzania, Junior Developer, 2024-11 – 2025-09).
+
+const TOYOTA_CONTENT: CvContent = {
+  version: 1,
+  personalDetails: { fullName: 'Production QA', email: 'qa@example.com' },
+  summary:
+    'Experienced Backend Engineer with a background in developing and maintaining backend ' +
+    'applications. Skilled in application debugging and system monitoring.',
+  workExperience: [
+    {
+      id: 'we-toyota-prod',
+      company: 'Toyota Tanzania',
+      title: 'Junior Developer',
+      location: 'Dar es Salaam',
+      startDate: '2024-11',
+      endDate: '2025-09',
+      current: false,
+      bullets: ['Debugged software issues', 'Maintained backend applications'],
+    },
+  ],
+  education: [
+    {
+      id: 'ed-prod',
+      institution: 'University Y',
+      degree: 'Bachelor of Science (In Progress)',
+      field: 'Computer Science',
+    },
+  ],
+  skills: [],
+  languages: [],
+  certifications: [],
+  sectionOrder: ['summary', 'workExperience', 'education', 'skills', 'languages', 'certifications'],
+};
+
+const IDENTITY_LINE = 'Junior Developer at Toyota Tanzania (Dar es Salaam) [2024-11 – 2025-09]';
+
+describe('classifySuggestionGrounding() — factual identity field protection', () => {
+  // (1) The exact production regression: job title silently rewritten to
+  // align with the target job description.
+  it('(1) rejects an AI suggestion that renames the job title', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Toyota Tanzania | Junior Developer',
+        originalContent: IDENTITY_LINE,
+        suggestedContent:
+          'Backend Developer at Toyota Tanzania (Dar es Salaam) [2024-11 – 2025-09]',
+        reason:
+          'Aligns the job title with the backend focus, which is more relevant to the target job.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (2) Harmless formatting/punctuation normalization — the title, company,
+  // and dates are all still genuinely present, just reformatted.
+  it('(2) allows harmless whitespace/punctuation normalization that preserves the same title, company, and dates', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Toyota Tanzania | Junior Developer',
+        originalContent: IDENTITY_LINE,
+        suggestedContent: 'Junior Developer, Toyota Tanzania (Dar es Salaam), 2024-11 to 2025-09',
+        reason: 'Improves formatting consistency.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  // (3) Company identity changed.
+  it('(3) rejects an AI suggestion that changes the company name', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Toyota Tanzania | Junior Developer',
+        originalContent: IDENTITY_LINE,
+        suggestedContent:
+          'Junior Developer at Toyota Motor Corporation (Dar es Salaam) [2024-11 – 2025-09]',
+        reason: 'Uses the full corporate name.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (4) Employment dates changed.
+  it('(4) rejects an AI suggestion that changes the employment start date', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Toyota Tanzania | Junior Developer',
+        originalContent: IDENTITY_LINE,
+        suggestedContent: 'Junior Developer at Toyota Tanzania (Dar es Salaam) [2023-11 – 2025-09]',
+        reason: 'Corrects the start date.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (5) Education qualification status changed within the SAME entry
+  // (distinct from the cross-entry "graduate" test above — this is the
+  // same entry's own degree field being upgraded from in-progress to
+  // completed).
+  it('(5) rejects an AI suggestion that upgrades an in-progress degree to completed', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'education',
+        field: 'University Y | Bachelor of Science (In Progress)',
+        originalContent: 'Bachelor of Science (In Progress) in Computer Science at University Y',
+        suggestedContent: 'Bachelor of Science (Completed) in Computer Science at University Y',
+        reason: 'Reflects near-completion of the degree.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (6) Safe bullet rewording — demonstrated work, not identity, so it must
+  // still be allowed.
+  it('(6) allows rewording a demonstrated-work bullet without touching identity fields', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Toyota Tanzania | Junior Developer',
+        originalContent: 'Debugged software issues',
+        suggestedContent: 'Performed application debugging',
+        reason: 'Uses more specific terminology from the job description.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  // (7) The actual "system monitoring" production case — see the module's
+  // git history / PR description for the full investigation. "System
+  // monitoring" is ALREADY part of TOYOTA_CONTENT.summary (the CURRENT/
+  // pre-existing text, exactly as production QA reported it) — this is not
+  // new AI fabrication, so a suggestion that reworks the surrounding
+  // wording while preserving that pre-existing phrase must be allowed. The
+  // sibling test "rejects '...system monitoring' (strengthened + broadened)"
+  // earlier in this file proves the inverse still holds: introducing
+  // "system monitoring" into a CV that never had it is still rejected.
+  it('(7) allows a summary reword that preserves a pre-existing phrase from the CURRENT summary ("system monitoring")', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'summary',
+        originalContent: TOYOTA_CONTENT.summary!,
+        suggestedContent:
+          'Backend Engineer with experience in developing and maintaining backend applications. ' +
+          'Skilled in debugging software applications and system monitoring.',
+        reason: 'Improves clarity.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+});
+
+// ─── V2.3 — exact normalized identity comparison (production regression) ────
+// V2.2's identityFieldsPreserved used whole-phrase SUBSTRING containment,
+// which incorrectly PASSED a short old identity value that is still a whole
+// word inside a longer, expanded new value (e.g. "Engineer" is still found
+// inside "Senior Backend Engineer"). These tests reproduce that exact class
+// of bug and confirm the fix: the value extracted from the SAME slot in
+// suggestedContent (per the known composite-line schema) must be exactly
+// equal to the entry's real value, not merely contain/be-contained.
+
+const ENGINEER_CONTENT: CvContent = {
+  version: 1,
+  personalDetails: { fullName: 'Production QA 2', email: 'qa2@example.com' },
+  summary: 'Engineer with backend experience.',
+  workExperience: [
+    {
+      id: 'we-eng',
+      company: 'Acme',
+      title: 'Engineer',
+      startDate: '2022-01',
+      current: true,
+      bullets: ['Built backend services'],
+    },
+  ],
+  education: [
+    {
+      id: 'ed-eng',
+      institution: 'University Z',
+      degree: 'Bachelor',
+      field: 'Computer Science',
+    },
+  ],
+  skills: [],
+  languages: [],
+  certifications: [],
+  sectionOrder: ['summary', 'workExperience', 'education', 'skills', 'languages', 'certifications'],
+};
+
+const ENGINEER_IDENTITY_LINE = 'Engineer at Acme [2022-01 – Present]';
+const BACHELOR_IDENTITY_LINE = 'Bachelor in Computer Science at University Z';
+
+describe('classifySuggestionGrounding() — V2.3 exact normalized identity comparison', () => {
+  // (1) The flagship bug: a short title is a whole-word SUFFIX of the
+  // expanded new title, so the old V2.2 substring check incorrectly passed
+  // this. Must now be rejected.
+  it('(1) rejects expanding "Engineer" into "Senior Backend Engineer" (old title is a substring of the new one)', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Acme | Engineer',
+        originalContent: ENGINEER_IDENTITY_LINE,
+        suggestedContent: 'Senior Backend Engineer at Acme [2022-01 – Present]',
+        reason: 'Aligns seniority with the target role.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (2) Same bug, company side: "Acme" is a whole-word PREFIX of the
+  // expanded new company name.
+  it('(2) rejects expanding "Acme" into "Acme Corporation International" (old company is a substring of the new one)', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Acme | Engineer',
+        originalContent: ENGINEER_IDENTITY_LINE,
+        suggestedContent: 'Engineer at Acme Corporation International [2022-01 – Present]',
+        reason: 'Uses the full corporate name.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (3) A genuinely harmless reformatting of the SAME identity line (dashes
+  // -> commas/"to") must still be allowed — the fix must not become
+  // over-eager and reject safe rewording that changes no identity value.
+  it('(3) allows reformatting the work identity line into comma-separated style with the same title/company/dates', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Acme | Engineer',
+        originalContent: ENGINEER_IDENTITY_LINE,
+        suggestedContent: 'Engineer, Acme, 2022-01 to Present',
+        reason: 'Improves formatting consistency.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  // (4) Employment dates: a genuine identity change (start date moved
+  // earlier) must still be rejected under the new comparison strategy too.
+  it('(4) rejects changing the employment start date even when title and company are reformatted safely', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Acme | Engineer',
+        originalContent: ENGINEER_IDENTITY_LINE,
+        suggestedContent: 'Engineer, Acme, 2020-01 to Present',
+        reason: 'Corrects the start date.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (5) Education degree expansion: "Bachelor" is a whole-word PREFIX of
+  // "Bachelor with Honours" — same class of bug as (1)/(2), education side.
+  it('(5) rejects expanding "Bachelor" into "Bachelor with Honours" (old degree is a substring of the new one)', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'education',
+        field: 'University Z | Bachelor',
+        originalContent: BACHELOR_IDENTITY_LINE,
+        suggestedContent: 'Bachelor with Honours in Computer Science at University Z',
+        reason: 'Reflects the honours classification.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (6) Education institution expansion: "University Z" is a whole-word
+  // PREFIX of the expanded new institution name.
+  it('(6) rejects expanding "University Z" into "University Z International Campus"', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'education',
+        field: 'University Z | Bachelor',
+        originalContent: BACHELOR_IDENTITY_LINE,
+        suggestedContent: 'Bachelor in Computer Science at University Z International Campus',
+        reason: 'Uses the full campus name.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (7) Education field-of-study expansion: "Computer Science" is a
+  // whole-word SUFFIX of "Advanced Computer Science" — this is the field
+  // (entry.field) protection that V2.2 never even checked at all.
+  it('(7) rejects expanding "Computer Science" into "Advanced Computer Science" (field of study)', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'education',
+        field: 'University Z | Bachelor',
+        originalContent: BACHELOR_IDENTITY_LINE,
+        suggestedContent: 'Bachelor in Advanced Computer Science at University Z',
+        reason: 'Uses more specific terminology from the job description.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (8) A genuinely harmless reformatting of the SAME education identity
+  // line must still be allowed.
+  it('(8) allows reformatting the education identity line while preserving the same degree/field/institution', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'education',
+        field: 'University Z | Bachelor',
+        originalContent: BACHELOR_IDENTITY_LINE,
+        suggestedContent: 'Bachelor in Computer Science, University Z',
+        reason: 'Improves formatting consistency.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  // (9) A suggestion whose suggestedContent no longer has a recognizable
+  // composite title/company structure at all (while the field genuinely
+  // applies) must fail closed rather than fall back to a permissive check.
+  it('(9) rejects when the new content no longer has a recognizable title/company structure at all', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Acme | Engineer',
+        originalContent: ENGINEER_IDENTITY_LINE,
+        suggestedContent: 'Senior Backend Engineer',
+        reason: 'Simplifies the entry.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
   });
 });
