@@ -820,6 +820,44 @@ describe('TailoringService', () => {
       expect(saved.suggestions).toHaveLength(0);
     });
 
+    // URGENT production regression (V2.4): the test above passed `field`
+    // explicitly, but production's real TailoringAiService output OMITTED
+    // `field` entirely for this exact suggestion (a schema-valid shape —
+    // TailoringResponseSchema treats it as optional/nullable). With no
+    // `field` to resolve against, the pre-V2.4 resolveWorkEntry returned
+    // undefined, classifySuggestionGrounding's `if (entry && ...)` guard
+    // silently skipped the identity check, and the rename reached the UI in
+    // production even after V2.3 shipped. This end-to-end test reproduces
+    // the EXACT production suggestion shape (field omitted) through the
+    // real runTailoring() service path — not just classifySuggestionGrounding
+    // in isolation — to prove the service-level pipeline now filters it.
+    it('drops a workExperience identity rename end-to-end even when the AI omits `field` entirely (production shape)', async () => {
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [
+          {
+            id: 'g6',
+            section: 'workExperience',
+            // `field` deliberately omitted — this is the real production
+            // shape that bypassed identity protection.
+            originalContent: 'Engineer at Acme [2022-01 – Present]',
+            suggestedContent: 'Backend Developer at Acme [2022-01 – Present]',
+            reason:
+              'Aligns job title with the target position by emphasizing backend development experience.',
+            priority: 'HIGH',
+          },
+        ],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 150,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+        suggestions: TailoringSuggestion[];
+      };
+      expect(saved.suggestions).toHaveLength(0);
+    });
+
     it('drops a no-op suggestion whose suggestedContent is identical to originalContent', async () => {
       mockTailoringAiService.runTailoring.mockResolvedValue({
         suggestions: [

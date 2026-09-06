@@ -853,3 +853,156 @@ describe('classifySuggestionGrounding() — V2.3 exact normalized identity compa
     expect(verdict.level).toBe('IDENTITY_CHANGED');
   });
 });
+
+// ─── V2.4 — entry resolution robustness + fail-closed (URGENT production ────
+// regression). Root cause: resolveWorkEntry could only identify the targeted
+// entry via an exact bullet-text match (never true for an identity-line
+// suggestion) or the `field` identifier — and `field` is not reliably
+// populated by the model, despite the prompt asking for it. Production
+// reproduced this with `field` OMITTED entirely (a schema-valid production
+// shape — TailoringResponseSchema treats `field` as optional/nullable, and
+// tailoring-ai.service.ts normalizes a missing/null field to `undefined`).
+// With no `field`, the OLD resolveWorkEntry returned undefined, and
+// classifySuggestionGrounding's `if (entry && ...)` guard silently SKIPPED
+// the identity check entirely — V2.3's comparison logic was never reached,
+// so the Toyota "Junior Developer" -> "Backend Developer" rename reached the
+// UI in production even after the V2.3 fix. These tests use exactly that
+// production shape (`field` omitted) to reproduce the bug and confirm the
+// fix (resolveWorkEntry's new content-based fallback, plus fail-closed).
+
+describe('classifySuggestionGrounding() — V2.4 entry resolution robustness / fail-closed', () => {
+  // (2) The exact production regression, reproduced with the real
+  // production-shaped suggestion object: `field` omitted entirely.
+  it('(2) rejects "Junior Developer" -> "Backend Developer" even when `field` is omitted (the real production shape)', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        // `field` deliberately omitted — reproduces the production shape
+        // that bypassed V2.3's identity check entirely.
+        originalContent: IDENTITY_LINE,
+        suggestedContent:
+          'Backend Developer at Toyota Tanzania (Dar es Salaam) [2024-11 – 2025-09]',
+        reason:
+          'Aligns job title with the target position by emphasizing backend development experience.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (3) Engineer -> Senior Backend Engineer, also with `field` omitted.
+  it('(3) rejects "Engineer" -> "Senior Backend Engineer" even when `field` is omitted', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        originalContent: ENGINEER_IDENTITY_LINE,
+        suggestedContent: 'Senior Backend Engineer at Acme [2022-01 – Present]',
+        reason: 'Aligns seniority with the target role.',
+      },
+      ENGINEER_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (4) Company identity change, `field` omitted.
+  it('(4) rejects a company identity change even when `field` is omitted', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        originalContent: IDENTITY_LINE,
+        suggestedContent:
+          'Junior Developer at Toyota Motor Corporation (Dar es Salaam) [2024-11 – 2025-09]',
+        reason: 'Uses the full corporate name.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (5) Employment date identity change, `field` omitted.
+  it('(5) rejects an employment date change even when `field` is omitted', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        originalContent: IDENTITY_LINE,
+        suggestedContent: 'Junior Developer at Toyota Tanzania (Dar es Salaam) [2023-11 – 2025-09]',
+        reason: 'Corrects the start date.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (6) Harmless reformatting of the SAME identity, `field` omitted — the
+  // content-based fallback resolution must not make this over-eager.
+  it('(6) allows harmless reformatting of the same identity even when `field` is omitted', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        originalContent: IDENTITY_LINE,
+        suggestedContent: 'Junior Developer, Toyota Tanzania (Dar es Salaam), 2024-11 to 2025-09',
+        reason: 'Improves formatting consistency.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+
+  // (7) Fail-closed: the suggestion is unambiguously identity-shaped (a
+  // YYYY-MM date token in originalContent), but names a company/title
+  // combination that matches NO entry in the CV by any resolution strategy.
+  // This must be rejected rather than silently bypassing identity
+  // protection just because no entry could be matched.
+  it('(7) fails closed on an unresolvable identity-field suggestion (no matching entry by any strategy)', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        originalContent: 'Manager at Nonexistent Corp [2019-01 – 2020-01]',
+        suggestedContent: 'Senior Manager at Nonexistent Corp [2019-01 – 2020-01]',
+        reason: 'Reflects seniority.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('IDENTITY_CHANGED');
+  });
+
+  // (8) An ordinary, unresolvable work-experience bullet (no date token, not
+  // identity-shaped) must NOT be punished merely because entry resolution
+  // failed — existing safe grounding behavior (term-list checks against the
+  // originalContent-only fallback scope) is preserved.
+  it('(8) does not fail closed on an unresolvable ordinary bullet — falls through to existing safe behavior', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        originalContent: 'Some bullet text not present verbatim in the CV',
+        suggestedContent: 'Some bullet text mentioning Docker not present verbatim in the CV',
+        reason: 'Improves relevance.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.level).toBe('BROADENED');
+  });
+
+  // (9) A safe bullet paraphrase (not identity-shaped) is still allowed —
+  // fail-closed must not become over-eager and reject ordinary wording
+  // improvements.
+  it('(9) allows a safe bullet paraphrase unrelated to identity fields', () => {
+    const verdict = classifySuggestionGrounding(
+      {
+        section: 'workExperience',
+        field: 'Toyota Tanzania | Junior Developer',
+        originalContent: 'Debugged software issues',
+        suggestedContent: 'Performed application debugging',
+        reason: 'Uses more specific terminology from the job description.',
+      },
+      TOYOTA_CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+  });
+});

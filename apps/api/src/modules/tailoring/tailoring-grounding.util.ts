@@ -123,6 +123,31 @@ import { isNewSkillGrounded } from './skill-grounding.util';
  * than falling back to the old permissive check — see
  * workIdentityPreserved/educationIdentityPreserved.
  *
+ * V2.4 (entry resolution robustness + fail-closed on unresolved identity):
+ * URGENT production regression — the exact Toyota "Junior Developer" ->
+ * "Backend Developer" rename this whole protection exists for STILL reached
+ * the UI after V2.3. Root cause: resolveWorkEntry could only identify the
+ * targeted entry via an exact bullet-text match (identity-line suggestions
+ * never match a bullet) or the `field` identifier — and `field` is not
+ * reliably populated by the model despite the prompt asking for it. With no
+ * entry resolved, classifySuggestionGrounding's `if (entry && ...)` guard
+ * silently SKIPPED the identity check entirely rather than rejecting —
+ * V2.3's comparison logic was never even reached. Two changes close this:
+ *   1. resolveWorkEntry gained a third resolution strategy — parsing
+ *      `originalContent` itself (via extractWorkIdentityFields) to recover
+ *      the CURRENT title/company directly, independent of `field`. This is
+ *      authoritative regardless of whether `field` is missing, malformed,
+ *      or reversed in order, and both resolveWorkEntry/resolveEducationEntry's
+ *      `field`-based matching is now case/whitespace-normalized too.
+ *   2. If an entry STILL can't be resolved by any strategy, the suggestion
+ *      now fails closed (rejected as IDENTITY_CHANGED) whenever it is
+ *      clearly identity-directed rather than an ordinary bullet/wording
+ *      change — see the fail-closed comment at the call site in
+ *      classifySuggestionGrounding for the exact, narrow signal used for
+ *      each section (a YYYY-MM date token for workExperience; an explicit
+ *      but unresolvable `field` for education) so ordinary suggestions that
+ *      simply couldn't be matched to a specific entry are never punished.
+ *
  * Like possession-claim-guard.util.ts (Cover Letter) and
  * recommendation-grounding.util.ts (Analysis), this is a small, bounded,
  * deterministic term-list/whole-phrase check — never a general NLP/semantic
@@ -342,14 +367,28 @@ function splitField(field: string | null | undefined): [string, string | undefin
 }
 
 /**
- * Resolves the SPECIFIC work-experience entry a suggestion targets. Two
+ * Resolves the SPECIFIC work-experience entry a suggestion targets. Three
  * strategies, tried in order:
  *
  *  1. Exact bullet-text match on `originalContent` — the same mechanism
  *     TailoringService.applyDecisions() already relies on to know which
  *     bullet to replace when a suggestion is applied.
  *  2. The "Company | Title" `field` identifier documented in the tailoring
- *     prompt's schema.
+ *     prompt's schema (case/whitespace-normalized).
+ *  3. V2.4 — the identity line's OWN extracted title/company (via
+ *     extractWorkIdentityFields), independent of `field`. Production
+ *     regression testing found the exact Toyota "Junior Developer" ->
+ *     "Backend Developer" rename STILL reaching the UI after V2.3, because
+ *     `field` is not reliably populated by the model (missing/null, or
+ *     otherwise malformed) even though the prompt asks for it — and with no
+ *     `field` to key off, strategies 1-2 both failed, so `entry` came back
+ *     undefined and the IDENTITY_CHANGED check in classifySuggestionGrounding
+ *     was silently skipped (see its `if (entry && ...)` guard) rather than
+ *     rejecting the suggestion. `originalContent` is the CV's own current
+ *     composite line — parsing it directly to recover title/company is
+ *     authoritative and does not depend on `field` at all, so this closes
+ *     that gap regardless of whether `field` is missing, malformed, or even
+ *     accidentally reversed in order.
  */
 function resolveWorkEntry(
   suggestion: GroundableSuggestion,
@@ -364,7 +403,20 @@ function resolveWorkEntry(
     if (field) {
       const [company, title] = field;
       entry = content.workExperience.find(
-        (e) => e.company === company && (!title || e.title === title),
+        (e) =>
+          normalize(e.company) === normalize(company) &&
+          (!title || normalize(e.title) === normalize(title)),
+      );
+    }
+  }
+
+  if (!entry && suggestion.originalContent) {
+    const parsed = extractWorkIdentityFields(suggestion.originalContent);
+    if (parsed) {
+      entry = content.workExperience.find(
+        (e) =>
+          normalize(e.title) === normalize(parsed.title) &&
+          normalize(e.company) === normalize(parsed.company),
       );
     }
   }
@@ -373,8 +425,17 @@ function resolveWorkEntry(
 }
 
 /** Resolves the SPECIFIC education entry a suggestion targets, via the
- *  "Institution | Degree" `field` identifier — education entries have no
- *  bullets array to exact-match against, so `field` is the only strategy. */
+ *  "Institution | Degree" `field` identifier (case/whitespace-normalized) —
+ *  education entries have no bullets array to exact-match against, so
+ *  `field` is the only resolution strategy. (Unlike resolveWorkEntry, this
+ *  deliberately does NOT add a content-based parsing fallback — education's
+ *  composite line legitimately overlaps in shape with e.g. a BROADENED
+ *  scope-change suggestion that isn't identity-related at all, and adding
+ *  that fallback here would misclassify such cases as unresolvable-identity
+ *  instead of letting the existing term-list checks correctly label them.
+ *  See classifySuggestionGrounding's narrower education fail-closed check,
+ *  which instead triggers only when `field` was explicitly provided but
+ *  still didn't resolve.) */
 function resolveEducationEntry(
   suggestion: GroundableSuggestion,
   content: CvContent,
@@ -383,7 +444,9 @@ function resolveEducationEntry(
   if (!field) return undefined;
   const [institution, degree] = field;
   return content.education.find(
-    (e) => e.institution === institution && (!degree || e.degree === degree),
+    (e) =>
+      normalize(e.institution) === normalize(institution) &&
+      (!degree || normalize(e.degree) === normalize(degree)),
   );
 }
 
@@ -663,15 +726,42 @@ export function classifySuggestionGrounding(
   // doc comments. Checked before the term-list-based checks below since
   // this is a structurally different, higher-priority concern (a wholesale
   // factual swap, not a risk phrase).
+  //
+  // V2.4 (fail-closed on unresolved identity suggestions): if `entry` can't
+  // be resolved at all, the checks above previously fell through to the
+  // generic term-list checks below completely unguarded — exactly what let
+  // the Toyota "Junior Developer" -> "Backend Developer" rename reach
+  // production after V2.3 (see resolveWorkEntry's doc comment). An
+  // unresolved entry now fails closed (rejected) IF the suggestion is
+  // clearly identity-directed, without punishing ordinary bullets that
+  // simply couldn't be matched to a specific job/degree:
+  //   - workExperience: originalContent carries a YYYY-MM date token, which
+  //     only ever appears in the rendered "TITLE at COMPANY (LOCATION)
+  //     [DATES]" identity line (see serializeCvContent) — an ordinary
+  //     bullet essentially never contains one, so this is a safe signal.
+  //   - education: `field` was explicitly provided (the suggestion names a
+  //     specific institution/degree) but still didn't resolve to a real
+  //     entry — education has no bullets, but a suggestion with no `field`
+  //     at all is the normal, safe shape for a scope/wording change (e.g.
+  //     the "undergraduate -> graduate" BROADENED case), so that shape is
+  //     deliberately left to the term-list checks below, unchanged.
   if (suggestion.section === 'workExperience') {
     const entry = resolveWorkEntry(suggestion, content);
-    if (entry && !workIdentityPreserved(original, proposed, entry)) {
+    if (entry) {
+      if (!workIdentityPreserved(original, proposed, entry)) {
+        return { level: 'IDENTITY_CHANGED', allowed: false };
+      }
+    } else if (extractDateTokens(original).length > 0) {
       return { level: 'IDENTITY_CHANGED', allowed: false };
     }
   }
   if (suggestion.section === 'education') {
     const entry = resolveEducationEntry(suggestion, content);
-    if (entry && !educationIdentityPreserved(original, proposed, entry)) {
+    if (entry) {
+      if (!educationIdentityPreserved(original, proposed, entry)) {
+        return { level: 'IDENTITY_CHANGED', allowed: false };
+      }
+    } else if (splitField(suggestion.field)) {
       return { level: 'IDENTITY_CHANGED', allowed: false };
     }
   }
