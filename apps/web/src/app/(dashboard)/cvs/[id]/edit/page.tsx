@@ -14,7 +14,13 @@ async function fetchCv(token: string, cvId: string) {
   });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Failed to fetch CV: ${res.status}`);
-  return res.json() as Promise<{ id: string; title?: string; source: string; content?: unknown }>;
+  return res.json() as Promise<{
+    id: string;
+    title?: string;
+    source: string;
+    content?: unknown;
+    templateId: string;
+  }>;
 }
 
 interface Props {
@@ -50,6 +56,9 @@ export default async function CvBuilderPage({ params }: Props) {
         cvId={cv.id}
         initialContent={cv.content as Parameters<typeof CvBuilderWorkspace>[0]['initialContent']}
         isPrefilled={cv.source === 'prefill'}
+        initialTemplateId={
+          cv.templateId as Parameters<typeof CvBuilderWorkspace>[0]['initialTemplateId']
+        }
       />
     </div>
   );

@@ -23,6 +23,7 @@ import { CreateCvDto } from './dto/create-cv.dto';
 import { UpdateCvContentDto } from './dto/update-cv-content.dto';
 import { RenameCvDto } from './dto/rename-cv.dto';
 import { ReorderCvSectionsDto } from './dto/reorder-cv-sections.dto';
+import { UpdateCvTemplateDto } from './dto/update-cv-template.dto';
 
 @Controller('cvs')
 @UseGuards(ClerkGuard)
@@ -71,6 +72,15 @@ export class CvController {
     @Body() dto: ReorderCvSectionsDto,
   ) {
     return this.cvService.reorderSections(user.clerkId, id, dto);
+  }
+
+  @Patch(':id/template')
+  updateTemplate(
+    @CurrentUser() user: { clerkId: string },
+    @Param('id') id: string,
+    @Body() dto: UpdateCvTemplateDto,
+  ) {
+    return this.cvService.updateTemplate(user.clerkId, id, dto);
   }
 
   @Delete(':id')

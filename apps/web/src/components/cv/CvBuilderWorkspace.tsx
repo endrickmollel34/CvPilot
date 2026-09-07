@@ -3,10 +3,17 @@
 import { useState, useCallback, useDeferredValue } from 'react';
 import { useAuth } from '@clerk/nextjs';
 
-import type { CvContent, CvSection } from '@cvpilot/shared';
+import type { CvContent, CvSection, TemplateId } from '@cvpilot/shared';
+import {
+  ClassicCvDocument,
+  CLASSIC_CSS,
+  ModernCvDocument,
+  MODERN_CSS,
+  TEMPLATE_REGISTRY,
+  DEFAULT_TEMPLATE_ID,
+} from '@cvpilot/shared';
 import { useAutosave, type SaveState } from '@/hooks/useAutosave';
-import { updateCvContent, downloadCvPdf } from '@/lib/cvApi';
-import { AtsClassic } from './templates/AtsClassic';
+import { updateCvContent, updateCvTemplate, downloadCvPdf } from '@/lib/cvApi';
 import { PersonalDetails } from './sections/PersonalDetails';
 import { Summary } from './sections/Summary';
 import { WorkExperience } from './sections/WorkExperience';
@@ -100,6 +107,15 @@ const ALL_SECTIONS: CvSection[] = [
   'languages',
   'certifications',
 ];
+
+// Short selector taglines — presentation copy only, not a structural design
+// token every renderer needs, so kept local to the web UI rather than in
+// the shared TEMPLATE_REGISTRY (see TemplateDefinition.description for the
+// longer help text shown once a template is selected).
+const TEMPLATE_TAGLINES: Record<TemplateId, string> = {
+  classic: 'Conservative · ATS-first',
+  modern: 'Contemporary · Professional',
+};
 
 const EMPTY_CONTENT: CvContent = {
   version: 1,
@@ -218,9 +234,15 @@ interface Props {
   cvId: string;
   initialContent: CvContent | null;
   isPrefilled?: boolean;
+  initialTemplateId?: TemplateId;
 }
 
-export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }: Props) {
+export function CvBuilderWorkspace({
+  cvId,
+  initialContent,
+  isPrefilled = false,
+  initialTemplateId = DEFAULT_TEMPLATE_ID,
+}: Props) {
   const { getToken } = useAuth();
 
   const [content, setContent] = useState<CvContent>(() => {
@@ -231,10 +253,31 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
   // Deferred value so the preview never blocks editor input.
   const deferredContent = useDeferredValue(content);
 
-  // 'personalDetails' is not a CvSection, so we use string | null.
+  // 'personalDetails'/'template' are not CvSections, so we use string | null.
   const [activePanel, setActivePanel] = useState<string>('personalDetails');
   const [mobileTab, setMobileTab] = useState<'edit' | 'preview'>('edit');
   const [dlState, setDlState] = useState<'idle' | 'downloading' | 'error'>('idle');
+
+  // Template selection is presentation metadata, persisted separately from
+  // `content` via its own PATCH endpoint — never folded into the content
+  // autosave (see cv.entity.ts's templateId doc comment for why).
+  const [templateId, setTemplateId] = useState<TemplateId>(initialTemplateId);
+  const [templateSaveState, setTemplateSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>(
+    'idle',
+  );
+
+  async function handleTemplateChange(next: TemplateId) {
+    const previous = templateId;
+    setTemplateId(next);
+    setTemplateSaveState('saving');
+    try {
+      await updateCvTemplate(getToken, cvId, next);
+      setTemplateSaveState('saved');
+    } catch {
+      setTemplateId(previous);
+      setTemplateSaveState('error');
+    }
+  }
 
   const saveFn = useCallback(
     async (c: CvContent) => {
@@ -362,6 +405,72 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
             )}
           </div>
 
+          {/* Template accordion — a small two-option card picker rather
+              than a full thumbnail gallery/Content-Design split, since
+              only Classic and Modern exist at this phase. Structured as
+              its own titled section (same pattern as Personal Details) so
+              a future "Design" panel with more controls (accent, font,
+              spacing) can grow from here without restructuring the
+              editor. */}
+          <div className="border-b border-gray-200">
+            <button
+              type="button"
+              id="section-header-template"
+              aria-expanded={activePanel === 'template'}
+              aria-controls="section-panel-template"
+              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-500"
+              onClick={() => setActivePanel((p) => (p === 'template' ? '' : 'template'))}
+            >
+              <span className="text-sm font-medium text-gray-800">Template</span>
+              <span className="text-xs text-gray-400" aria-hidden="true">
+                {activePanel === 'template' ? '▲' : '▼'}
+              </span>
+            </button>
+            {activePanel === 'template' && (
+              <div
+                id="section-panel-template"
+                role="region"
+                aria-labelledby="section-header-template"
+                className="px-4 pb-4 pt-1"
+              >
+                <p className="mb-2 text-xs text-gray-500">Choose a template</p>
+                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="CV template">
+                  {Object.values(TEMPLATE_REGISTRY).map((t) => {
+                    const selected = templateId === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => void handleTemplateChange(t.id)}
+                        className={`rounded border px-3 py-2 text-left focus:outline-none focus:ring-1 focus:ring-indigo-500 ${
+                          selected
+                            ? 'border-indigo-500 bg-indigo-50'
+                            : 'border-gray-300 bg-white hover:bg-gray-50'
+                        }`}
+                      >
+                        <span className="block text-sm font-medium text-gray-800">{t.name}</span>
+                        <span className="mt-0.5 block text-xs text-gray-500">
+                          {TEMPLATE_TAGLINES[t.id]}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-2 text-xs text-gray-400">
+                  {TEMPLATE_REGISTRY[templateId]?.description}
+                </p>
+                {templateSaveState === 'saving' && (
+                  <p className="mt-1 text-xs text-gray-400">Saving…</p>
+                )}
+                {templateSaveState === 'error' && (
+                  <p className="mt-1 text-xs text-red-600">Failed to save — try again</p>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Remaining sections */}
           {sections.map((section) => (
             <SectionPanel
@@ -382,7 +491,26 @@ export function CvBuilderWorkspace({ cvId, initialContent, isPrefilled = false }
           className={`flex-1 overflow-y-auto bg-gray-50 p-6 lg:flex ${mobileTab === 'preview' ? 'flex' : 'hidden'}`}
         >
           <div className="mx-auto w-full max-w-[210mm] rounded bg-white p-8 shadow-sm">
-            <AtsClassic content={deferredContent} />
+            {/* CV Template Foundation: each template's React component +
+                CSS (@cvpilot/shared) reads the SAME typography/color/
+                spacing tokens (e.g. CLASSIC_TEMPLATE/MODERN_TEMPLATE) that
+                drive apps/api's matching PDFKit renderer — see
+                pdf-generation.service.ts. The two are separate rendering
+                implementations (PDFKit has no CSS/flexbox engine to
+                share), but can no longer silently drift on font/color/
+                spacing the way the pre-Phase-1 AtsClassic.tsx (Tailwind)
+                and pdf-generation.service.ts (hardcoded constants) did. */}
+            {templateId === 'modern' ? (
+              <>
+                <style dangerouslySetInnerHTML={{ __html: MODERN_CSS }} />
+                <ModernCvDocument content={deferredContent} />
+              </>
+            ) : (
+              <>
+                <style dangerouslySetInnerHTML={{ __html: CLASSIC_CSS }} />
+                <ClassicCvDocument content={deferredContent} />
+              </>
+            )}
           </div>
         </div>
       </div>

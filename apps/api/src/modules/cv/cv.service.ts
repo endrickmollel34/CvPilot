@@ -30,6 +30,7 @@ import type { CreateCvDto } from './dto/create-cv.dto';
 import type { UpdateCvContentDto } from './dto/update-cv-content.dto';
 import type { RenameCvDto } from './dto/rename-cv.dto';
 import type { ReorderCvSectionsDto } from './dto/reorder-cv-sections.dto';
+import type { UpdateCvTemplateDto } from './dto/update-cv-template.dto';
 
 const PRESIGNED_URL_TTL_SECONDS = 900; // 15 minutes
 
@@ -177,6 +178,17 @@ export class CvService {
     return this.cvRepo.findOneByOrFail({ id: cvId });
   }
 
+  async updateTemplate(clerkId: string, cvId: string, dto: UpdateCvTemplateDto): Promise<CvEntity> {
+    const cv = await this.findOneForUser(clerkId, cvId);
+    if (!cv.content) {
+      throw new UnprocessableEntityException('CV has no builder content to apply a template to.');
+    }
+    // Presentation-only write — never touches `content`, so this can never
+    // alter factual CV data (see cv.entity.ts's templateId doc comment).
+    await this.cvRepo.update(cvId, { templateId: dto.templateId });
+    return this.cvRepo.findOneByOrFail({ id: cvId });
+  }
+
   async deleteCv(clerkId: string, cvId: string): Promise<void> {
     await this.findOneForUser(clerkId, cvId);
     await this.cvRepo.softDelete(cvId);
@@ -269,7 +281,7 @@ export class CvService {
     if (!cv.content) {
       throw new UnprocessableEntityException('This CV has no builder content to export.');
     }
-    const stream = this.pdfService.generateStream(cv.content, cv.title ?? 'CV');
+    const stream = this.pdfService.generateStream(cv.content, cv.title ?? 'CV', cv.templateId);
     const safe = (cv.title ?? 'cv').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
     return { stream, filename: `${safe}.pdf` };
   }

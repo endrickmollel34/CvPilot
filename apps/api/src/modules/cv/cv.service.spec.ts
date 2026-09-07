@@ -3,8 +3,9 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, UnprocessableEntityException } from '@nestjs/common';
 
+import type { CvContent } from '@cvpilot/shared';
 import { CvService } from './cv.service';
 import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
@@ -136,5 +137,115 @@ describe('CvService — confirmUpload() ownership validation', () => {
     await expect(service.confirmUpload('clerk-1', foreignKeyDto)).rejects.toMatchObject({
       message: expect.not.stringContaining('some-other-user-id') as unknown as string,
     });
+  });
+});
+
+// ─── CV Template Foundation, Phase 1 — template persistence ────────────────
+// templateId is presentation metadata, deliberately separate from
+// `content` — these tests prove that separation actually holds at the
+// service layer, not just by inspection of the entity/DTO shapes.
+describe('CvService — template persistence', () => {
+  let service: CvService;
+
+  const mockCvRepo = {
+    findOne: jest.fn(),
+    update: jest.fn(),
+    findOneByOrFail: jest.fn(),
+  };
+  const mockQueue = { add: jest.fn() };
+  const mockUserService = { findByClerkId: jest.fn() };
+  const mockBillingService = { canPerformAction: jest.fn() };
+  const mockPrefillService = {};
+  const mockPdfService = {};
+
+  const EXISTING_CONTENT: CvContent = {
+    version: 1,
+    personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+    summary: 'Backend engineer.',
+    workExperience: [],
+    education: [],
+    skills: [],
+    languages: [],
+    certifications: [],
+    sectionOrder: [
+      'summary',
+      'workExperience',
+      'education',
+      'skills',
+      'languages',
+      'certifications',
+    ],
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CvService,
+        { provide: getRepositoryToken(CvEntity), useValue: mockCvRepo },
+        { provide: getQueueToken('cv-parsing'), useValue: mockQueue },
+        { provide: ConfigService, useValue: makeConfig() },
+        { provide: UserService, useValue: mockUserService },
+        { provide: BillingService, useValue: mockBillingService },
+        { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PdfGenerationService, useValue: mockPdfService },
+      ],
+    }).compile();
+
+    service = module.get<CvService>(CvService);
+    mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
+  });
+
+  it('updates templateId without touching content — the write payload never includes `content`', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      content: EXISTING_CONTENT,
+      templateId: 'classic',
+    });
+    mockCvRepo.findOneByOrFail.mockResolvedValue({
+      id: 'cv-1',
+      content: EXISTING_CONTENT,
+      templateId: 'classic',
+    });
+
+    await service.updateTemplate('clerk-1', 'cv-1', { templateId: 'classic' });
+
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { templateId: 'classic' });
+    const writePayload = mockCvRepo.update.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(writePayload).not.toHaveProperty('content');
+  });
+
+  it('round-trips: the CV returned after updateTemplate reflects the new templateId and unchanged content', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      content: EXISTING_CONTENT,
+      templateId: 'classic',
+    });
+    mockCvRepo.findOneByOrFail.mockResolvedValue({
+      id: 'cv-1',
+      content: EXISTING_CONTENT,
+      templateId: 'classic',
+    });
+
+    const result = await service.updateTemplate('clerk-1', 'cv-1', { templateId: 'classic' });
+
+    expect(result.templateId).toBe('classic');
+    expect(result.content).toEqual(EXISTING_CONTENT);
+  });
+
+  it('rejects template selection on a CV with no builder content', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      content: undefined,
+    });
+
+    await expect(
+      service.updateTemplate('clerk-1', 'cv-1', { templateId: 'classic' }),
+    ).rejects.toThrow(UnprocessableEntityException);
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
   });
 });

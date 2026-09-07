@@ -10,7 +10,8 @@ import {
   OneToMany,
 } from 'typeorm';
 
-import type { CvContent, CvSource } from '@cvpilot/shared';
+import type { CvContent, CvSource, TemplateId } from '@cvpilot/shared';
+import { DEFAULT_TEMPLATE_ID } from '@cvpilot/shared';
 import type { UserEntity } from './user.entity';
 import type { AnalysisEntity } from './analysis.entity';
 
@@ -32,6 +33,14 @@ export class CvEntity {
 
   @Column({ name: 'content', type: 'jsonb', nullable: true })
   content?: CvContent;
+
+  // Presentation metadata — deliberately a sibling column, never a field
+  // inside `content`. Tailoring/Analysis/Cover Letter only ever read
+  // `content`/`parsed_content`, so keeping templateId out of `content`
+  // guarantees template selection can never affect factual CV data or its
+  // downstream consumers (see the Template Foundation decision report).
+  @Column({ name: 'template_id', length: 50, default: DEFAULT_TEMPLATE_ID })
+  templateId!: TemplateId;
 
   @Column({ name: 'file_name', length: 255, nullable: true })
   fileName?: string;

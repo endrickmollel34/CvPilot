@@ -26,7 +26,13 @@ export default clerkMiddleware(
   // Clerk's official Frontend API proxy — required for our production Vercel
   // domain. Enabling this makes clerkMiddleware itself forward matched
   // /__clerk requests to Clerk's Frontend API before our handler above runs.
-  { frontendApiProxy: { enabled: true } },
+  // Must stay OFF in local development: pk_test_/sk_test_ keys are not
+  // configured for our proxy domain, so a local /__clerk/v1/client/handshake
+  // request gets rejected by Clerk with host_invalid ("Invalid host").
+  // NODE_ENV is 'development' under `next dev` and 'production' for any
+  // built/deployed instance (including Vercel), so this needs no new env
+  // var and no hostname check.
+  { frontendApiProxy: { enabled: process.env.NODE_ENV === 'production' } },
 );
 
 export const config = {

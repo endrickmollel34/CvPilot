@@ -1,4 +1,4 @@
-import type { CvContent, CvSource } from '@cvpilot/shared';
+import type { CvContent, CvSource, TemplateId } from '@cvpilot/shared';
 
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
@@ -11,6 +11,7 @@ export interface CvDto {
   fileName?: string;
   parseStatus: 'pending' | 'processing' | 'done' | 'failed';
   content?: CvContent;
+  templateId: TemplateId;
   sourceUploadCvId?: string;
   createdAt: string;
   updatedAt: string;
@@ -126,6 +127,23 @@ export async function renameCv(token: TokenSource, cvId: string, title: string):
     body: JSON.stringify({ title }),
   });
   if (!res.ok) throw new Error(`Failed to rename CV: ${res.status}`);
+  return res.json() as Promise<CvDto>;
+}
+
+export async function updateCvTemplate(
+  token: TokenSource,
+  cvId: string,
+  templateId: TemplateId,
+): Promise<CvDto> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}/template`, token, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ templateId }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to update CV template: ${res.status}`, res.status);
+  }
   return res.json() as Promise<CvDto>;
 }
 
