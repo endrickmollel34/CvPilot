@@ -9,6 +9,14 @@ import {
   CLASSIC_CSS,
   ModernCvDocument,
   MODERN_CSS,
+  MinimalCvDocument,
+  MINIMAL_CSS,
+  ProfessionalCvDocument,
+  PROFESSIONAL_CSS,
+  CompactCvDocument,
+  COMPACT_CSS,
+  SignatureCvDocument,
+  SIGNATURE_CSS,
   TEMPLATE_REGISTRY,
   DEFAULT_TEMPLATE_ID,
 } from '@cvpilot/shared';
@@ -115,6 +123,10 @@ const ALL_SECTIONS: CvSection[] = [
 const TEMPLATE_TAGLINES: Record<TemplateId, string> = {
   classic: 'Conservative · ATS-first',
   modern: 'Contemporary · Professional',
+  minimal: 'Elegant · Highly readable',
+  professional: 'Premium · Corporate',
+  compact: 'Efficient · Content-rich',
+  signature: 'Editorial · Sophisticated',
 };
 
 const EMPTY_CONTENT: CvContent = {
@@ -504,6 +516,26 @@ export function CvBuilderWorkspace({
               <>
                 <style dangerouslySetInnerHTML={{ __html: MODERN_CSS }} />
                 <ModernCvDocument content={deferredContent} />
+              </>
+            ) : templateId === 'minimal' ? (
+              <>
+                <style dangerouslySetInnerHTML={{ __html: MINIMAL_CSS }} />
+                <MinimalCvDocument content={deferredContent} />
+              </>
+            ) : templateId === 'professional' ? (
+              <>
+                <style dangerouslySetInnerHTML={{ __html: PROFESSIONAL_CSS }} />
+                <ProfessionalCvDocument content={deferredContent} />
+              </>
+            ) : templateId === 'compact' ? (
+              <>
+                <style dangerouslySetInnerHTML={{ __html: COMPACT_CSS }} />
+                <CompactCvDocument content={deferredContent} />
+              </>
+            ) : templateId === 'signature' ? (
+              <>
+                <style dangerouslySetInnerHTML={{ __html: SIGNATURE_CSS }} />
+                <SignatureCvDocument content={deferredContent} />
               </>
             ) : (
               <>
