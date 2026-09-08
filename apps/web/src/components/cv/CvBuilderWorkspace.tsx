@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useDeferredValue } from 'react';
+import { useState, useCallback, useDeferredValue, useRef } from 'react';
 import { useAuth } from '@clerk/nextjs';
 
 import type { CvContent, CvSection, TemplateId } from '@cvpilot/shared';
@@ -277,17 +277,30 @@ export function CvBuilderWorkspace({
   const [templateSaveState, setTemplateSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>(
     'idle',
   );
+  // Guards against out-of-order PATCH /cvs/:id/template responses: if the
+  // user picks template A then quickly picks template B before A's request
+  // settles, A's (now-superseded) response must never be allowed to touch
+  // state — otherwise a late failure for A can revert templateId back past
+  // B's already-successful, already-persisted selection, desyncing the
+  // preview/selector from what's actually saved. Only the response whose
+  // requestId still matches the latest dispatched request is applied.
+  const templateRequestRef = useRef(0);
 
   async function handleTemplateChange(next: TemplateId) {
+    const requestId = ++templateRequestRef.current;
     const previous = templateId;
     setTemplateId(next);
     setTemplateSaveState('saving');
     try {
       await updateCvTemplate(getToken, cvId, next);
-      setTemplateSaveState('saved');
+      if (templateRequestRef.current === requestId) {
+        setTemplateSaveState('saved');
+      }
     } catch {
-      setTemplateId(previous);
-      setTemplateSaveState('error');
+      if (templateRequestRef.current === requestId) {
+        setTemplateId(previous);
+        setTemplateSaveState('error');
+      }
     }
   }
 
