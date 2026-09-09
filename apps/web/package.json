@@ -49,5 +49,11 @@
       "^.+\\.(t|j)s$": "ts-jest"
     },
     "testEnvironment": "node"
+  },
+  "lint-staged": {
+    "**/*.{js,jsx,ts,tsx}": [
+      "next lint --fix --file",
+      "prettier --write"
+    ]
   }
 }
