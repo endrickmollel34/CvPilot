@@ -185,8 +185,18 @@ function validateOutput(
 
   const claims = findUnsupportedPossessionClaims(text, guardEvidence);
   if (claims.length > 0) {
+    // Privacy-safe logging: this message now reaches Railway logs via the
+    // retry loop's describeError() (see the intermittent-generation-fix
+    // module report), so it must carry the unsupported term(s) — the
+    // actual diagnostic signal — without the full generated sentence each
+    // was found in. findUnsupportedPossessionClaims()'s own return format
+    // is `"<term>" in: "<generated sentence>"`; only the term half (before
+    // ` in: `) is safe/useful to persist in a production log. The guard's
+    // own detection logic and its own return value are unchanged — this
+    // only affects how the violation is summarized for this thrown Error.
+    const unsupportedTerms = claims.map((claim) => claim.split(' in: ')[0]).join('; ');
     throw new Error(
-      `Generated cover letter claims possession of technology/skill not supported by the CV: ${claims.join('; ')}`,
+      `Generated cover letter claims possession of technology/skill not supported by the CV: ${unsupportedTerms}`,
     );
   }
 }
@@ -198,6 +208,25 @@ export interface CoverLetterAiResult {
 }
 
 const MAX_ATTEMPTS = 3;
+
+/**
+ * Safe, log-friendly summary of a caught provider/validation error — name
+ * and message only. Diagnostic-loss fix (see the module report): the retry
+ * loop below used to only `logger.warn` each attempt's error and then
+ * discard it, so the exception that finally reached CoverLetterService's
+ * process() catch block was always the same generic "all AI providers
+ * exhausted" string, with the real cause (OpenAI timeout, 429, 5xx, network
+ * error, malformed output, validateOutput/grounding rejection) unrecoverable
+ * from Railway logs. Every caller of this only ever passes an OpenAI/
+ * Anthropic SDK error or a validateOutput()/possession-claim-guard Error —
+ * never raw CV content, the prompt, or a secret — so `.message` is always
+ * safe to surface as-is; this deliberately never includes `.stack` (kept
+ * separate, via the trace param on the final logger.error call).
+ */
+export function describeError(err: unknown): string {
+  if (err instanceof Error) return `${err.name}: ${err.message}`;
+  return typeof err === 'string' ? err : 'Unknown error';
+}
 
 @Injectable()
 export class CoverLetterAiService {
@@ -233,17 +262,22 @@ export class CoverLetterAiService {
     );
     const guardEvidence = resolveGuardEvidence(cvText, evidence);
 
+    let lastError: unknown;
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
         return await this.callOpenAI(userPrompt, companyName, jobTitle, guardEvidence);
       } catch (err) {
-        this.logger.warn(`OpenAI cover letter attempt ${attempt}/${MAX_ATTEMPTS} failed`, err);
+        lastError = err;
+        this.logger.warn(
+          `OpenAI cover letter attempt ${attempt}/${MAX_ATTEMPTS} failed: ${describeError(err)}`,
+        );
       }
     }
 
     if (!this.anthropic) {
       this.logger.warn('OpenAI exhausted — Anthropic fallback is not configured, failing');
-      throw new Error('Cover letter generation failed: all AI providers exhausted after retries');
+      throw new Error(`Cover letter generation failed after retries: ${describeError(lastError)}`);
     }
 
     this.logger.warn('OpenAI exhausted — activating Anthropic fallback');
@@ -252,11 +286,14 @@ export class CoverLetterAiService {
       try {
         return await this.callAnthropic(userPrompt, companyName, jobTitle, guardEvidence);
       } catch (err) {
-        this.logger.warn(`Anthropic cover letter attempt ${attempt}/${MAX_ATTEMPTS} failed`, err);
+        lastError = err;
+        this.logger.warn(
+          `Anthropic cover letter attempt ${attempt}/${MAX_ATTEMPTS} failed: ${describeError(err)}`,
+        );
       }
     }
 
-    throw new Error('Cover letter generation failed: all AI providers exhausted after retries');
+    throw new Error(`Cover letter generation failed after retries: ${describeError(lastError)}`);
   }
 
   private async callOpenAI(

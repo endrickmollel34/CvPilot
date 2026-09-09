@@ -5,6 +5,7 @@ import { getQueueToken } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
 import {
   ForbiddenException,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -469,6 +470,40 @@ describe('CoverLetterService', () => {
     ).resolves.toBeUndefined(); // no re-throw
 
     expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+  });
+
+  // Diagnostic-loss fix: process()'s catch must log the real underlying
+  // reason (here, CoverLetterAiService's own diagnostic message, already
+  // stripped of secrets/CV content by describeError()) in the primary log
+  // string itself, plus a proper stack via Logger.error()'s dedicated
+  // `trace` argument — not the raw Error object passed the way `.warn()`
+  // would treat it as an opaque "context" label.
+  it('logs the real underlying failure reason and a stack trace when AI generation fails', async () => {
+    const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const realError = new Error(
+      'Cover letter generation failed after retries: Error: Rate limit reached for gpt-4o',
+    );
+    mockAiService.generateCoverLetter.mockRejectedValue(realError);
+    mockCvService.findById.mockResolvedValue(MOCK_CV);
+
+    await service.process({
+      data: {
+        coverLetterId: 'letter-1',
+        userId: 'user-1',
+        cvId: 'cv-1',
+        jobTitle: 'Senior Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Lead backend development.',
+        tone: 'professional',
+      },
+    } as unknown as Job<CoverLetterJobData>);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Rate limit reached for gpt-4o'),
+      realError.stack,
+    );
+
+    errorSpy.mockRestore();
   });
 
   // ─── update() ────────────────────────────────────────────────────────────────

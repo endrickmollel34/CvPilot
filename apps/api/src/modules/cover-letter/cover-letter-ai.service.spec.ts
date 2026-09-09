@@ -2,7 +2,7 @@ import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 
-import { CoverLetterAiService } from './cover-letter-ai.service';
+import { CoverLetterAiService, describeError } from './cover-letter-ai.service';
 
 // openai and @anthropic-ai/sdk are real HTTP clients constructed directly in
 // CoverLetterAiService's constructor — mocked here so tests never make
@@ -148,7 +148,10 @@ describe('CoverLetterAiService', () => {
           'Acme Corp',
           tone,
         ),
-      ).rejects.toThrow('all AI providers exhausted');
+        // Diagnostic-loss fix: the final thrown error must carry the real
+        // last-attempt reason (here, the possession-claim guard's own
+        // message), not just the old generic "all AI providers exhausted".
+      ).rejects.toThrow(/Cover letter generation failed after retries: .*claims possession of/);
 
       // Both providers were tried and both were rejected — grounding is
       // enforced identically regardless of which provider answered.
@@ -277,7 +280,7 @@ describe('CoverLetterAiService', () => {
         'professional',
         { experienceText: '', skillsOnlyTerms: ['Docker'] },
       ),
-    ).rejects.toThrow('all AI providers exhausted');
+    ).rejects.toThrow('Cover letter generation failed after retries');
   });
 
   // ─── Tone descriptors must be distinct ─────────────────────────────────────
@@ -449,7 +452,10 @@ describe('CoverLetterAiService', () => {
         'Acme Corp',
         'professional',
       ),
-    ).rejects.toThrow('all AI providers exhausted');
+      // Diagnostic-loss fix: the real validateOutput() rejection reason
+      // (too short, since this fixture is well under 200 chars) must
+      // survive into the final error rather than a generic message.
+    ).rejects.toThrow(/Cover letter generation failed after retries: .*too short/);
   });
 
   // ─── Anthropic is a genuinely optional fallback ────────────────────────────
@@ -467,7 +473,8 @@ describe('CoverLetterAiService', () => {
           'Acme Corp',
           'professional',
         ),
-      ).rejects.toThrow('all AI providers exhausted');
+        // Diagnostic-loss fix: real reason (too-short output) preserved.
+      ).rejects.toThrow(/Cover letter generation failed after retries: .*too short/);
 
       expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
@@ -485,7 +492,7 @@ describe('CoverLetterAiService', () => {
           'Acme Corp',
           'professional',
         ),
-      ).rejects.toThrow('all AI providers exhausted');
+      ).rejects.toThrow('Cover letter generation failed after retries');
 
       expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
@@ -526,6 +533,125 @@ describe('CoverLetterAiService', () => {
       expect(result.content).toBe(letter);
       expect(result.modelUsed).toBe('gpt-4o');
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Diagnostic-loss fix: real failure reason must reach the final error ──
+  describe('final error preserves the real diagnostic reason', () => {
+    it('preserves the last OpenAI attempt error when Anthropic is not configured', async () => {
+      const noAnthropicService = buildService(undefined);
+      mockOpenAICreate.mockRejectedValue(new Error('Rate limit reached for gpt-4o'));
+
+      await expect(
+        noAnthropicService.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+        ),
+      ).rejects.toThrow(
+        'Cover letter generation failed after retries: Error: Rate limit reached for gpt-4o',
+      );
+    });
+
+    it('preserves the last Anthropic attempt error once OpenAI is also exhausted', async () => {
+      const configuredService = buildService('sk-ant-real-key');
+      mockOpenAICreate.mockRejectedValue(new Error('OpenAI request timed out'));
+      mockAnthropicCreate.mockRejectedValue(new Error('Anthropic overloaded_error'));
+
+      await expect(
+        configuredService.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+        ),
+        // The Anthropic attempt is the LAST one tried, so its error — not
+        // OpenAI's earlier one — must be what survives into the final message.
+      ).rejects.toThrow(
+        'Cover letter generation failed after retries: Error: Anthropic overloaded_error',
+      );
+    });
+
+    it('never includes the CV text, job description, or prompt content in the final error message', async () => {
+      const secretCvText = 'CONFIDENTIAL: candidate lives at 42 Secret Lane and earns $999,999.';
+      const secretJobDescription = 'INTERNAL-ONLY requisition code XJ-42, do not disclose'.padEnd(
+        60,
+        '.',
+      );
+      mockOpenAICreate.mockRejectedValue(new Error('network error'));
+      mockAnthropicCreate.mockRejectedValue(new Error('network error'));
+
+      let thrown: Error | undefined;
+      try {
+        await service.generateCoverLetter(
+          secretCvText,
+          secretJobDescription,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+        );
+      } catch (err) {
+        thrown = err as Error;
+      }
+
+      expect(thrown).toBeDefined();
+      expect(thrown!.message).not.toContain('Secret Lane');
+      expect(thrown!.message).not.toContain('XJ-42');
+      expect(thrown!.message).toBe(
+        'Cover letter generation failed after retries: Error: network error',
+      );
+    });
+
+    // Privacy-safe logging: a possession-claim (grounding) rejection's own
+    // Error is what ultimately reaches Railway via describeError() — it
+    // must keep the unsupported term (the actual diagnostic signal) but
+    // must NOT embed the full generated sentence the guard quoted it from.
+    it('preserves the unsupported term but strips the generated sentence from a possession-claim rejection', async () => {
+      const badLetter = HALLUCINATED_LETTERS.professional('Acme Corp', 'Backend Engineer');
+      mockOpenAICreate.mockResolvedValue(openAiResponse(badLetter));
+      mockAnthropicCreate.mockResolvedValue(anthropicResponse(badLetter));
+
+      let thrown: Error | undefined;
+      try {
+        await service.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+        );
+      } catch (err) {
+        thrown = err as Error;
+      }
+
+      expect(thrown).toBeDefined();
+      // The reason/category and the unsupported term survive...
+      expect(thrown!.message).toContain(
+        'claims possession of technology/skill not supported by the CV',
+      );
+      expect(thrown!.message).toMatch(/"(git|docker|python)"/);
+      // ...but the full generated sentence the term was found in does not.
+      expect(thrown!.message).not.toContain(' in: ');
+      expect(thrown!.message).not.toContain(badLetter);
+      expect(thrown!.message).not.toContain('I am excited to apply for the Backend Engineer role');
+    });
+  });
+
+  describe('describeError', () => {
+    it('renders an Error as "Name: message"', () => {
+      expect(describeError(new Error('boom'))).toBe('Error: boom');
+    });
+
+    it('renders a plain string as-is', () => {
+      expect(describeError('plain string failure')).toBe('plain string failure');
+    });
+
+    it('falls back to a safe label for a non-Error, non-string throw', () => {
+      expect(describeError({ weird: true })).toBe('Unknown error');
+      expect(describeError(undefined)).toBe('Unknown error');
     });
   });
 });

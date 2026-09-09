@@ -22,6 +22,7 @@ import { useAutosave } from '@/hooks/useAutosave';
 import { useApiError } from '@/hooks/useApiError';
 import { ActionableError } from '@/components/ui/ActionableError';
 import { UsageHint } from '@/components/billing/UsageCard';
+import { isCurrentPollGeneration } from './pollGeneration';
 
 /**
  * Cover Letter V2 — a single unified workspace for both entry points:
@@ -171,23 +172,35 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
   const downloadError = useApiError();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  useEffect(
-    () => () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    },
-    [],
-  );
+  // Bumped by stopPolling()/startPolling() on every polling generation —
+  // see pollGeneration.ts. An in-flight getCoverLetter() response captures
+  // the generation active when it was ISSUED; if that no longer matches by
+  // the time it resolves (a new Regenerate started and superseded it while
+  // the old request was still in flight), the response is stale and must
+  // be ignored completely — it must never overwrite fresher state, show a
+  // stale "Generation failed," or clear the new interval.
+  const pollGenerationRef = useRef(0);
+
+  function stopPolling() {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+    pollGenerationRef.current += 1;
+  }
+
+  useEffect(() => () => stopPolling(), []);
 
   const status = letter?.status;
   const isBusy = status === 'queued' || status === 'processing';
   const isReady = status === 'generated' || status === 'downloaded';
 
   function startPolling(id: string) {
-    if (pollRef.current) clearInterval(pollRef.current);
+    stopPolling();
+    const generation = pollGenerationRef.current;
     pollRef.current = setInterval(() => {
       void (async () => {
         try {
           const updated = await getCoverLetter(getToken, id);
+          if (!isCurrentPollGeneration(generation, pollGenerationRef.current)) return;
           setLetter(updated);
           if (updated.status === 'generated' || updated.status === 'downloaded') {
             clearInterval(pollRef.current!);
@@ -253,6 +266,11 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     formError.clear();
+    // Invalidate any still-in-flight poll from a previous attempt right
+    // away, not just once startPolling() runs after the await below — a
+    // stale response landing in that window must not be able to resurrect
+    // the error we just cleared. See pollGeneration.ts.
+    stopPolling();
     if (!selectedCvId) {
       formError.setMessage('Select a CV.');
       return;
@@ -296,6 +314,11 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
   async function handleRegenerate() {
     if (!letter) return;
     formError.clear();
+    // Same reasoning as handleGenerate(): stop and invalidate any prior
+    // in-flight poll immediately, before the two awaited requests below,
+    // so a late-arriving stale 'failed' response from the attempt being
+    // retried can never re-show the error we just cleared.
+    stopPolling();
     if (jobDescription.trim().length < 50) {
       formError.setMessage('Job description must be at least 50 characters.');
       return;

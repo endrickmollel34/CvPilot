@@ -185,7 +185,18 @@ export class CoverLetterService extends WorkerHost {
       this.eventEmitter.emit('cover-letter.completed', { coverLetterId });
       this.logger.log(`Cover letter ${coverLetterId} generated (model: ${modelUsed})`);
     } catch (err) {
-      this.logger.error(`Cover letter ${coverLetterId} generation failed`, err);
+      // Diagnostic-loss fix (see the module report): log the real message
+      // in the primary log line itself, not just via Nest's `trace` param —
+      // `err` here is already a safe, provider/validation-only message
+      // string by the time it reaches this catch (see
+      // cover-letter-ai.service.ts's describeError()/lastError handling),
+      // never raw CV content or a secret. The stack, when available, still
+      // goes through the dedicated `trace` argument Logger.error() expects
+      // (a string), rather than passing the raw Error object as the
+      // "context" label the way `.warn()`/`.log()` would treat it.
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      this.logger.error(`Cover letter ${coverLetterId} generation failed: ${message}`, stack);
       await this.repo.update(coverLetterId, { status: 'failed' });
       this.eventEmitter.emit('cover-letter.failed', { coverLetterId });
     }
