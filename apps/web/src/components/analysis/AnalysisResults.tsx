@@ -81,7 +81,7 @@ export function AnalysisResults({ analysis, onNewAnalysis }: AnalysisResultsProp
           )}
           <div className="mt-4 flex gap-2">
             <Link
-              href="/cover-letter"
+              href={`/cover-letter?analysisId=${analysis.id}`}
               className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
             >
               Generate cover letter

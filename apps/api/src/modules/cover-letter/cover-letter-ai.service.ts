@@ -63,7 +63,17 @@ const SYSTEM_PROMPT_V1 =
   'persuasive and confident without exaggerating qualifications. ' +
   'Do not include placeholder text such as [Company Name], [Your Name], [Date], or any bracket notation. ' +
   'Return ONLY the cover letter body text — no subject line, no date, no signature block, no header. ' +
-  'Aim for 3–4 well-structured paragraphs (200–600 words). ' +
+  // V2.1 — narrowed from the original "3–4 paragraphs (200–600 words)" to
+  // target a genuine single printed page under normal circumstances (see
+  // the Cover Letter V2.1 module report). This changes only the model's
+  // own length guidance — it does NOT touch validateOutput()'s 200–5000
+  // character sanity bounds (a longer, well-grounded letter must still be
+  // accepted, never hard-truncated; the PDF renderer's multi-page support
+  // is the deliberate fallback for it) and does not touch any grounding
+  // rule above.
+  'Aim for a concise opening, 2–3 substantive body paragraphs, and a concise closing — roughly ' +
+  '300–450 words in total, tightly written so the letter reads as a strong one-page professional ' +
+  'letter under normal circumstances. ' +
   'Follow the TONE instructions given in the user message precisely — they define sentence rhythm, structure, ' +
   'and voice, not just vocabulary. Two letters written in different tones for the same candidate must read as ' +
   'genuinely different in rhythm and style, not merely swap a few adjectives. ' +

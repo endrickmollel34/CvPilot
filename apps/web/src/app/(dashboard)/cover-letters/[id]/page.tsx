@@ -5,8 +5,9 @@ import { auth } from '@clerk/nextjs/server';
 import { notFound, redirect } from 'next/navigation';
 
 import { API_BASE_URL as API_URL } from '@/lib/apiUrl';
+import { listCvs } from '@/lib/cvApi';
 import type { CoverLetterDto } from '@/lib/coverLetterApi';
-import { CoverLetterViewer } from '@/components/cover-letter/CoverLetterViewer';
+import { CoverLetterWorkspace } from '@/components/cover-letter/CoverLetterWorkspace';
 
 async function fetchCoverLetter(token: string, id: string): Promise<CoverLetterDto | null> {
   const res = await fetch(`${API_URL}/cover-letters/${id}`, {
@@ -33,40 +34,21 @@ export default async function CoverLetterDetailPage({ params }: Props) {
   const letter = await fetchCoverLetter(token, id);
   if (!letter) notFound();
 
+  // The workspace only needs initialCvs for the CV picker, which is
+  // hidden once a letter already exists (see CoverLetterWorkspace) — an
+  // empty list here is harmless, but reusing the same fetch keeps the
+  // linked CV's title/parseStatus consistent with the rest of the app.
+  const cvs = await listCvs(token).catch(() => []);
+
   return (
-    <div className="mx-auto max-w-5xl px-6 py-8">
-      <div className="mb-6">
+    <div className="flex h-screen flex-col">
+      <header className="flex items-center gap-4 border-b border-gray-200 bg-white px-4 py-3">
         <Link href="/cover-letters" className="text-sm text-indigo-600 hover:underline">
           ← Cover letter history
         </Link>
-      </div>
+      </header>
 
-      {(letter.status === 'generated' || letter.status === 'downloaded') && (
-        <CoverLetterViewer letter={letter} />
-      )}
-
-      {letter.status === 'failed' && (
-        <div className="mx-auto max-w-3xl rounded-xl border border-red-200 bg-red-50 p-6 text-center">
-          <p className="text-sm font-medium text-red-700">This cover letter failed to generate.</p>
-          <p className="mt-1 text-xs text-red-500">No content was saved for this run.</p>
-          <Link
-            href="/cover-letter"
-            className="mt-4 inline-block rounded-md bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-700"
-          >
-            Try again
-          </Link>
-        </div>
-      )}
-
-      {(letter.status === 'queued' || letter.status === 'processing') && (
-        <div className="mx-auto max-w-3xl rounded-xl border border-gray-200 bg-white p-10 text-center shadow-sm">
-          <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600" />
-          <p className="text-sm text-gray-600">This cover letter is still {letter.status}.</p>
-          <p className="mt-1 text-xs text-gray-400">
-            Check back shortly — this page does not auto-refresh.
-          </p>
-        </div>
-      )}
+      <CoverLetterWorkspace initialCvs={cvs} initialLetter={letter} />
     </div>
   );
 }

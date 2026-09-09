@@ -38,4 +38,34 @@ export class CreateCoverLetterDto {
   @IsOptional()
   @IsIn(['professional', 'conversational', 'enthusiastic', 'formal'])
   tone?: 'professional' | 'conversational' | 'enthusiastic' | 'formal';
+
+  // V2 — optional recipient/company detail for the letterhead. None of
+  // these ever reach the AI prompt (see cover-letter-ai.service.ts) — they
+  // are rendering-only, used by the live preview and the PDF.
+  @IsOptional()
+  @trim()
+  @IsString()
+  @MaxLength(255)
+  recipientName?: string;
+
+  @IsOptional()
+  @trim()
+  @IsString()
+  @MaxLength(255)
+  recipientTitle?: string;
+
+  @IsOptional()
+  @trim()
+  @IsString()
+  @MaxLength(1000)
+  companyAddress?: string;
+
+  // V2.1 — the candidate's own postal address for the sender block.
+  // Optional, never required to generate a letter, never inferred from
+  // the CV — see cover-letter.entity.ts's senderAddress doc comment.
+  @IsOptional()
+  @trim()
+  @IsString()
+  @MaxLength(1000)
+  senderAddress?: string;
 }

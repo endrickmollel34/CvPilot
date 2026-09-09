@@ -70,4 +70,9 @@ export class CoverLetterController {
   download(@CurrentUser() user: { clerkId: string }, @Param('id') id: string) {
     return this.coverLetterService.getDownloadUrl(user.clerkId, id);
   }
+
+  @Post(':id/regenerate')
+  regenerate(@CurrentUser() user: { clerkId: string }, @Param('id') id: string) {
+    return this.coverLetterService.regenerate(user.clerkId, id);
+  }
 }

@@ -20,7 +20,6 @@ import { fromEvent } from 'rxjs';
 import { filter, map } from 'rxjs/operators';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import PDFDocument from 'pdfkit';
 
 import { CoverLetterEntity } from '../../entities/cover-letter.entity';
 import { UserService } from '../user/user.service';
@@ -30,6 +29,7 @@ import { AnalysisService } from '../analysis/analysis.service';
 import { CoverLetterAiService } from './cover-letter-ai.service';
 import { resolveCoverLetterCvText } from './cv-text-resolver.util';
 import { buildCvEvidenceFromContent, buildCvEvidenceFromPlainText } from './cv-evidence.util';
+import { generateCoverLetterPdf } from './cover-letter-pdf.util';
 import type { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
 import type { UpdateCoverLetterDto } from './dto/update-cover-letter.dto';
 import type { ListCoverLettersDto } from './dto/list-cover-letters.dto';
@@ -114,6 +114,13 @@ export class CoverLetterService extends WorkerHost {
       analysisId: dto.analysisId,
       jobTitle: dto.jobTitle,
       companyName: dto.companyName,
+      // V2 — persisted so the workspace can redisplay/edit these later and
+      // so Regenerate has something to read back (see cover-letter.entity.ts).
+      jobDescription: dto.jobDescription,
+      recipientName: dto.recipientName,
+      recipientTitle: dto.recipientTitle,
+      companyAddress: dto.companyAddress,
+      senderAddress: dto.senderAddress,
       tone,
       content: '',
       status: 'queued',
@@ -215,15 +222,78 @@ export class CoverLetterService extends WorkerHost {
     return letter;
   }
 
+  // V2 — a genuine partial update: only the fields the caller actually
+  // sent are touched. TypeORM's Repository.update() already skips any
+  // property whose value is `undefined` (it only ever writes a column for
+  // properties that are actually present) but DOES write an explicit
+  // `null` (SET column = NULL) — that distinction is exactly what lets
+  // senderAddress support "leave unchanged" (omitted) vs. "explicitly
+  // cleared" (null) — passing dto's optional fields straight through is
+  // safe and never accidentally nulls out an untouched column. See
+  // update-cover-letter.dto.ts for why every field is optional.
   async update(clerkId: string, id: string, dto: UpdateCoverLetterDto): Promise<CoverLetterEntity> {
     const letter = await this.findOneForUser(clerkId, id);
-    await this.repo.update(letter.id, { content: dto.content });
+    await this.repo.update(letter.id, {
+      content: dto.content,
+      jobTitle: dto.jobTitle,
+      companyName: dto.companyName,
+      jobDescription: dto.jobDescription,
+      tone: dto.tone,
+      recipientName: dto.recipientName,
+      recipientTitle: dto.recipientTitle,
+      companyAddress: dto.companyAddress,
+      senderAddress: dto.senderAddress,
+    });
     return this.repo.findOneByOrFail({ id: letter.id });
   }
 
   async softDelete(clerkId: string, id: string): Promise<void> {
     const letter = await this.findOneForUser(clerkId, id);
     await this.repo.softDelete(letter.id);
+  }
+
+  /**
+   * V2 — re-runs generation for an existing letter using whatever is
+   * currently persisted (the workspace saves field edits via update()
+   * before calling this, so "persisted" means "whatever the user last
+   * saved"). Deliberately reuses the exact same BullMQ job/process()
+   * pipeline submit() uses — same queue name, same CoverLetterJobData
+   * shape, same AI service call — rather than introducing a second
+   * generation path. Same billing gate as submit(): a regenerate is a
+   * real AI call with a real cost, so it counts against the same monthly
+   * quota.
+   */
+  async regenerate(clerkId: string, id: string): Promise<CoverLetterEntity> {
+    const letter = await this.findOneForUser(clerkId, id);
+    const user = await this.userService.findByClerkId(clerkId);
+
+    if (!letter.jobTitle || !letter.companyName || !letter.jobDescription) {
+      throw new UnprocessableEntityException(
+        'Job title, company name, and job description are required to regenerate this letter.',
+      );
+    }
+
+    const canProceed = await this.billingService.canPerformAction(user.id, 'cover-letter');
+    if (!canProceed) {
+      throw new ForbiddenException(
+        'Monthly cover letter limit reached. Upgrade your plan to continue.',
+      );
+    }
+
+    await this.repo.update(letter.id, { status: 'processing' });
+
+    await this.queue.add('generate-letter', {
+      coverLetterId: letter.id,
+      userId: user.id,
+      cvId: letter.cvId,
+      analysisId: letter.analysisId,
+      jobTitle: letter.jobTitle,
+      companyName: letter.companyName,
+      jobDescription: letter.jobDescription,
+      tone: letter.tone ?? 'professional',
+    } satisfies CoverLetterJobData);
+
+    return this.repo.findOneByOrFail({ id: letter.id });
   }
 
   async getDownloadUrl(
@@ -236,11 +306,21 @@ export class CoverLetterService extends WorkerHost {
       throw new UnprocessableEntityException('Cover letter is not ready for download yet.');
     }
 
-    const pdfBuffer = await this.generatePdf(
-      letter.content,
-      letter.jobTitle ?? '',
-      letter.companyName ?? '',
-    );
+    const personalDetails = letter.cv?.content?.personalDetails;
+
+    const pdfBuffer = await generateCoverLetterPdf({
+      candidateName: personalDetails?.fullName,
+      email: personalDetails?.email,
+      phone: personalDetails?.phone,
+      location: personalDetails?.location,
+      senderAddress: letter.senderAddress,
+      date: letter.generatedAt ?? letter.createdAt,
+      recipientName: letter.recipientName,
+      recipientTitle: letter.recipientTitle,
+      companyName: letter.companyName,
+      companyAddress: letter.companyAddress,
+      content: letter.content,
+    });
 
     const r2Key = `cover-letters/${letter.userId}/${randomUUID()}.pdf`;
 
@@ -274,26 +354,5 @@ export class CoverLetterService extends WorkerHost {
       ),
       map((data) => ({ data }) as MessageEvent),
     );
-  }
-
-  private generatePdf(content: string, jobTitle: string, companyName: string): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ margin: 72 });
-      const chunks: Buffer[] = [];
-      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
-
-      if (jobTitle && companyName) {
-        doc
-          .fontSize(14)
-          .font('Helvetica-Bold')
-          .text(`${jobTitle} — ${companyName}`, { align: 'left' });
-        doc.moveDown(1);
-      }
-
-      doc.fontSize(11).font('Helvetica').text(content, { lineGap: 4 });
-      doc.end();
-    });
   }
 }

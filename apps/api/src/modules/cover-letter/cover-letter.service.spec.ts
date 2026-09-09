@@ -220,6 +220,49 @@ describe('CoverLetterService', () => {
     );
   });
 
+  // V2 — jobDescription/recipientName/recipientTitle/companyAddress must be
+  // persisted at creation time (not just used transiently for the AI job),
+  // so the workspace can redisplay/edit them later and Regenerate has
+  // something to read back.
+  it('persists jobDescription, recipientName, recipientTitle, companyAddress, and senderAddress on the created entity', async () => {
+    await service.submit('clerk-1', {
+      cvId: 'cv-1',
+      jobTitle: 'Senior Engineer',
+      companyName: 'Acme Corp',
+      jobDescription: 'Lead backend development.',
+      tone: 'professional',
+      recipientName: 'Jane Smith',
+      recipientTitle: 'Head of Engineering',
+      companyAddress: '1 Infinite Loop\nCupertino, CA',
+      senderAddress: '12 Baker Street\nLondon, NW1 6XE',
+    });
+
+    expect(mockRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobDescription: 'Lead backend development.',
+        recipientName: 'Jane Smith',
+        recipientTitle: 'Head of Engineering',
+        companyAddress: '1 Infinite Loop\nCupertino, CA',
+        senderAddress: '12 Baker Street\nLondon, NW1 6XE',
+      }),
+    );
+  });
+
+  it('persists undefined recipient/address fields when none are provided (they stay optional)', async () => {
+    await service.submit('clerk-1', {
+      cvId: 'cv-1',
+      jobTitle: 'Senior Engineer',
+      companyName: 'Acme Corp',
+      jobDescription: 'Lead backend development.',
+    });
+
+    const createArg = mockRepo.create.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(createArg['recipientName']).toBeUndefined();
+    expect(createArg['recipientTitle']).toBeUndefined();
+    expect(createArg['companyAddress']).toBeUndefined();
+    expect(createArg['senderAddress']).toBeUndefined();
+  });
+
   // ─── process() ───────────────────────────────────────────────────────────────
 
   it('updates entity to generated and emits SSE event when AI succeeds', async () => {
@@ -455,6 +498,124 @@ describe('CoverLetterService', () => {
       content: 'Updated content mentioning Acme Corp and Senior Engineer.',
     });
     expect(result.content).toBe('Updated content mentioning Acme Corp and Senior Engineer.');
+  });
+
+  // V2 — update() must accept a genuine partial payload: only structured
+  // fields, only content, or a mix — and never clobber a field the caller
+  // didn't send (see the dynamic-patch doc comment on update() itself).
+  it('saves only the structured fields provided, leaving content untouched (partial update)', async () => {
+    mockRepo.findOne.mockResolvedValue(MOCK_LETTER);
+    mockRepo.findOneByOrFail.mockResolvedValue(MOCK_LETTER);
+
+    await service.update('clerk-1', 'letter-1', {
+      jobTitle: 'Staff Engineer',
+      recipientName: 'Jane Smith',
+    });
+
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      jobTitle: 'Staff Engineer',
+      recipientName: 'Jane Smith',
+    });
+  });
+
+  it('saves jobDescription, recipientTitle, and companyAddress via update()', async () => {
+    mockRepo.findOne.mockResolvedValue(MOCK_LETTER);
+    mockRepo.findOneByOrFail.mockResolvedValue(MOCK_LETTER);
+
+    await service.update('clerk-1', 'letter-1', {
+      jobDescription: 'Updated job description text.',
+      recipientTitle: 'Head of Talent',
+      companyAddress: '221B Baker Street\nLondon',
+    });
+
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      jobDescription: 'Updated job description text.',
+      recipientTitle: 'Head of Talent',
+      companyAddress: '221B Baker Street\nLondon',
+    });
+  });
+
+  // V2.1 — senderAddress persistence, including the explicit-null "clear"
+  // case, which is the whole reason this one field is typed `| null`
+  // instead of matching its optional-string siblings above.
+  it('saves a senderAddress via update()', async () => {
+    mockRepo.findOne.mockResolvedValue(MOCK_LETTER);
+    mockRepo.findOneByOrFail.mockResolvedValue(MOCK_LETTER);
+
+    await service.update('clerk-1', 'letter-1', {
+      senderAddress: '12 Baker Street\nLondon, NW1 6XE',
+    });
+
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      senderAddress: '12 Baker Street\nLondon, NW1 6XE',
+    });
+  });
+
+  it('clears a previously-set senderAddress when explicitly sent as null', async () => {
+    mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, senderAddress: '12 Baker Street' });
+    mockRepo.findOneByOrFail.mockResolvedValue({ ...MOCK_LETTER, senderAddress: null });
+
+    await service.update('clerk-1', 'letter-1', { senderAddress: null });
+
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { senderAddress: null });
+  });
+
+  it('leaves senderAddress untouched when omitted from the update payload', async () => {
+    mockRepo.findOne.mockResolvedValue(MOCK_LETTER);
+    mockRepo.findOneByOrFail.mockResolvedValue(MOCK_LETTER);
+
+    await service.update('clerk-1', 'letter-1', { jobTitle: 'Staff Engineer' });
+
+    const updateArg = mockRepo.update.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('senderAddress' in updateArg).toBe(true);
+    expect(updateArg['senderAddress']).toBeUndefined();
+  });
+
+  // ─── regenerate() ────────────────────────────────────────────────────────────
+
+  it('regenerate() throws UnprocessableEntityException when the letter has no persisted jobDescription', async () => {
+    mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, jobDescription: undefined });
+
+    await expect(service.regenerate('clerk-1', 'letter-1')).rejects.toThrow(
+      UnprocessableEntityException,
+    );
+    expect(mockQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('regenerate() throws ForbiddenException when the monthly quota is exhausted', async () => {
+    mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, jobDescription: 'Lead backend dev.' });
+    mockBillingService.canPerformAction.mockResolvedValue(false);
+
+    await expect(service.regenerate('clerk-1', 'letter-1')).rejects.toThrow(ForbiddenException);
+    expect(mockQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('regenerate() sets status to processing and re-enqueues the same generate-letter job using persisted fields', async () => {
+    const letterWithJobDescription = {
+      ...MOCK_LETTER,
+      jobDescription: 'Lead backend development.',
+      recipientName: 'Jane Smith',
+    };
+    mockRepo.findOne.mockResolvedValue(letterWithJobDescription);
+    mockRepo.findOneByOrFail.mockResolvedValue({
+      ...letterWithJobDescription,
+      status: 'processing',
+    });
+
+    const result = await service.regenerate('clerk-1', 'letter-1');
+
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'processing' });
+    expect(mockQueue.add).toHaveBeenCalledWith('generate-letter', {
+      coverLetterId: 'letter-1',
+      userId: 'user-1',
+      cvId: 'cv-1',
+      analysisId: undefined,
+      jobTitle: 'Senior Engineer',
+      companyName: 'Acme Corp',
+      jobDescription: 'Lead backend development.',
+      tone: 'professional',
+    });
+    expect(result.status).toBe('processing');
   });
 
   // ─── listForUser() ───────────────────────────────────────────────────────────

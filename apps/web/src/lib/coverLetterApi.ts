@@ -3,22 +3,35 @@ import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
 import { authFetch, type TokenSource } from './authFetch';
 
+export type CoverLetterTone = 'professional' | 'conversational' | 'enthusiastic' | 'formal';
+
 export interface CoverLetterDto {
   id: string;
   cvId: string;
   analysisId?: string;
   jobTitle?: string;
   companyName?: string;
+  // V2 — persisted so the workspace can redisplay/edit them later and so
+  // Regenerate has something to send back to the AI service. Undefined on
+  // any letter created before this field existed.
+  jobDescription?: string;
+  recipientName?: string;
+  recipientTitle?: string;
+  companyAddress?: string;
+  // V2.1 — the candidate's own postal address for the sender block of a
+  // proper two-sided business letter. Optional, never inferred from the
+  // CV — see cover-letter.entity.ts's senderAddress doc comment.
+  senderAddress?: string | null;
   content: string;
   tone: string;
   status: 'queued' | 'processing' | 'generated' | 'failed' | 'downloaded';
   createdAt: string;
   generatedAt?: string;
   // Undefined when the source CV has since been deleted — always optional.
-  // Note: the original job description is never persisted for cover
-  // letters (see the AI History investigation), so it is intentionally
-  // not part of this DTO — never fabricate or display one.
-  cv?: Pick<CvDto, 'id' | 'title' | 'fileName' | 'source'>;
+  // `content` (personalDetails) is included so the live preview/PDF can
+  // build a candidate letterhead — the backend already returns the full
+  // relation, this was just never declared on the frontend type before.
+  cv?: Pick<CvDto, 'id' | 'title' | 'fileName' | 'source' | 'content'>;
 }
 
 export interface SubmitCoverLetterParams {
@@ -27,7 +40,11 @@ export interface SubmitCoverLetterParams {
   jobTitle: string;
   companyName: string;
   jobDescription: string;
-  tone: 'professional' | 'conversational' | 'enthusiastic' | 'formal';
+  tone: CoverLetterTone;
+  recipientName?: string;
+  recipientTitle?: string;
+  companyAddress?: string;
+  senderAddress?: string;
 }
 
 export async function submitCoverLetter(
@@ -69,17 +86,51 @@ export async function listCoverLetters(
   }>;
 }
 
+// V2 — a genuine partial update: pass only the fields that changed.
+// Mirrors UpdateCoverLetterDto on the backend, which now accepts any
+// subset of these (see its own doc comment for why).
+export interface UpdateCoverLetterParams {
+  content?: string;
+  jobTitle?: string;
+  companyName?: string;
+  jobDescription?: string;
+  tone?: CoverLetterTone;
+  recipientName?: string;
+  recipientTitle?: string;
+  companyAddress?: string;
+  // V2.1 — `null` explicitly clears a previously-set sender address;
+  // `undefined`/omitted leaves it unchanged. See UpdateCoverLetterDto.
+  senderAddress?: string | null;
+}
+
 export async function updateCoverLetter(
   token: TokenSource,
   id: string,
-  content: string,
+  patch: UpdateCoverLetterParams,
 ): Promise<CoverLetterDto> {
   const res = await authFetch(`${API_URL}/cover-letters/${id}`, token, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(patch),
   });
   if (!res.ok) throw new Error(`Update failed: ${res.status}`);
+  return res.json() as Promise<CoverLetterDto>;
+}
+
+// V2 — re-runs generation using whatever is currently persisted for this
+// letter (the workspace saves field edits via updateCoverLetter() first).
+// No body: "persisted" means "whatever was last saved".
+export async function regenerateCoverLetter(
+  token: TokenSource,
+  id: string,
+): Promise<CoverLetterDto> {
+  const res = await authFetch(`${API_URL}/cover-letters/${id}/regenerate`, token, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Regenerate failed: ${res.status}`, res.status);
+  }
   return res.json() as Promise<CoverLetterDto>;
 }
 
