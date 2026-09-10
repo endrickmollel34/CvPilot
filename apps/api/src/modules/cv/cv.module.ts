@@ -9,6 +9,7 @@ import { PdfGenerationService } from './pdf-generation.service';
 import { CvEntity } from '../../entities/cv.entity';
 import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
+import { R2StorageService } from '../../common/services/r2-storage.service';
 
 @Module({
   imports: [
@@ -18,7 +19,7 @@ import { UserModule } from '../user/user.module';
     UserModule,
   ],
   controllers: [CvController],
-  providers: [CvService, PrefillExtractionService, PdfGenerationService],
+  providers: [CvService, PrefillExtractionService, PdfGenerationService, R2StorageService],
   exports: [CvService],
 })
 export class CvModule {}

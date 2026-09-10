@@ -1,10 +1,9 @@
-import { randomUUID } from 'crypto';
-
 import {
   Injectable,
   Logger,
   ForbiddenException,
   NotFoundException,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -30,6 +29,7 @@ import { CoverLetterAiService } from './cover-letter-ai.service';
 import { resolveCoverLetterCvText } from './cv-text-resolver.util';
 import { buildCvEvidenceFromContent, buildCvEvidenceFromPlainText } from './cv-evidence.util';
 import { generateCoverLetterPdf } from './cover-letter-pdf.util';
+import { R2StorageService } from '../../common/services/r2-storage.service';
 import type { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
 import type { UpdateCoverLetterDto } from './dto/update-cover-letter.dto';
 import type { ListCoverLettersDto } from './dto/list-cover-letters.dto';
@@ -66,6 +66,7 @@ export class CoverLetterService extends WorkerHost {
     private readonly billingService: BillingService,
     private readonly analysisService: AnalysisService,
     private readonly aiService: CoverLetterAiService,
+    private readonly r2Storage: R2StorageService,
   ) {
     super();
     this.s3 = new S3Client({
@@ -258,9 +259,40 @@ export class CoverLetterService extends WorkerHost {
     return this.repo.findOneByOrFail({ id: letter.id });
   }
 
-  async softDelete(clerkId: string, id: string): Promise<void> {
+  /**
+   * Privacy/retention fix (see the module report): unlike a CV, nothing
+   * else in the schema references a cover_letters row (no other table has
+   * an FK to `cover_letters.id`), so — unlike CvService.deleteCv() —
+   * there is no dependency conflict here and "delete" can mean a genuine
+   * hard delete rather than a scrub-and-keep-soft-deleted compromise.
+   * Renamed from the old softDelete() to make that behavior change
+   * explicit rather than silently repurposing a method whose name implied
+   * the opposite.
+   *
+   * Ordering fix (see the module report): the stored R2 PDF (if any) is
+   * deleted FIRST; the row is only hard-deleted once that has genuinely
+   * succeeded. The original order (hard-delete first, R2 best-effort
+   * after) meant an R2 failure could leave the PDF behind in R2 while the
+   * one row that recorded its key was already permanently gone — an
+   * unrecoverable, silent privacy gap, even though the API had already
+   * reported success. If the R2 delete fails here, the row is left fully
+   * intact so the user can simply retry; R2's own DeleteObject is
+   * idempotent, so a retry's R2 call is a harmless no-op if it actually
+   * already succeeded — no compensation logic needed.
+   */
+  async deleteCoverLetter(clerkId: string, id: string): Promise<void> {
     const letter = await this.findOneForUser(clerkId, id);
-    await this.repo.softDelete(letter.id);
+
+    if (letter.r2ObjectKey) {
+      const deleted = await this.r2Storage.deleteObject(letter.r2ObjectKey);
+      if (!deleted) {
+        throw new ServiceUnavailableException(
+          "We couldn't delete this cover letter's stored file right now. Please try again in a moment.",
+        );
+      }
+    }
+
+    await this.repo.delete(letter.id);
   }
 
   /**
@@ -333,7 +365,17 @@ export class CoverLetterService extends WorkerHost {
       content: letter.content,
     });
 
-    const r2Key = `cover-letters/${letter.userId}/${randomUUID()}.pdf`;
+    // Orphan-PDF fix (see the module report): deliberately deterministic —
+    // one object per cover letter, keyed by the letter's own id rather
+    // than a fresh randomUUID() per download. Every re-download simply
+    // overwrites the same R2 object (a plain PUT to an existing key
+    // replaces it) instead of creating a new one and abandoning the
+    // previous, unlimited-orphan-accumulation behavior this replaces. Key
+    // predictability is not a security property here — same as the CV
+    // upload key, access is gated entirely by the short-lived presigned
+    // URL below, never by the key itself being secret (the bucket is
+    // private and never served except via a presigned URL).
+    const r2Key = `cover-letters/${letter.userId}/${letter.id}.pdf`;
 
     await this.s3.send(
       new PutObjectCommand({

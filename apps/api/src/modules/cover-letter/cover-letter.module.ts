@@ -10,6 +10,7 @@ import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
 import { CvModule } from '../cv/cv.module';
 import { AnalysisModule } from '../analysis/analysis.module';
+import { R2StorageService } from '../../common/services/r2-storage.service';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { AnalysisModule } from '../analysis/analysis.module';
     AnalysisModule,
   ],
   controllers: [CoverLetterController],
-  providers: [CoverLetterService, CoverLetterAiService],
+  providers: [CoverLetterService, CoverLetterAiService, R2StorageService],
   exports: [CoverLetterService],
 })
 export class CoverLetterModule {}

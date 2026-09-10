@@ -8,8 +8,8 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { type Repository, In } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { type Repository, type DataSource, In } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
@@ -24,6 +24,7 @@ import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { PrefillExtractionService } from './prefill-extraction.service';
 import { PdfGenerationService } from './pdf-generation.service';
+import { R2StorageService } from '../../common/services/r2-storage.service';
 import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
 import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
 import type { CreateCvDto } from './dto/create-cv.dto';
@@ -51,6 +52,9 @@ export class CvService {
     private readonly billingService: BillingService,
     private readonly prefillService: PrefillExtractionService,
     private readonly pdfService: PdfGenerationService,
+    private readonly r2Storage: R2StorageService,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {
     const endpoint = this.config.getOrThrow<string>('CLOUDFLARE_R2_ENDPOINT');
     const accessKeyId = this.config.getOrThrow<string>('CLOUDFLARE_R2_ACCESS_KEY_ID');
@@ -189,9 +193,74 @@ export class CvService {
     return this.cvRepo.findOneByOrFail({ id: cvId });
   }
 
+  /**
+   * Privacy/retention fix (see the module report): "delete" previously
+   * only soft-deleted the row — the original R2 file and the extracted
+   * personal-data text (`content`/`parsedContent`) survived indefinitely,
+   * hidden from the UI but never actually removed, until (if ever) the
+   * user deleted their whole account.
+   *
+   * A CV row is deliberately NEVER hard-deleted here, even though this is
+   * exactly what "delete" means for a cover letter (see
+   * CoverLetterService.deleteCoverLetter()) — analyses.cv_id and
+   * cover_letters.cv_id are both NOT NULL with ON DELETE CASCADE, so a
+   * hard delete would silently cascade-destroy every analysis and cover
+   * letter ever generated from this CV. That directly conflicts with this
+   * product's own established design: both history lists already treat a
+   * missing/soft-deleted source CV as a normal, expected state (LEFT
+   * JOINs in AnalysisService/CoverLetterService/TailoringService's
+   * listForUser(), explicitly so a deleted CV doesn't hide that history).
+   * tailorings.master_cv_id/tailored_cv_id have no ON DELETE clause at all
+   * (default RESTRICT), so a hard delete would additionally just fail
+   * outright for any CV involved in a tailoring. See the module report's
+   * dependency map for the full FK audit.
+   *
+   * So "delete" here means: keep the row (and its id, for existing FKs)
+   * and its `deleted_at` soft-delete, but genuinely scrub the personal
+   * data it held — cleared file metadata/content columns plus the actual
+   * R2 object.
+   *
+   * Ordering fix (see the module report): the R2 object is deleted FIRST,
+   * and the DB scrub only happens once that has genuinely succeeded. The
+   * original order (DB first, R2 best-effort after) meant an R2 failure
+   * could leave the actual file behind in R2 while CVPilot had already
+   * cleared the one column (`r2ObjectKey`) that recorded which object
+   * still needed cleanup — an unrecoverable, silent privacy gap, even
+   * though the API had already reported success. R2's own DeleteObject is
+   * idempotent (§ R2StorageService), so if this throws and the caller
+   * retries later, the retry's R2 call is a harmless no-op success and the
+   * DB scrub then completes normally — no compensation logic needed.
+   */
   async deleteCv(clerkId: string, cvId: string): Promise<void> {
-    await this.findOneForUser(clerkId, cvId);
-    await this.cvRepo.softDelete(cvId);
+    const cv = await this.findOneForUser(clerkId, cvId);
+
+    if (cv.r2ObjectKey) {
+      const deleted = await this.r2Storage.deleteObject(cv.r2ObjectKey);
+      if (!deleted) {
+        throw new ServiceUnavailableException(
+          "We couldn't delete this CV's stored file right now. Please try again in a moment.",
+        );
+      }
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const clearedPersonalData: any = {
+      content: null,
+      parsedContent: null,
+      fileName: null,
+      r2ObjectKey: null,
+    };
+    // softDelete() + the content-scrub update happen atomically: a failure
+    // partway through must not leave the row marked "deleted" while still
+    // holding the personal-data text it should have cleared. If this
+    // transaction itself fails after the R2 object was already deleted
+    // above, the row is simply unchanged and the next delete attempt finds
+    // `r2ObjectKey` still set — its R2 call is then a harmless idempotent
+    // no-op (the object is already gone) and the DB scrub can complete.
+    await this.dataSource.transaction(async (manager) => {
+      await manager.softDelete(CvEntity, cvId);
+      await manager.update(CvEntity, cvId, clearedPersonalData);
+    });
   }
 
   async listForUser(clerkId: string) {

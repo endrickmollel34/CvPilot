@@ -7,6 +7,7 @@ import {
   ForbiddenException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -20,6 +21,26 @@ import { UserService } from '../user/user.service';
 import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
 import { AnalysisService } from '../analysis/analysis.service';
+import { R2StorageService } from '../../common/services/r2-storage.service';
+
+// S3Client is constructed unconditionally in CoverLetterService's
+// constructor for getDownloadUrl()'s PDF upload/presign — mocked so tests
+// never attempt a real R2 connection. mockS3Send lets tests inspect exactly
+// which key/bucket each PutObjectCommand was sent with.
+const mockS3Send = jest.fn();
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest
+    .fn()
+    .mockImplementation(() => ({ send: (...args: unknown[]) => mockS3Send(...args) })),
+  PutObjectCommand: jest.fn().mockImplementation((input: unknown) => ({ input })),
+  GetObjectCommand: jest.fn().mockImplementation((input: unknown) => ({ input })),
+}));
+jest.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/signed-download-url'),
+}));
+jest.mock('./cover-letter-pdf.util', () => ({
+  generateCoverLetterPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF-fake')),
+}));
 
 const MOCK_USER = { id: 'user-1', clerkId: 'clerk-1' };
 const MOCK_CV = {
@@ -48,6 +69,7 @@ describe('CoverLetterService', () => {
     create: jest.fn(),
     save: jest.fn(),
     update: jest.fn(),
+    delete: jest.fn(),
     findOne: jest.fn(),
     findOneBy: jest.fn(),
     findOneByOrFail: jest.fn(),
@@ -72,6 +94,7 @@ describe('CoverLetterService', () => {
   const mockBillingService = { canPerformAction: jest.fn() };
   const mockAnalysisService = { findOneForUser: jest.fn() };
   const mockAiService = { generateCoverLetter: jest.fn() };
+  const mockR2Storage = { deleteObject: jest.fn() };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -86,6 +109,7 @@ describe('CoverLetterService', () => {
         { provide: BillingService, useValue: mockBillingService },
         { provide: AnalysisService, useValue: mockAnalysisService },
         { provide: CoverLetterAiService, useValue: mockAiService },
+        { provide: R2StorageService, useValue: mockR2Storage },
       ],
     }).compile();
 
@@ -98,6 +122,8 @@ describe('CoverLetterService', () => {
     mockRepo.create.mockReturnValue(MOCK_LETTER);
     mockRepo.save.mockResolvedValue(MOCK_LETTER);
     mockQueue.add.mockResolvedValue({ id: 'job-1' });
+    mockR2Storage.deleteObject.mockResolvedValue(true);
+    mockS3Send.mockResolvedValue(undefined);
   });
 
   // ─── submit() ────────────────────────────────────────────────────────────────
@@ -705,5 +731,190 @@ describe('CoverLetterService', () => {
     mockRepo.findOne.mockResolvedValue(null);
 
     await expect(service.getDownloadUrl('clerk-1', 'letter-1')).rejects.toThrow(NotFoundException);
+  });
+
+  const DOWNLOADABLE_LETTER = {
+    ...MOCK_LETTER,
+    status: 'generated' as const,
+    content: 'Dear Hiring Manager, ...',
+  };
+
+  // Orphan-PDF fix (see the module report): every download must reuse the
+  // SAME deterministic R2 key (derived from the letter's own id), never a
+  // fresh randomUUID() per call — otherwise every re-download abandons the
+  // previous object, accumulating unlimited orphans.
+  it('uploads the PDF under a deterministic key derived from the letter id, not a fresh random one', async () => {
+    mockRepo.findOne.mockResolvedValue(DOWNLOADABLE_LETTER);
+
+    await service.getDownloadUrl('clerk-1', 'letter-1');
+
+    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    const putCall = mockS3Send.mock.calls[0]?.[0] as { input: { Bucket: string; Key: string } };
+    expect(putCall.input.Key).toBe(`cover-letters/${MOCK_LETTER.userId}/letter-1.pdf`);
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      r2ObjectKey: `cover-letters/${MOCK_LETTER.userId}/letter-1.pdf`,
+      status: 'downloaded',
+    });
+  });
+
+  it('repeated downloads overwrite the same key instead of creating a new object each time', async () => {
+    mockRepo.findOne.mockResolvedValue(DOWNLOADABLE_LETTER);
+
+    await service.getDownloadUrl('clerk-1', 'letter-1');
+    await service.getDownloadUrl('clerk-1', 'letter-1');
+
+    expect(mockS3Send).toHaveBeenCalledTimes(2);
+    const firstKey = (mockS3Send.mock.calls[0]?.[0] as { input: { Key: string } }).input.Key;
+    const secondKey = (mockS3Send.mock.calls[1]?.[0] as { input: { Key: string } }).input.Key;
+    expect(firstKey).toBe(secondKey);
+  });
+
+  it('still returns a short-lived signed download URL', async () => {
+    mockRepo.findOne.mockResolvedValue(DOWNLOADABLE_LETTER);
+
+    const result = await service.getDownloadUrl('clerk-1', 'letter-1');
+
+    expect(result).toEqual({
+      downloadUrl: 'https://r2.example.com/signed-download-url',
+      format: 'pdf',
+    });
+  });
+
+  it('ownership is still checked before any R2 access — ownership check is unaffected by the key change', async () => {
+    mockRepo.findOne.mockResolvedValue(null);
+
+    await expect(service.getDownloadUrl('clerk-1', 'letter-1')).rejects.toThrow(NotFoundException);
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  // ─── deleteCoverLetter() ─────────────────────────────────────────────────────
+  // Privacy/retention fix (see the module report): unlike a CV, nothing
+  // else in the schema references cover_letters.id, so deletion here is a
+  // genuine hard delete plus R2 cleanup of the stored PDF, not a soft-hide.
+  describe('deleteCoverLetter()', () => {
+    it('lets the owner delete their own cover letter', async () => {
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, r2ObjectKey: undefined });
+
+      await expect(service.deleteCoverLetter('clerk-1', 'letter-1')).resolves.toBeUndefined();
+
+      expect(mockRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'letter-1', userId: MOCK_USER.id },
+        relations: ['cv'],
+      });
+      expect(mockRepo.delete).toHaveBeenCalledWith('letter-1');
+    });
+
+    it("another user cannot delete a letter they don't own", async () => {
+      // findOneForUser()'s query is already scoped to the caller's userId —
+      // a letter owned by someone else simply never matches.
+      mockRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.deleteCoverLetter('clerk-1', 'not-mine')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(mockRepo.delete).not.toHaveBeenCalled();
+      expect(mockR2Storage.deleteObject).not.toHaveBeenCalled();
+    });
+
+    it('removes the stored PDF object when one exists', async () => {
+      const key = `cover-letters/${MOCK_USER.id}/letter-1.pdf`;
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, r2ObjectKey: key });
+
+      await service.deleteCoverLetter('clerk-1', 'letter-1');
+
+      expect(mockR2Storage.deleteObject).toHaveBeenCalledTimes(1);
+      expect(mockR2Storage.deleteObject).toHaveBeenCalledWith(key);
+    });
+
+    it('does not attempt an R2 delete when the letter was never downloaded (no stored key)', async () => {
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, r2ObjectKey: undefined });
+
+      await service.deleteCoverLetter('clerk-1', 'letter-1');
+
+      expect(mockR2Storage.deleteObject).not.toHaveBeenCalled();
+    });
+
+    it('genuinely deletes the DB row rather than soft-hiding it', async () => {
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, r2ObjectKey: undefined });
+
+      await service.deleteCoverLetter('clerk-1', 'letter-1');
+
+      expect(mockRepo.delete).toHaveBeenCalledWith('letter-1');
+      expect(mockRepo.softDelete).not.toHaveBeenCalled();
+    });
+
+    it('does not affect an unrelated letter belonging to the same user', async () => {
+      mockRepo.findOne.mockResolvedValue({
+        ...MOCK_LETTER,
+        id: 'letter-1',
+        r2ObjectKey: undefined,
+      });
+
+      await service.deleteCoverLetter('clerk-1', 'letter-1');
+
+      expect(mockRepo.delete).toHaveBeenCalledTimes(1);
+      expect(mockRepo.delete).toHaveBeenCalledWith('letter-1');
+      expect(mockRepo.delete).not.toHaveBeenCalledWith('letter-2');
+    });
+
+    // DB/R2 ordering fix (see the module report): R2 must be deleted BEFORE
+    // the row is hard-deleted — the reverse order left a window where a
+    // failed R2 delete could leave the PDF behind in R2 while the one row
+    // that recorded its key was already permanently gone.
+    it('deletes the R2 object BEFORE hard-deleting the row', async () => {
+      const key = `cover-letters/${MOCK_USER.id}/letter-1.pdf`;
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, r2ObjectKey: key });
+      const callOrder: string[] = [];
+      mockR2Storage.deleteObject.mockImplementation(async () => {
+        callOrder.push('r2');
+        return true;
+      });
+      mockRepo.delete.mockImplementation(async () => {
+        callOrder.push('db');
+      });
+
+      await service.deleteCoverLetter('clerk-1', 'letter-1');
+
+      expect(callOrder).toEqual(['r2', 'db']);
+    });
+
+    // Privacy-safety fix (see the module report): an unexpected R2 failure
+    // must NOT be silently swallowed — the row must be left fully intact
+    // (not hard-deleted), and the caller must see a clear failure rather
+    // than a false 204 success.
+    it('an unexpected R2 deletion failure blocks the hard delete entirely and surfaces a service error', async () => {
+      const key = `cover-letters/${MOCK_USER.id}/letter-1.pdf`;
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, r2ObjectKey: key });
+      mockR2Storage.deleteObject.mockResolvedValue(false);
+
+      await expect(service.deleteCoverLetter('clerk-1', 'letter-1')).rejects.toThrow(
+        ServiceUnavailableException,
+      );
+      expect(mockRepo.delete).not.toHaveBeenCalled();
+    });
+
+    // Retry path (see the module report §3): if R2 succeeds but the DB
+    // delete then unexpectedly fails, the row is simply left unchanged. A
+    // retry's R2 call is a harmless idempotent no-op (already deleted),
+    // and the hard delete can then complete — no compensation logic needed.
+    it('remains safely retryable when R2 succeeds but the DB delete unexpectedly fails', async () => {
+      const key = `cover-letters/${MOCK_USER.id}/letter-1.pdf`;
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_LETTER, r2ObjectKey: key });
+      mockRepo.delete.mockRejectedValueOnce(new Error('connection reset'));
+
+      await expect(service.deleteCoverLetter('clerk-1', 'letter-1')).rejects.toThrow(
+        'connection reset',
+      );
+      expect(mockR2Storage.deleteObject).toHaveBeenCalledTimes(1);
+
+      // Retry: findOneForUser still finds the (unchanged) row, R2's own
+      // idempotent delete succeeds again trivially, and this time the DB
+      // delete goes through (mockRepo.delete's default resolved-value
+      // behavior, restored automatically after mockRejectedValueOnce above
+      // is consumed).
+      await expect(service.deleteCoverLetter('clerk-1', 'letter-1')).resolves.toBeUndefined();
+      expect(mockR2Storage.deleteObject).toHaveBeenCalledTimes(2);
+      expect(mockRepo.delete).toHaveBeenCalledWith('letter-1');
+    });
   });
 });

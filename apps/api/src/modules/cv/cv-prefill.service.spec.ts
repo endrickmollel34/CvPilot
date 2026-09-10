@@ -1,6 +1,6 @@
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import {
   ForbiddenException,
@@ -16,6 +16,7 @@ import { PdfGenerationService } from './pdf-generation.service';
 import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
+import { R2StorageService } from '../../common/services/r2-storage.service';
 import { PLAN_LIMITS } from '@cvpilot/shared';
 import type { CvContent } from '@cvpilot/shared';
 
@@ -92,6 +93,7 @@ describe('CvService — prefillFromUpload()', () => {
   const mockBillingService = { canPerformAction: jest.fn(), getUserPlan: jest.fn() };
   const mockPrefillService = { extract: jest.fn() };
   const mockPdfService = { generate: jest.fn() };
+  const mockR2Storage = { deleteObject: jest.fn() };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -104,6 +106,8 @@ describe('CvService — prefillFromUpload()', () => {
         { provide: BillingService, useValue: mockBillingService },
         { provide: PrefillExtractionService, useValue: mockPrefillService },
         { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: R2StorageService, useValue: mockR2Storage },
+        { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
       ],
     }).compile();
 

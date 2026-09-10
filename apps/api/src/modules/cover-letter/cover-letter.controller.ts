@@ -53,7 +53,7 @@ export class CoverLetterController {
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   async remove(@CurrentUser() user: { clerkId: string }, @Param('id') id: string): Promise<void> {
-    await this.coverLetterService.softDelete(user.clerkId, id);
+    await this.coverLetterService.deleteCoverLetter(user.clerkId, id);
   }
 
   @Sse(':id/status')
