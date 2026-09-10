@@ -12,6 +12,7 @@ import { CoverLetterEntity } from '../../entities/cover-letter.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { TailoringEntity } from '../../entities/tailoring.entity';
 import { SubscriptionEntity } from '../../entities/subscription.entity';
+import { AuditLogEntity } from '../../entities/audit-log.entity';
 import { StripePaymentProvider } from '../billing/providers/stripe.provider';
 
 // createClerkClient is called unconditionally in UserService's constructor —
@@ -102,8 +103,42 @@ describe('UserService — account erasure (deleteByClerkId)', () => {
     expect(mockManagerDelete).toHaveBeenCalledWith(CoverLetterEntity, { userId: MOCK_USER_A.id });
     expect(mockManagerDelete).toHaveBeenCalledWith(AnalysisEntity, { userId: MOCK_USER_A.id });
     expect(mockManagerDelete).toHaveBeenCalledWith(CvEntity, { userId: MOCK_USER_A.id });
+    expect(mockManagerDelete).toHaveBeenCalledWith(AuditLogEntity, { userId: MOCK_USER_A.id });
     expect(mockManagerDelete).toHaveBeenCalledWith(UserEntity, { id: MOCK_USER_A.id });
-    expect(mockManagerDelete).toHaveBeenCalledTimes(5);
+    expect(mockManagerDelete).toHaveBeenCalledTimes(6);
+  });
+
+  // ─── audit_logs erasure (quota-audit-retention fix) ────────────────────────
+  // The durable quota-usage events AnalysisService/CoverLetterService/
+  // TailoringService write on success (see usage-actions.ts) have no FK to
+  // anything, so nothing cascades them automatically — they must be erased
+  // explicitly, in the same transaction as the rest of this user's data.
+
+  it("deletes this user's audit_logs rows inside the same erasure transaction, scoped to their own internal id", async () => {
+    await service.deleteByClerkId('clerk-a');
+
+    expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(mockManagerDelete).toHaveBeenCalledWith(AuditLogEntity, { userId: MOCK_USER_A.id });
+    // Deleted through the transaction's own EntityManager — not some other,
+    // non-transactional repository — mockManagerDelete IS that manager's
+    // delete() (see mockDataSource.transaction's cb({ delete: mockManagerDelete })
+    // wiring above), so this assertion is inherently about the manager.
+  });
+
+  it("deleting user A's account does not delete user B's audit_logs, and vice versa", async () => {
+    await service.deleteByClerkId('clerk-a');
+    expect(mockManagerDelete).toHaveBeenCalledWith(AuditLogEntity, { userId: MOCK_USER_A.id });
+    expect(mockManagerDelete).not.toHaveBeenCalledWith(AuditLogEntity, { userId: MOCK_USER_B.id });
+
+    jest.clearAllMocks();
+    mockUserRepo.findOne.mockResolvedValue(MOCK_USER_B);
+    mockCvRepo.find.mockResolvedValue([]);
+    mockCoverLetterRepo.find.mockResolvedValue([]);
+    mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
+
+    await service.deleteByClerkId('clerk-b');
+    expect(mockManagerDelete).toHaveBeenCalledWith(AuditLogEntity, { userId: MOCK_USER_B.id });
+    expect(mockManagerDelete).not.toHaveBeenCalledWith(AuditLogEntity, { userId: MOCK_USER_A.id });
   });
 
   it("never issues a delete referencing another user's id (cross-user isolation)", async () => {
@@ -121,7 +156,7 @@ describe('UserService — account erasure (deleteByClerkId)', () => {
     );
   });
 
-  it('deletes tailorings before cover letters, analyses, and cvs — before the FK-restricted CV rows are removed', async () => {
+  it('deletes tailorings before cover letters, analyses, and cvs — before the FK-restricted CV rows are removed — and audit_logs before the user row', async () => {
     await service.deleteByClerkId('clerk-a');
 
     const order = mockManagerDelete.mock.calls.map((call) => (call[0] as { name: string }).name);
@@ -130,6 +165,7 @@ describe('UserService — account erasure (deleteByClerkId)', () => {
       'CoverLetterEntity',
       'AnalysisEntity',
       'CvEntity',
+      'AuditLogEntity',
       'UserEntity',
     ]);
   });

@@ -2,18 +2,17 @@ import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { BadRequestException } from '@nestjs/common';
-import { In, Not } from 'typeorm';
+import { In } from 'typeorm';
 
 import type { Plan, SubscriptionStatus } from '@cvpilot/shared';
 import { BillingService } from './billing.service';
 import { StripePaymentProvider } from './providers/stripe.provider';
 import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
-import { AnalysisEntity } from '../../entities/analysis.entity';
-import { CoverLetterEntity } from '../../entities/cover-letter.entity';
-import { TailoringEntity } from '../../entities/tailoring.entity';
 import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
+import { AuditService } from '../audit/audit.service';
+import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
 
 const MOCK_USER = { id: 'user-1', clerkId: 'clerk-1' };
 
@@ -26,17 +25,39 @@ describe('BillingService', () => {
 
   const mockSubscriptionRepo = { findOneBy: jest.fn(), update: jest.fn(), upsert: jest.fn() };
   const mockPaymentRepo = { upsert: jest.fn() };
-  const mockAnalysisRepo = { count: jest.fn() };
-  const mockCoverLetterRepo = { count: jest.fn() };
-  const mockTailoringRepo = { count: jest.fn() };
   const mockCvRepo = { count: jest.fn() };
   const mockUserService = { findByClerkId: jest.fn() };
+  const mockAuditService = { countDistinctEntitiesSince: jest.fn() };
   const mockStripeProvider = {
     providerType: 'STRIPE' as const,
     createCheckoutSession: jest.fn(),
     createCustomerPortalSession: jest.fn(),
     verifyAndParseWebhook: jest.fn(),
   };
+
+  // Quota-refund fix (see usage-actions.ts): BillingService now asks
+  // AuditService.countDistinctEntitiesSince() once per resource type instead
+  // of counting live rows — a single shared mock function, so tests that
+  // need different simultaneous counts for analyses/coverLetters/tailorings
+  // (getUsageSummary()) must key the return value off the `action` argument.
+  function stubUsageCounts({
+    analyses = 0,
+    coverLetters = 0,
+    tailorings = 0,
+  }: { analyses?: number; coverLetters?: number; tailorings?: number } = {}) {
+    mockAuditService.countDistinctEntitiesSince.mockImplementation((params: { action: string }) => {
+      switch (params.action) {
+        case USAGE_ACTIONS.ANALYSIS_GENERATED:
+          return Promise.resolve(analyses);
+        case USAGE_ACTIONS.COVER_LETTER_GENERATED:
+          return Promise.resolve(coverLetters);
+        case USAGE_ACTIONS.TAILORING_GENERATED:
+          return Promise.resolve(tailorings);
+        default:
+          return Promise.resolve(0);
+      }
+    });
+  }
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -46,11 +67,9 @@ describe('BillingService', () => {
         BillingService,
         { provide: getRepositoryToken(SubscriptionEntity), useValue: mockSubscriptionRepo },
         { provide: getRepositoryToken(PaymentEntity), useValue: mockPaymentRepo },
-        { provide: getRepositoryToken(AnalysisEntity), useValue: mockAnalysisRepo },
-        { provide: getRepositoryToken(CoverLetterEntity), useValue: mockCoverLetterRepo },
-        { provide: getRepositoryToken(TailoringEntity), useValue: mockTailoringRepo },
         { provide: getRepositoryToken(CvEntity), useValue: mockCvRepo },
         { provide: UserService, useValue: mockUserService },
+        { provide: AuditService, useValue: mockAuditService },
         { provide: StripePaymentProvider, useValue: mockStripeProvider },
       ],
     }).compile();
@@ -58,6 +77,7 @@ describe('BillingService', () => {
     service = module.get<BillingService>(BillingService);
 
     mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
+    stubUsageCounts();
   });
 
   // ─── createCheckoutSession() — this is the exact method the fixed frontend ──
@@ -223,129 +243,144 @@ describe('BillingService', () => {
   describe('canPerformAction()', () => {
     it('allows unlimited analyses for an active Pro subscription regardless of usage', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'active'));
-      mockAnalysisRepo.count.mockResolvedValue(999);
+      stubUsageCounts({ analyses: 999 });
 
       await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(true);
     });
 
     it('allows unlimited cover letters for an active Student subscription regardless of usage', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('student', 'active'));
-      mockCoverLetterRepo.count.mockResolvedValue(999);
+      stubUsageCounts({ coverLetters: 999 });
 
       await expect(service.canPerformAction('user-1', 'cover-letter')).resolves.toBe(true);
     });
 
     it('allows unlimited analyses for a trialing Pro subscription', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'trialing'));
-      mockAnalysisRepo.count.mockResolvedValue(999);
+      stubUsageCounts({ analyses: 999 });
 
       await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(true);
     });
 
     it('enforces the Free analysesPerMonth limit on a past_due Pro subscription — the core bug this fix closes', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'past_due'));
-      mockAnalysisRepo.count.mockResolvedValue(2); // Free limit is 2
+      stubUsageCounts({ analyses: 2 }); // Free limit is 2
 
       await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(false);
     });
 
     it('enforces the Free coverLettersPerMonth limit on an incomplete Student subscription', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('student', 'incomplete'));
-      mockCoverLetterRepo.count.mockResolvedValue(1); // Free limit is 1
+      stubUsageCounts({ coverLetters: 1 }); // Free limit is 1
 
       await expect(service.canPerformAction('user-1', 'cover-letter')).resolves.toBe(false);
     });
 
     it('allows a Free-plan user under the analysesPerMonth boundary', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockAnalysisRepo.count.mockResolvedValue(1); // below the limit of 2
+      stubUsageCounts({ analyses: 1 }); // below the limit of 2
 
       await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(true);
     });
 
     it('blocks a Free-plan user exactly at the analysesPerMonth boundary', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockAnalysisRepo.count.mockResolvedValue(2); // at the limit of 2
+      stubUsageCounts({ analyses: 2 }); // at the limit of 2
 
       await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(false);
     });
 
     it('allows a Free-plan user under the coverLettersPerMonth boundary', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockCoverLetterRepo.count.mockResolvedValue(0); // below the limit of 1
+      stubUsageCounts({ coverLetters: 0 }); // below the limit of 1
 
       await expect(service.canPerformAction('user-1', 'cover-letter')).resolves.toBe(true);
     });
 
     it('blocks a Free-plan user exactly at the coverLettersPerMonth boundary', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockCoverLetterRepo.count.mockResolvedValue(1); // at the limit of 1
+      stubUsageCounts({ coverLetters: 1 }); // at the limit of 1
 
       await expect(service.canPerformAction('user-1', 'cover-letter')).resolves.toBe(false);
     });
 
-    // ─── Failed AI generations must not consume quota ────────────────────────
-    // A transient OpenAI/Anthropic outage previously burned a Free user's
-    // tiny monthly allowance for zero result, because the count query
-    // included status: 'failed' rows. Mirrors TailoringService's existing
-    // Not('failed') exclusion.
+    // ─── Delegates the correct action/scope to AuditService ───────────────────
 
-    it('excludes failed rows from the analysesPerMonth count query', async () => {
+    it('asks AuditService for the ANALYSIS_GENERATED action, scoped to this user, since the start of the month', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null); // Free plan
-      mockAnalysisRepo.count.mockResolvedValue(0);
+      stubUsageCounts({ analyses: 0 });
 
       await service.canPerformAction('user-1', 'analyse');
 
-      expect(mockAnalysisRepo.count).toHaveBeenCalledWith({
-        where: expect.objectContaining({ status: Not('failed') }),
+      expect(mockAuditService.countDistinctEntitiesSince).toHaveBeenCalledWith({
+        userId: 'user-1',
+        action: USAGE_ACTIONS.ANALYSIS_GENERATED,
+        since: expect.any(Date) as unknown as Date,
       });
     });
 
-    it('excludes failed rows from the coverLettersPerMonth count query', async () => {
+    it('asks AuditService for the COVER_LETTER_GENERATED action, scoped to this user, since the start of the month', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null); // Free plan
-      mockCoverLetterRepo.count.mockResolvedValue(0);
+      stubUsageCounts({ coverLetters: 0 });
 
       await service.canPerformAction('user-1', 'cover-letter');
 
-      expect(mockCoverLetterRepo.count).toHaveBeenCalledWith({
-        where: expect.objectContaining({ status: Not('failed') }),
+      expect(mockAuditService.countDistinctEntitiesSince).toHaveBeenCalledWith({
+        userId: 'user-1',
+        action: USAGE_ACTIONS.COVER_LETTER_GENERATED,
+        since: expect.any(Date) as unknown as Date,
       });
     });
 
-    it('allows a Free user whose only prior attempt this month failed (successful/non-failed count is 0)', async () => {
-      // Models: 1 failed analysis exists this month, but the Not('failed')
-      // query correctly reports a non-failed count of 0 — the failed
-      // attempt did not consume the user's quota.
+    // ─── Failed AI generations must not consume quota ────────────────────────
+    // Previously enforced by a live status: Not('failed') filter on the
+    // analyses/cover_letters row count — see the quota-refund fix in
+    // usage-actions.ts / AnalysisService.process() / CoverLetterService
+    // .process(): AuditService.log() is only ever called on the genuine
+    // success path, so a failed generation simply never produces a
+    // countable audit_logs record in the first place. There is no longer a
+    // live `status` field for BillingService's query to filter — the
+    // guarantee has moved to the write side, tested in each generating
+    // service's own spec (see "never logs a usage record when ... fails").
+
+    it('allows a Free user whose only prior attempt this month failed (no usage record was ever logged for it)', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockAnalysisRepo.count.mockResolvedValue(0);
+      stubUsageCounts({ analyses: 0 });
 
       await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(true);
     });
 
-    it('blocks a Free user once non-failed analyses reach the limit, regardless of additional failed attempts', async () => {
-      // Models: 2 successful analyses plus several failed ones this month —
-      // the Not('failed') query reports 2 (the real, non-failed count),
-      // which correctly hits the Free limit of 2.
+    it('blocks a Free user once successfully-logged analyses reach the limit, regardless of additional failed attempts', async () => {
+      // Models: 2 successful (logged) analyses plus several failed
+      // (never-logged) ones this month — the durable count correctly
+      // reports 2, hitting the Free limit of 2.
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockAnalysisRepo.count.mockResolvedValue(2);
+      stubUsageCounts({ analyses: 2 });
 
       await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(false);
-      expect(mockAnalysisRepo.count).toHaveBeenCalledWith({
-        where: expect.objectContaining({ status: Not('failed'), userId: 'user-1' }),
-      });
     });
 
-    it('blocks a Free user once non-failed cover letters reach the limit, regardless of additional failed attempts', async () => {
-      // Models: 1 successful cover letter plus a failed one this month —
-      // the Not('failed') query reports 1 (the real, non-failed count),
-      // which correctly hits the Free limit of 1.
+    it('blocks a Free user once successfully-logged cover letters reach the limit, regardless of additional failed attempts', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockCoverLetterRepo.count.mockResolvedValue(1);
+      stubUsageCounts({ coverLetters: 1 });
 
       await expect(service.canPerformAction('user-1', 'cover-letter')).resolves.toBe(false);
-      expect(mockCoverLetterRepo.count).toHaveBeenCalledWith({
-        where: expect.objectContaining({ status: Not('failed'), userId: 'user-1' }),
-      });
+    });
+
+    // ─── Quota-refund fix — deletion cannot restore already-consumed usage ────
+    // This is the property BillingService itself is responsible for:
+    // whatever AuditService reports is trusted as-is, with no live-row
+    // recomputation that a deletion could have changed.
+
+    it('trusts the durable AuditService count as-is — nothing here recomputes usage from live content rows', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(null); // Free plan, limit 2
+      // Models the exact refund scenario: 2 analyses were generated and
+      // logged this month; one was since hard-deleted. The durable count
+      // still correctly reports 2 (audit_logs rows are never deleted), so
+      // the Free limit is still (correctly) enforced.
+      stubUsageCounts({ analyses: 2 });
+
+      await expect(service.canPerformAction('user-1', 'analyse')).resolves.toBe(false);
     });
   });
 
@@ -353,9 +388,7 @@ describe('BillingService', () => {
 
   describe('getUsageSummary()', () => {
     beforeEach(() => {
-      mockAnalysisRepo.count.mockResolvedValue(0);
-      mockCoverLetterRepo.count.mockResolvedValue(0);
-      mockTailoringRepo.count.mockResolvedValue(0);
+      stubUsageCounts();
       mockCvRepo.count.mockResolvedValue(0);
     });
 
@@ -377,8 +410,7 @@ describe('BillingService', () => {
 
     it('reports partial usage for a Free user with some activity this month', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockAnalysisRepo.count.mockResolvedValue(1);
-      mockCoverLetterRepo.count.mockResolvedValue(0);
+      stubUsageCounts({ analyses: 1, coverLetters: 0 });
       mockCvRepo.count.mockResolvedValue(1);
 
       const result = await service.getUsageSummary('clerk-1');
@@ -390,8 +422,7 @@ describe('BillingService', () => {
 
     it('reports remaining: 0 (not negative) once a Free limit is exhausted', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-      mockAnalysisRepo.count.mockResolvedValue(2);
-      mockCoverLetterRepo.count.mockResolvedValue(1);
+      stubUsageCounts({ analyses: 2, coverLetters: 1 });
 
       const result = await service.getUsageSummary('clerk-1');
 
@@ -399,25 +430,35 @@ describe('BillingService', () => {
       expect(result.usage.coverLetters).toEqual({ used: 1, limit: 1, remaining: 0 });
     });
 
-    it('excludes failed analyses, cover letters, and tailorings from the reported usage counts', async () => {
+    // Previously: asserted a live status: Not('failed') filter on each
+    // repo's count() query. Quota-refund fix (see usage-actions.ts): failed
+    // generations are now excluded by construction — AnalysisService/
+    // CoverLetterService/TailoringService only ever call AuditService.log()
+    // on their genuine success path, so a failed generation simply never
+    // produces a countable audit_logs record. This asserts the *new*
+    // mechanism: BillingService asks for exactly the three *_GENERATED
+    // actions, scoped to this user and the current month.
+    it('asks AuditService for exactly the three *_GENERATED actions, scoped to this user and this month', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
 
       await service.getUsageSummary('clerk-1');
 
-      expect(mockAnalysisRepo.count).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ status: Not('failed') }) }),
-      );
-      expect(mockCoverLetterRepo.count).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ status: Not('failed') }) }),
-      );
-      expect(mockTailoringRepo.count).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ status: Not('failed') }) }),
-      );
+      for (const action of [
+        USAGE_ACTIONS.ANALYSIS_GENERATED,
+        USAGE_ACTIONS.COVER_LETTER_GENERATED,
+        USAGE_ACTIONS.TAILORING_GENERATED,
+      ]) {
+        expect(mockAuditService.countDistinctEntitiesSince).toHaveBeenCalledWith({
+          userId: 'user-1',
+          action,
+          since: expect.any(Date) as unknown as Date,
+        });
+      }
     });
 
     it('reports unlimited (null limit/remaining) usage for an active Pro subscription', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'active'));
-      mockAnalysisRepo.count.mockResolvedValue(50);
+      stubUsageCounts({ analyses: 50 });
 
       const result = await service.getUsageSummary('clerk-1');
 
@@ -442,7 +483,7 @@ describe('BillingService', () => {
 
     it('reports effective Free limits for a past_due Pro subscription record', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'past_due'));
-      mockAnalysisRepo.count.mockResolvedValue(2);
+      stubUsageCounts({ analyses: 2 });
 
       const result = await service.getUsageSummary('clerk-1');
 
@@ -490,7 +531,7 @@ describe('BillingService', () => {
       process.env['NODE_ENV'] = 'development';
       try {
         mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
-        mockAnalysisRepo.count.mockResolvedValue(2); // at the Free limit
+        stubUsageCounts({ analyses: 2 }); // at the Free limit
 
         const result = await service.getUsageSummary('clerk-1');
 
@@ -500,6 +541,21 @@ describe('BillingService', () => {
       } finally {
         process.env['NODE_ENV'] = original;
       }
+    });
+
+    // ─── Quota-refund fix — deletion cannot restore already-consumed usage ────
+
+    it('still reports the earlier-consumed usage after the content row that earned it was hard-deleted', async () => {
+      // Models the exact refund scenario: 2 analyses were generated and
+      // logged this month; both were since hard-deleted (e.g. via
+      // DELETE /analyses/:id). The durable audit_logs count is unaffected
+      // by that deletion — usage still correctly reports 2, not 0.
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
+      stubUsageCounts({ analyses: 2 });
+
+      const result = await service.getUsageSummary('clerk-1');
+
+      expect(result.usage.analyses).toEqual({ used: 2, limit: 2, remaining: 0 });
     });
   });
 

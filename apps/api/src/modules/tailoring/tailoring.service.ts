@@ -8,23 +8,20 @@ import {
   UnprocessableEntityException,
   ConflictException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { type Repository, MoreThanOrEqual, Not } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { type Repository, type DataSource } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
 
 import { PLAN_LIMITS } from '@cvpilot/shared';
-import type {
-  CvContent,
-  TailoringSuggestion,
-  TailoringDecision,
-  TailoringStatus,
-} from '@cvpilot/shared';
+import type { CvContent, TailoringSuggestion, TailoringDecision } from '@cvpilot/shared';
 import { TailoringEntity } from '../../entities/tailoring.entity';
 import { isDevQuotaBypassActive } from '../../common/utils/dev-quota-bypass.util';
+import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { CvService } from '../cv/cv.service';
+import { AuditService } from '../audit/audit.service';
 import { TailoringAiService } from './tailoring-ai.service';
 import { isNewSkillGrounded } from './skill-grounding.util';
 import { classifySuggestionGrounding } from './tailoring-grounding.util';
@@ -43,7 +40,10 @@ export class TailoringService {
     private readonly userService: UserService,
     private readonly billingService: BillingService,
     private readonly cvService: CvService,
+    private readonly auditService: AuditService,
     private readonly tailoringAiService: TailoringAiService,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   async submit(clerkId: string, dto: CreateTailoringDto): Promise<TailoringEntity> {
@@ -136,12 +136,29 @@ export class TailoringService {
         `Tailoring ${tailoringId} complete: ${suggestions.length} suggestions, model=${modelUsed}, tokens=${tokensUsed}`,
       );
 
-      await this.tailoringRepo.update(tailoringId, {
-        suggestions,
-        modelUsed,
-        tokensUsed,
-        status: 'done',
-        completedAt: new Date(),
+      // Reliability fix: the tailoring result/status and the durable quota
+      // usage event are committed together in one short transaction — never
+      // the external AI call above. If logTransactional() fails, the whole
+      // transaction rolls back (the row is left at 'processing', then the
+      // outer catch below marks it 'failed'), so a "successful" tailoring
+      // can never exist without its usage event, and a failed write can
+      // never silently leave free/untracked usage. See
+      // AuditService.logTransactional.
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(TailoringEntity, tailoringId, {
+          suggestions,
+          modelUsed,
+          tokensUsed,
+          status: 'done',
+          completedAt: new Date(),
+        });
+
+        await this.auditService.logTransactional(manager, {
+          userId: tailoring.userId,
+          action: USAGE_ACTIONS.TAILORING_GENERATED,
+          entityType: 'tailoring',
+          entityId: tailoringId,
+        });
       });
     } catch (err) {
       this.logger.error(`Tailoring ${tailoringId} failed`, err);
@@ -159,6 +176,17 @@ export class TailoringService {
     });
     if (!tailoring) throw new NotFoundException(`Tailoring ${tailoringId} not found`);
     return tailoring;
+  }
+
+  // Genuine hard delete — nothing in the schema references tailorings.id
+  // (see migrations: no table has a FK to "tailorings"), so this row has no
+  // children to worry about. master_cv_id/tailored_cv_id are this row's own
+  // FKs *to* cvs — deleting the child (tailoring) row never cascades "up"
+  // to the parent CV rows regardless of their ON DELETE clause, so both the
+  // master CV and any already-applied tailored CV are left fully intact.
+  async deleteTailoring(clerkId: string, tailoringId: string): Promise<void> {
+    const tailoring = await this.findOneForUser(clerkId, tailoringId);
+    await this.tailoringRepo.delete(tailoring.id);
   }
 
   async listForUser(clerkId: string): Promise<TailoringEntity[]> {
@@ -231,12 +259,13 @@ export class TailoringService {
     startOfMonth.setUTCDate(1);
     startOfMonth.setUTCHours(0, 0, 0, 0);
 
-    const count = await this.tailoringRepo.count({
-      where: {
-        userId,
-        status: Not('failed') as unknown as TailoringStatus,
-        createdAt: MoreThanOrEqual(startOfMonth),
-      },
+    // Quota-refund fix (see usage-actions.ts): counts durable
+    // "tailoring succeeded" records, not live tailorings rows — a
+    // genuinely hard-deleted tailoring can never reduce this count.
+    const count = await this.auditService.countDistinctEntitiesSince({
+      userId,
+      action: USAGE_ACTIONS.TAILORING_GENERATED,
+      since: startOfMonth,
     });
 
     if (count >= limit) {

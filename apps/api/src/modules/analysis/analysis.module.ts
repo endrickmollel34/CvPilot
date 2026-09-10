@@ -10,6 +10,7 @@ import { AtsReportEntity } from '../../entities/ats-report.entity';
 import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
 import { CvModule } from '../cv/cv.module';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { CvModule } from '../cv/cv.module';
     BillingModule,
     UserModule,
     CvModule,
+    AuditModule,
   ],
   controllers: [AnalysisController],
   providers: [AnalysisService, AiService],

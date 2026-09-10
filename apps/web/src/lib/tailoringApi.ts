@@ -61,6 +61,15 @@ export async function getTailoring(token: TokenSource, tailoringId: string): Pro
   return res.json() as Promise<TailoringDto>;
 }
 
+// A genuine hard delete on the backend (tailoring.service.ts): the row is
+// gone; neither the master CV nor an already-applied tailored CV is touched.
+export async function deleteTailoring(token: TokenSource, id: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/tailorings/${id}`, token, { method: 'DELETE' });
+  if (res.ok || res.status === 204) return;
+  const body = await res.json().catch(() => ({}));
+  throwApiError(body, 'Could not delete this tailoring. Please try again.', res.status);
+}
+
 export async function applyTailoring(
   token: TokenSource,
   tailoringId: string,

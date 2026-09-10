@@ -1,18 +1,17 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { type Repository, In, MoreThanOrEqual, Not } from 'typeorm';
+import { type Repository, In } from 'typeorm';
 
 import type { Plan, PaymentProviderType, UsageCounter, UsageSummary } from '@cvpilot/shared';
 import { PLAN_LIMITS } from '@cvpilot/shared';
 
 import { SubscriptionEntity } from '../../entities/subscription.entity';
 import { PaymentEntity } from '../../entities/payment.entity';
-import { AnalysisEntity, type AnalysisStatus } from '../../entities/analysis.entity';
-import { CoverLetterEntity, type CoverLetterStatus } from '../../entities/cover-letter.entity';
-import { TailoringEntity } from '../../entities/tailoring.entity';
 import { CvEntity } from '../../entities/cv.entity';
 import { isDevQuotaBypassActive } from '../../common/utils/dev-quota-bypass.util';
+import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
 import { UserService } from '../user/user.service';
+import { AuditService } from '../audit/audit.service';
 import { StripePaymentProvider } from './providers/stripe.provider';
 import type { PaymentProvider, InternalBillingEvent } from './providers/payment-provider.interface';
 
@@ -26,15 +25,10 @@ export class BillingService {
     private readonly subscriptionRepo: Repository<SubscriptionEntity>,
     @InjectRepository(PaymentEntity)
     private readonly paymentRepo: Repository<PaymentEntity>,
-    @InjectRepository(AnalysisEntity)
-    private readonly analysisRepo: Repository<AnalysisEntity>,
-    @InjectRepository(CoverLetterEntity)
-    private readonly coverLetterRepo: Repository<CoverLetterEntity>,
-    @InjectRepository(TailoringEntity)
-    private readonly tailoringRepo: Repository<TailoringEntity>,
     @InjectRepository(CvEntity)
     private readonly cvRepo: Repository<CvEntity>,
     private readonly userService: UserService,
+    private readonly auditService: AuditService,
     stripeProvider: StripePaymentProvider,
   ) {
     this.providers.set('STRIPE', stripeProvider);
@@ -164,11 +158,19 @@ export class BillingService {
   // ── Shared quota-counting helpers ──────────────────────────────────────────
   // Single source of truth for "how many of X has this user used", reused by
   // both canPerformAction() (enforcement) and getUsageSummary() (display).
-  // Failed AI generations must not consume — or appear to consume — the
-  // user's quota: a transient OpenAI/Anthropic outage would otherwise
-  // silently burn a Free user's tiny monthly allowance for zero result.
-  // Mirrors the same Not('failed') exclusion TailoringService's own
-  // checkTailoringLimit() independently applies for enforcement.
+  //
+  // Quota-refund fix: these used to COUNT(*) live analyses/cover_letters/
+  // tailorings rows (status != 'failed', created this month). Since those
+  // rows are genuinely hard-deletable by their owners (CV Deletion Phase 2 /
+  // Analysis+Tailoring Deletion), that let a limited-plan user silently
+  // refund a consumed quota slot via generate → delete → generate. Instead,
+  // these now count durable, append-only audit_logs records — written by
+  // AnalysisService/CoverLetterService/TailoringService's own AuditService
+  // .log() calls at the exact moment a generation genuinely succeeds (see
+  // usage-actions.ts) — which deleting the content row can never undo.
+  // "Failed generations must not consume quota" is preserved by construction:
+  // those log() calls are only ever reached on the success path, never on
+  // failure, so there is no live `status` filter left to apply here.
 
   private startOfCurrentMonth(): Date {
     const d = new Date();
@@ -178,32 +180,26 @@ export class BillingService {
   }
 
   private async countAnalysesThisMonth(userId: string): Promise<number> {
-    return this.analysisRepo.count({
-      where: {
-        userId,
-        status: Not('failed') as unknown as AnalysisStatus,
-        createdAt: MoreThanOrEqual(this.startOfCurrentMonth()),
-      },
+    return this.auditService.countDistinctEntitiesSince({
+      userId,
+      action: USAGE_ACTIONS.ANALYSIS_GENERATED,
+      since: this.startOfCurrentMonth(),
     });
   }
 
   private async countCoverLettersThisMonth(userId: string): Promise<number> {
-    return this.coverLetterRepo.count({
-      where: {
-        userId,
-        status: Not('failed') as unknown as CoverLetterStatus,
-        createdAt: MoreThanOrEqual(this.startOfCurrentMonth()),
-      },
+    return this.auditService.countDistinctEntitiesSince({
+      userId,
+      action: USAGE_ACTIONS.COVER_LETTER_GENERATED,
+      since: this.startOfCurrentMonth(),
     });
   }
 
   private async countTailoringsThisMonth(userId: string): Promise<number> {
-    return this.tailoringRepo.count({
-      where: {
-        userId,
-        status: Not('failed') as unknown as TailoringEntity['status'],
-        createdAt: MoreThanOrEqual(this.startOfCurrentMonth()),
-      },
+    return this.auditService.countDistinctEntitiesSince({
+      userId,
+      action: USAGE_ACTIONS.TAILORING_GENERATED,
+      since: this.startOfCurrentMonth(),
     });
   }
 

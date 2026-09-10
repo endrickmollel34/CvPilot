@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Delete,
   Body,
   Param,
   UseGuards,
@@ -33,6 +34,12 @@ export class TailoringController {
   @Get(':id')
   findOne(@CurrentUser() user: { clerkId: string }, @Param('id') id: string) {
     return this.tailoringService.findOneForUser(user.clerkId, id);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(@CurrentUser() user: { clerkId: string }, @Param('id') id: string): Promise<void> {
+    await this.tailoringService.deleteTailoring(user.clerkId, id);
   }
 
   @Post(':id/apply')

@@ -1,4 +1,15 @@
-import { Controller, Post, Get, Param, Body, UseGuards, Sse } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Delete,
+  Param,
+  Body,
+  UseGuards,
+  Sse,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import type { Observable } from 'rxjs';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
@@ -24,6 +35,15 @@ export class AnalysisController {
   @Get(':id')
   getAnalysis(@CurrentUser() user: { clerkId: string }, @Param('id') id: string) {
     return this.analysisService.findOneForUser(user.clerkId, id);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteAnalysis(
+    @CurrentUser() user: { clerkId: string },
+    @Param('id') id: string,
+  ): Promise<void> {
+    await this.analysisService.deleteAnalysis(user.clerkId, id);
   }
 
   @Sse(':id/status')

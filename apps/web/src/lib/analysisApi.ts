@@ -55,3 +55,12 @@ export async function listAnalyses(token: TokenSource): Promise<AnalysisDto[]> {
   if (!res.ok) throw new Error(`List failed: ${res.status}`);
   return res.json() as Promise<AnalysisDto[]>;
 }
+
+// A genuine hard delete on the backend (analysis.service.ts): the row and
+// its ATS report are gone; the source CV is never touched.
+export async function deleteAnalysis(token: TokenSource, id: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/analyses/${id}`, token, { method: 'DELETE' });
+  if (res.ok || res.status === 204) return;
+  const body = await res.json().catch(() => ({}));
+  throwApiError(body, 'Could not delete this analysis. Please try again.', res.status);
+}

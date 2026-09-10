@@ -6,8 +6,8 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { type Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { type Repository, type DataSource } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
@@ -25,6 +25,8 @@ import { UserService } from '../user/user.service';
 import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
 import { AnalysisService } from '../analysis/analysis.service';
+import { AuditService } from '../audit/audit.service';
+import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
 import { CoverLetterAiService } from './cover-letter-ai.service';
 import { resolveCoverLetterCvText } from './cv-text-resolver.util';
 import { buildCvEvidenceFromContent, buildCvEvidenceFromPlainText } from './cv-evidence.util';
@@ -65,8 +67,11 @@ export class CoverLetterService extends WorkerHost {
     private readonly cvService: CvService,
     private readonly billingService: BillingService,
     private readonly analysisService: AnalysisService,
+    private readonly auditService: AuditService,
     private readonly aiService: CoverLetterAiService,
     private readonly r2Storage: R2StorageService,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {
     super();
     this.s3 = new S3Client({
@@ -175,12 +180,32 @@ export class CoverLetterService extends WorkerHost {
         evidence,
       );
 
-      await this.repo.update(coverLetterId, {
-        content,
-        modelUsed,
-        tokensUsed,
-        status: 'generated',
-        generatedAt: new Date(),
+      // Reliability fix: the generated content/status and the durable quota
+      // usage event are committed together in one short transaction — never
+      // the external AI call above. If logTransactional() fails, the whole
+      // transaction rolls back (the row is left at 'processing', then the
+      // outer catch below marks it 'failed'), so a "successful" letter can
+      // never exist without its usage event, and a failed write can never
+      // silently leave free/untracked usage. Safe to log again on every
+      // regenerate() of this same letter: the read side
+      // (AuditService.countDistinctEntitiesSince) counts DISTINCT entity_id,
+      // so a regenerated letter still only counts once. See
+      // AuditService.logTransactional.
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(CoverLetterEntity, coverLetterId, {
+          content,
+          modelUsed,
+          tokensUsed,
+          status: 'generated',
+          generatedAt: new Date(),
+        });
+
+        await this.auditService.logTransactional(manager, {
+          userId: job.data.userId,
+          action: USAGE_ACTIONS.COVER_LETTER_GENERATED,
+          entityType: 'cover_letter',
+          entityId: coverLetterId,
+        });
       });
 
       this.eventEmitter.emit('cover-letter.completed', { coverLetterId });

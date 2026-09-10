@@ -5,44 +5,7 @@ import { auth } from '@clerk/nextjs/server';
 import { redirect } from 'next/navigation';
 
 import { listAnalyses } from '@/lib/analysisApi';
-
-function ScoreBadge({ score }: { score: number }) {
-  const color =
-    score >= 70
-      ? 'bg-green-100 text-green-700'
-      : score >= 40
-        ? 'bg-amber-100 text-amber-700'
-        : 'bg-red-100 text-red-700';
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${color}`}
-    >
-      {score}%
-    </span>
-  );
-}
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: 'Pending',
-  processing: 'Processing',
-  done: 'Done',
-  failed: 'Failed',
-};
-
-const STATUS_COLOR: Record<string, string> = {
-  pending: 'bg-gray-100 text-gray-600',
-  processing: 'bg-indigo-100 text-indigo-700',
-  done: 'bg-green-100 text-green-700',
-  failed: 'bg-red-100 text-red-700',
-};
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-GB', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
-}
+import { AnalysisHistoryList } from '@/components/analysis/AnalysisHistoryList';
 
 export default async function AnalysesPage() {
   const { getToken, userId } = await auth();
@@ -69,49 +32,7 @@ export default async function AnalysesPage() {
         </Link>
       </div>
 
-      {sorted.length === 0 ? (
-        <div className="rounded-xl border-2 border-dashed border-gray-200 bg-white py-16 text-center">
-          <p className="text-sm text-gray-400">You have not run any analyses yet.</p>
-          <Link
-            href="/analyze"
-            className="mt-4 inline-block rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
-          >
-            Run your first analysis
-          </Link>
-        </div>
-      ) : (
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
-          {sorted.map((a) => (
-            <Link
-              key={a.id}
-              href={`/analyses/${a.id}`}
-              className="flex items-center justify-between px-5 py-3.5 hover:bg-gray-50"
-            >
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-gray-900">
-                  {a.jobTitle ?? 'Untitled role'}
-                  {a.companyName ? ` — ${a.companyName}` : ''}
-                </p>
-                <p className="text-xs text-gray-400">
-                  {a.cv ? (a.cv.title ?? a.cv.fileName ?? 'Uploaded CV') : 'Source CV unavailable'}{' '}
-                  · {formatDate(a.createdAt)}
-                </p>
-              </div>
-              <div className="flex shrink-0 items-center gap-3 ml-4">
-                {a.status === 'done' && a.matchScore != null ? (
-                  <ScoreBadge score={a.matchScore} />
-                ) : (
-                  <span
-                    className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_COLOR[a.status] ?? 'bg-gray-100 text-gray-600'}`}
-                  >
-                    {STATUS_LABELS[a.status] ?? a.status}
-                  </span>
-                )}
-              </div>
-            </Link>
-          ))}
-        </div>
-      )}
+      <AnalysisHistoryList initialItems={sorted} />
     </div>
   );
 }

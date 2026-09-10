@@ -5,8 +5,8 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { type Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { type Repository, type DataSource } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
@@ -21,6 +21,8 @@ import { AtsReportEntity } from '../../entities/ats-report.entity';
 import { UserService } from '../user/user.service';
 import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
+import { AuditService } from '../audit/audit.service';
+import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
 import { AiService } from './ai.service';
 import { groundSuggestions } from './recommendation-grounding.util';
 import { classifyAndVerifyKeywords, computeAtsScore } from './ats-keyword.util';
@@ -34,15 +36,16 @@ export class AnalysisService extends WorkerHost {
   constructor(
     @InjectRepository(AnalysisEntity)
     private readonly analysisRepo: Repository<AnalysisEntity>,
-    @InjectRepository(AtsReportEntity)
-    private readonly atsRepo: Repository<AtsReportEntity>,
     @InjectQueue('cv-analysis')
     private readonly analysisQueue: Queue,
     private readonly eventEmitter: EventEmitter2,
     private readonly userService: UserService,
     private readonly cvService: CvService,
     private readonly billingService: BillingService,
+    private readonly auditService: AuditService,
     private readonly aiService: AiService,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {
     super();
   }
@@ -133,15 +136,6 @@ export class AnalysisService extends WorkerHost {
         );
       }
 
-      await this.analysisRepo.update(analysisId, {
-        matchScore: result.match_score,
-        suggestions: groundedSuggestions,
-        modelUsed,
-        tokensUsed,
-        status: 'done',
-        completedAt: new Date(),
-      });
-
       // ATS Keyword Quality V2 — never trusts the model's raw keyword list
       // or `found` flags for scoring: classifyAndVerifyKeywords merges
       // near-duplicate phrasings, independently re-verifies `found` against
@@ -149,7 +143,8 @@ export class AnalysisService extends WorkerHost {
       // (see ats-keyword.util.ts). computeAtsScore then weights genuine
       // technical requirements far more heavily than generic/contextual
       // noise, which is excluded from scoring entirely rather than
-      // depressing the score just for being absent.
+      // depressing the score just for being absent. Pure computation, no
+      // I/O — safe to run before the transaction below opens.
       const classifiedKeywords = classifyAndVerifyKeywords(result.ats_keywords, cv.parsedContent);
       const meaningfulKeywords = classifiedKeywords.filter(
         (k) => k.category !== 'GENERIC_OR_CONTEXTUAL',
@@ -160,9 +155,35 @@ export class AnalysisService extends WorkerHost {
       const missingKeywords = meaningfulKeywords.filter((k) => !k.found).map((k) => k.keyword);
       const atsScore = computeAtsScore(classifiedKeywords);
 
-      await this.atsRepo.save(
-        this.atsRepo.create({ analysisId, keywordHits, missingKeywords, atsScore }),
-      );
+      // Reliability fix: the analysis result, its ATS report, and the
+      // durable quota usage event are committed together in one short
+      // transaction — never the external AI call above, only this final
+      // persistence step. If logTransactional() fails, everything here
+      // rolls back (the row is left at 'processing', then the outer catch
+      // below marks it 'failed'), so a "successful" analysis can never
+      // exist without its usage event, and a failed write can never
+      // silently leave free/untracked usage. See AuditService.logTransactional.
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(AnalysisEntity, analysisId, {
+          matchScore: result.match_score,
+          suggestions: groundedSuggestions,
+          modelUsed,
+          tokensUsed,
+          status: 'done',
+          completedAt: new Date(),
+        });
+
+        await manager.save(
+          manager.create(AtsReportEntity, { analysisId, keywordHits, missingKeywords, atsScore }),
+        );
+
+        await this.auditService.logTransactional(manager, {
+          userId: analysis.userId,
+          action: USAGE_ACTIONS.ANALYSIS_GENERATED,
+          entityType: 'analysis',
+          entityId: analysisId,
+        });
+      });
 
       this.eventEmitter.emit('analysis.completed', { analysisId });
       this.logger.log(`Analysis ${analysisId} completed (score: ${result.match_score})`);
@@ -191,6 +212,17 @@ export class AnalysisService extends WorkerHost {
     });
     if (!analysis) throw new NotFoundException(`Analysis ${id} not found`);
     return analysis;
+  }
+
+  // Genuine hard delete — analyses.id has no children other than
+  // ats_reports (ON DELETE CASCADE, see InitialSchema migration), which
+  // Postgres removes automatically; any cover_letters row that referenced
+  // this analysis has analysis_id ON DELETE SET NULL, so it survives
+  // untouched, just unlinked. The source CV is never touched — cv_id here
+  // is the FK's child side, deleting this row cannot cascade "up" to it.
+  async deleteAnalysis(clerkId: string, id: string): Promise<void> {
+    const analysis = await this.findOneForUser(clerkId, id);
+    await this.analysisRepo.delete(analysis.id);
   }
 
   statusStream(analysisId: string): Observable<MessageEvent> {

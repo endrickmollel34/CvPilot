@@ -10,6 +10,7 @@ import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
 import { CvModule } from '../cv/cv.module';
 import { AnalysisModule } from '../analysis/analysis.module';
+import { AuditModule } from '../audit/audit.module';
 import { R2StorageService } from '../../common/services/r2-storage.service';
 
 @Module({
@@ -20,6 +21,7 @@ import { R2StorageService } from '../../common/services/r2-storage.service';
     UserModule,
     CvModule,
     AnalysisModule,
+    AuditModule,
   ],
   controllers: [CoverLetterController],
   providers: [CoverLetterService, CoverLetterAiService, R2StorageService],

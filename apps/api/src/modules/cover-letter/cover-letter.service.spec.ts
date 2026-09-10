@@ -1,6 +1,6 @@
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
 import {
@@ -21,6 +21,7 @@ import { UserService } from '../user/user.service';
 import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
 import { AnalysisService } from '../analysis/analysis.service';
+import { AuditService } from '../audit/audit.service';
 import { R2StorageService } from '../../common/services/r2-storage.service';
 
 // S3Client is constructed unconditionally in CoverLetterService's
@@ -93,8 +94,20 @@ describe('CoverLetterService', () => {
   const mockCvService = { findById: jest.fn() };
   const mockBillingService = { canPerformAction: jest.fn() };
   const mockAnalysisService = { findOneForUser: jest.fn() };
+  const mockAuditService = { log: jest.fn(), logTransactional: jest.fn() };
   const mockAiService = { generateCoverLetter: jest.fn() };
   const mockR2Storage = { deleteObject: jest.fn() };
+  // Reliability fix: process()'s success path now writes the generated
+  // content/status and the audit usage event inside one short DB
+  // transaction (see cover-letter.service.ts) — mirrors the
+  // dataSource.transaction() mocking pattern already used by
+  // cv.service.spec.ts/user.service.spec.ts for their own transactions.
+  const mockManager = { update: jest.fn(), create: jest.fn(), save: jest.fn() };
+  const mockDataSource = {
+    transaction: jest.fn(async (cb: (manager: typeof mockManager) => Promise<void>) =>
+      cb(mockManager),
+    ),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -108,8 +121,10 @@ describe('CoverLetterService', () => {
         { provide: CvService, useValue: mockCvService },
         { provide: BillingService, useValue: mockBillingService },
         { provide: AnalysisService, useValue: mockAnalysisService },
+        { provide: AuditService, useValue: mockAuditService },
         { provide: CoverLetterAiService, useValue: mockAiService },
         { provide: R2StorageService, useValue: mockR2Storage },
+        { provide: getDataSourceToken(), useValue: mockDataSource },
       ],
     }).compile();
 
@@ -119,6 +134,9 @@ describe('CoverLetterService', () => {
     mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
     mockCvService.findById.mockResolvedValue(MOCK_CV);
     mockBillingService.canPerformAction.mockResolvedValue(true);
+    mockDataSource.transaction.mockImplementation(
+      async (cb: (manager: typeof mockManager) => Promise<void>) => cb(mockManager),
+    );
     mockRepo.create.mockReturnValue(MOCK_LETTER);
     mockRepo.save.mockResolvedValue(MOCK_LETTER);
     mockQueue.add.mockResolvedValue({ id: 'job-1' });
@@ -317,13 +335,64 @@ describe('CoverLetterService', () => {
       },
     } as unknown as Job<CoverLetterJobData>);
 
-    expect(mockRepo.update).toHaveBeenCalledWith(
+    expect(mockManager.update).toHaveBeenCalledWith(
+      CoverLetterEntity,
       'letter-1',
       expect.objectContaining({ status: 'generated', content: generatedContent }),
     );
     expect(mockEventEmitter.emit).toHaveBeenCalledWith('cover-letter.completed', {
       coverLetterId: 'letter-1',
     });
+    // Quota-refund fix — durable usage logging (see usage-actions.ts):
+    // BillingService counts these audit_logs records, not live cover_letters
+    // rows, to compute monthly usage — so a genuine success must log exactly
+    // once, keyed by this letter's own userId/id. Reliability fix: written
+    // via logTransactional(), inside the same transaction as the content/
+    // status update above — see cover-letter.service.ts.
+    expect(mockAuditService.logTransactional).toHaveBeenCalledWith(mockManager, {
+      userId: 'user-1',
+      action: 'cover_letter.generated',
+      entityType: 'cover_letter',
+      entityId: 'letter-1',
+    });
+  });
+
+  // Reliability fix — a "successful" letter can never exist without its
+  // usage event: if the transactional audit write fails, the whole
+  // transaction (content/status update + audit log) rolls back together, so
+  // the letter is left un-marked-'generated' and the outer catch marks it
+  // 'failed' instead of silently reporting success with untracked usage.
+  it('rolls back the content/status update and marks the letter failed when the transactional audit write fails', async () => {
+    mockAiService.generateCoverLetter.mockResolvedValue({
+      content: 'Dear Hiring Manager, ...',
+      modelUsed: 'gpt-4o',
+      tokensUsed: 400,
+    });
+    mockCvService.findById.mockResolvedValue(MOCK_CV);
+    mockAuditService.logTransactional.mockRejectedValueOnce(new Error('DB unavailable'));
+
+    await service.process({
+      data: {
+        coverLetterId: 'letter-1',
+        userId: 'user-1',
+        cvId: 'cv-1',
+        jobTitle: 'Senior Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Lead backend development.',
+        tone: 'professional',
+      },
+    } as unknown as Job<CoverLetterJobData>);
+
+    // manager.update() was attempted inside the transaction (this mock does
+    // not simulate a real Postgres rollback of that call), but the
+    // transaction as a whole threw — so the outer catch is what actually
+    // determines the letter's final, externally-visible status: 'failed',
+    // never 'generated'.
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+    expect(mockEventEmitter.emit).not.toHaveBeenCalledWith(
+      'cover-letter.completed',
+      expect.anything(),
+    );
   });
 
   it('generates from a builder/prefilled CV whose usable content lives only in structured content, never in parsedContent (regression)', async () => {
@@ -376,7 +445,8 @@ describe('CoverLetterService', () => {
       'professional',
       { experienceText: '', skillsOnlyTerms: ['TypeScript', 'React'] },
     );
-    expect(mockRepo.update).toHaveBeenCalledWith(
+    expect(mockManager.update).toHaveBeenCalledWith(
+      CoverLetterEntity,
       'letter-1',
       expect.objectContaining({ status: 'generated' }),
     );
@@ -442,6 +512,9 @@ describe('CoverLetterService', () => {
 
     expect(mockAiService.generateCoverLetter).not.toHaveBeenCalled();
     expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+    // Quota-refund fix: a failed generation must never log a usage record.
+    expect(mockAuditService.logTransactional).not.toHaveBeenCalled();
+    expect(mockAuditService.log).not.toHaveBeenCalled();
   });
 
   it('passes plain-text evidence with no skills-only terms for upload-only CVs with no structured content (must still work)', async () => {

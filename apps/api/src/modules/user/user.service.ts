@@ -12,6 +12,7 @@ import { CoverLetterEntity } from '../../entities/cover-letter.entity';
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { TailoringEntity } from '../../entities/tailoring.entity';
 import { SubscriptionEntity } from '../../entities/subscription.entity';
+import { AuditLogEntity } from '../../entities/audit-log.entity';
 import { StripePaymentProvider } from '../billing/providers/stripe.provider';
 
 /**
@@ -126,8 +127,11 @@ export class UserService {
    * endpoint and the Clerk `user.deleted` webhook. Erases every CVPilot
    * personal-data record owned by this user: CVs (incl. their R2 files),
    * analyses (and their ATS reports, via cascade), cover letters (incl.
-   * their R2 PDF files, if downloaded), tailorings, and the user/profile
-   * row itself.
+   * their R2 PDF files, if downloaded), tailorings, this user's audit_logs
+   * rows (the durable quota-usage events written by AnalysisService/
+   * CoverLetterService/TailoringService — see usage-actions.ts; audit_logs
+   * has no FK on user_id by design, so nothing else deletes these
+   * automatically), and the user/profile row itself.
    *
    * Before any of that, an active Stripe subscription is cancelled first
    * (see cancelActiveSubscription()) — the customer must not keep being
@@ -168,7 +172,17 @@ export class UserService {
     //   2. cover_letters, 3. analyses (ats_reports cascade automatically
     //      via analyses' own ON DELETE CASCADE), 4. cvs — all safe once
     //      tailorings are gone.
-    //   5. the user row itself — cascades profiles/subscriptions/payments/
+    //   5. audit_logs — no FK to anything (deliberately, see InitialSchema:
+    //      "user may be deleted but logs must persist" — true for the
+    //      general-purpose audit trail this table was originally built for),
+    //      so nothing above cascades it automatically and it must be
+    //      deleted explicitly. Scoped to this user's internal id only —
+    //      never touches another user's rows. These are exactly the durable
+    //      quota-usage events AnalysisService/CoverLetterService/
+    //      TailoringService write on success (see usage-actions.ts); once
+    //      the account itself is erased there is no remaining product need
+    //      to keep them.
+    //   6. the user row itself — cascades profiles/subscriptions/payments/
     //      notifications automatically (all plain ON DELETE CASCADE with
     //      nothing else referencing them, per InitialSchema).
     // This is deliberately explicit rather than relying solely on the
@@ -188,6 +202,7 @@ export class UserService {
         await manager.delete(CoverLetterEntity, { userId: user.id });
         await manager.delete(AnalysisEntity, { userId: user.id });
         await manager.delete(CvEntity, { userId: user.id });
+        await manager.delete(AuditLogEntity, { userId: user.id });
         await manager.delete(UserEntity, { id: user.id });
       });
     } catch (err) {

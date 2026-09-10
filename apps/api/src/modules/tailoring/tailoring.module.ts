@@ -10,6 +10,7 @@ import { TailoringEntity } from '../../entities/tailoring.entity';
 import { CvModule } from '../cv/cv.module';
 import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { UserModule } from '../user/user.module';
     CvModule,
     BillingModule,
     UserModule,
+    AuditModule,
   ],
   controllers: [TailoringController],
   providers: [TailoringService, TailoringProcessor, TailoringAiService],

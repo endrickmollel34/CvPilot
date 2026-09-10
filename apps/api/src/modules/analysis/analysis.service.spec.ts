@@ -1,6 +1,6 @@
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
@@ -16,6 +16,7 @@ import { AtsReportEntity } from '../../entities/ats-report.entity';
 import { UserService } from '../user/user.service';
 import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
+import { AuditService } from '../audit/audit.service';
 import { AiService } from './ai.service';
 
 const MOCK_USER = { id: 'user-1', clerkId: 'clerk-1' };
@@ -25,13 +26,13 @@ const MOCK_USER = { id: 'user-1', clerkId: 'clerk-1' };
 describe('AnalysisService — history relation loading', () => {
   let service: AnalysisService;
 
-  const mockAnalysisRepo = { find: jest.fn(), findOne: jest.fn() };
-  const mockAtsRepo = { create: jest.fn(), save: jest.fn() };
+  const mockAnalysisRepo = { find: jest.fn(), findOne: jest.fn(), delete: jest.fn() };
   const mockQueue = { add: jest.fn() };
   const mockEventEmitter = { emit: jest.fn() };
   const mockUserService = { findByClerkId: jest.fn() };
   const mockCvService = { findById: jest.fn() };
   const mockBillingService = { canPerformAction: jest.fn() };
+  const mockAuditService = { log: jest.fn(), logTransactional: jest.fn() };
   const mockAiService = { runAnalysis: jest.fn() };
 
   beforeEach(async () => {
@@ -41,13 +42,17 @@ describe('AnalysisService — history relation loading', () => {
       providers: [
         AnalysisService,
         { provide: getRepositoryToken(AnalysisEntity), useValue: mockAnalysisRepo },
-        { provide: getRepositoryToken(AtsReportEntity), useValue: mockAtsRepo },
         { provide: getQueueToken('cv-analysis'), useValue: mockQueue },
         { provide: EventEmitter2, useValue: mockEventEmitter },
         { provide: UserService, useValue: mockUserService },
         { provide: CvService, useValue: mockCvService },
         { provide: BillingService, useValue: mockBillingService },
+        { provide: AuditService, useValue: mockAuditService },
         { provide: AiService, useValue: mockAiService },
+        // Not exercised by these tests (this block covers listForUser()/
+        // findOneForUser()/deleteAnalysis(), never process()) — a minimal
+        // stub is enough to satisfy the constructor.
+        { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
       ],
     }).compile();
 
@@ -110,6 +115,54 @@ describe('AnalysisService — history relation loading', () => {
       );
     });
   });
+
+  // ─── deleteAnalysis() ───────────────────────────────────────────────────────
+  // Genuine hard delete — see the doc comment on deleteAnalysis() itself for
+  // the ats_reports CASCADE / cover_letters SET NULL / cv_id-is-the-child-FK
+  // reasoning that makes this safe without any application-level cleanup.
+
+  describe('deleteAnalysis()', () => {
+    it("deletes the caller's own analysis by id after the ownership lookup", async () => {
+      mockAnalysisRepo.findOne.mockResolvedValue({ id: 'an-1', userId: 'user-1' });
+      mockAnalysisRepo.delete.mockResolvedValue({ affected: 1 });
+
+      await service.deleteAnalysis('clerk-1', 'an-1');
+
+      expect(mockAnalysisRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'an-1', userId: 'user-1' },
+        relations: ['atsReport', 'cv'],
+      });
+      expect(mockAnalysisRepo.delete).toHaveBeenCalledWith('an-1');
+    });
+
+    it('throws NotFoundException and never deletes when the analysis belongs to another user', async () => {
+      mockAnalysisRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.deleteAnalysis('clerk-1', 'an-1')).rejects.toThrow(NotFoundException);
+      expect(mockAnalysisRepo.delete).not.toHaveBeenCalled();
+    });
+
+    it('a repeat delete 404s via the same ownership lookup, once the row is gone', async () => {
+      mockAnalysisRepo.findOne
+        .mockResolvedValueOnce({ id: 'an-1', userId: 'user-1' })
+        .mockResolvedValueOnce(null);
+      mockAnalysisRepo.delete.mockResolvedValue({ affected: 1 });
+
+      await service.deleteAnalysis('clerk-1', 'an-1');
+      await expect(service.deleteAnalysis('clerk-1', 'an-1')).rejects.toThrow(NotFoundException);
+      expect(mockAnalysisRepo.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it('only deletes the targeted analysis by its own id — never touches unrelated analyses', async () => {
+      mockAnalysisRepo.findOne.mockResolvedValue({ id: 'an-2', userId: 'user-1' });
+      mockAnalysisRepo.delete.mockResolvedValue({ affected: 1 });
+
+      await service.deleteAnalysis('clerk-1', 'an-2');
+
+      expect(mockAnalysisRepo.delete).toHaveBeenCalledWith('an-2');
+      expect(mockAnalysisRepo.delete).not.toHaveBeenCalledWith('an-1');
+    });
+  });
 });
 
 // ─── submit() / process() — CV validation and recommendation grounding ────────
@@ -139,13 +192,24 @@ describe('AnalysisService — submit() / process()', () => {
     update: jest.fn(),
     findOneByOrFail: jest.fn(),
   };
-  const mockAtsRepo = { create: jest.fn(), save: jest.fn() };
   const mockQueue = { add: jest.fn() };
   const mockEventEmitter = { emit: jest.fn() };
   const mockUserService = { findByClerkId: jest.fn() };
   const mockCvService = { findById: jest.fn() };
   const mockBillingService = { canPerformAction: jest.fn() };
+  const mockAuditService = { log: jest.fn(), logTransactional: jest.fn() };
   const mockAiService = { runAnalysis: jest.fn() };
+  // Reliability fix: process()'s success path now writes the analysis
+  // result, its ATS report, and the audit usage event inside one short DB
+  // transaction (see analysis.service.ts) — mirrors the
+  // dataSource.transaction() mocking pattern already used elsewhere in this
+  // codebase (cv.service.spec.ts, user.service.spec.ts).
+  const mockManager = { update: jest.fn(), create: jest.fn(), save: jest.fn() };
+  const mockDataSource = {
+    transaction: jest.fn(async (cb: (manager: typeof mockManager) => Promise<void>) =>
+      cb(mockManager),
+    ),
+  };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -154,13 +218,14 @@ describe('AnalysisService — submit() / process()', () => {
       providers: [
         AnalysisService,
         { provide: getRepositoryToken(AnalysisEntity), useValue: mockAnalysisRepo },
-        { provide: getRepositoryToken(AtsReportEntity), useValue: mockAtsRepo },
         { provide: getQueueToken('cv-analysis'), useValue: mockQueue },
         { provide: EventEmitter2, useValue: mockEventEmitter },
         { provide: UserService, useValue: mockUserService },
         { provide: CvService, useValue: mockCvService },
         { provide: BillingService, useValue: mockBillingService },
+        { provide: AuditService, useValue: mockAuditService },
         { provide: AiService, useValue: mockAiService },
+        { provide: getDataSourceToken(), useValue: mockDataSource },
       ],
     }).compile();
 
@@ -169,6 +234,10 @@ describe('AnalysisService — submit() / process()', () => {
     mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
     mockCvService.findById.mockResolvedValue(MOCK_CV);
     mockBillingService.canPerformAction.mockResolvedValue(true);
+    mockManager.create.mockImplementation((_entity: unknown, v: unknown) => v);
+    mockDataSource.transaction.mockImplementation(
+      async (cb: (manager: typeof mockManager) => Promise<void>) => cb(mockManager),
+    );
     mockAnalysisRepo.create.mockImplementation((v: unknown) => v);
     mockAnalysisRepo.save.mockImplementation((v: unknown) => ({
       id: 'analysis-1',
@@ -318,9 +387,9 @@ describe('AnalysisService — submit() / process()', () => {
 
     await runProcess();
 
-    const [, updatePayload] = mockAnalysisRepo.update.mock.calls.find(
-      ([, payload]) => (payload as { status?: string }).status === 'done',
-    ) as [string, { suggestions: Array<{ text: string }> }];
+    const [, , updatePayload] = mockManager.update.mock.calls.find(
+      ([, , payload]) => (payload as { status?: string }).status === 'done',
+    ) as [unknown, string, { suggestions: Array<{ text: string }> }];
     const persisted = updatePayload.suggestions;
 
     const kubernetesSuggestion = persisted.find((s) => s.text.toLowerCase().includes('kubernetes'));
@@ -355,9 +424,9 @@ describe('AnalysisService — submit() / process()', () => {
 
     await runProcess();
 
-    const [, updatePayload] = mockAnalysisRepo.update.mock.calls.find(
-      ([, payload]) => (payload as { status?: string }).status === 'done',
-    ) as [string, { suggestions: Array<{ text: string }> }];
+    const [, , updatePayload] = mockManager.update.mock.calls.find(
+      ([, , payload]) => (payload as { status?: string }).status === 'done',
+    ) as [unknown, string, { suggestions: Array<{ text: string }> }];
 
     expect(
       updatePayload.suggestions.some((s) =>
@@ -397,9 +466,9 @@ describe('AnalysisService — submit() / process()', () => {
 
     await runProcess();
 
-    const [, updatePayload] = mockAnalysisRepo.update.mock.calls.find(
-      ([, payload]) => (payload as { status?: string }).status === 'done',
-    ) as [string, { suggestions: Array<{ text: string }> }];
+    const [, , updatePayload] = mockManager.update.mock.calls.find(
+      ([, , payload]) => (payload as { status?: string }).status === 'done',
+    ) as [unknown, string, { suggestions: Array<{ text: string }> }];
 
     expect(updatePayload.suggestions.some((s) => s.text.includes('two-column table'))).toBe(false);
   });
@@ -426,9 +495,9 @@ describe('AnalysisService — submit() / process()', () => {
 
     await runProcess();
 
-    const [, updatePayload] = mockAnalysisRepo.update.mock.calls.find(
-      ([, payload]) => (payload as { status?: string }).status === 'done',
-    ) as [string, { suggestions: Array<{ text: string }> }];
+    const [, , updatePayload] = mockManager.update.mock.calls.find(
+      ([, , payload]) => (payload as { status?: string }).status === 'done',
+    ) as [unknown, string, { suggestions: Array<{ text: string }> }];
 
     const kubernetesMentions = updatePayload.suggestions.filter((s) =>
       s.text.toLowerCase().includes('kubernetes'),
@@ -453,12 +522,13 @@ describe('AnalysisService — submit() / process()', () => {
 
     await runProcess();
 
-    const [, updatePayload] = mockAnalysisRepo.update.mock.calls.find(
-      ([, payload]) => (payload as { status?: string }).status === 'done',
-    ) as [string, { matchScore: number }];
+    const [, , updatePayload] = mockManager.update.mock.calls.find(
+      ([, , payload]) => (payload as { status?: string }).status === 'done',
+    ) as [unknown, string, { matchScore: number }];
     expect(updatePayload.matchScore).toBe(65);
 
-    expect(mockAtsRepo.create).toHaveBeenCalledWith(
+    expect(mockManager.create).toHaveBeenCalledWith(
+      AtsReportEntity,
       expect.objectContaining({
         missingKeywords: ['Kubernetes'],
         atsScore: 0,
@@ -526,7 +596,8 @@ describe('AnalysisService — submit() / process()', () => {
 
     await runProcess();
 
-    const [atsPayload] = mockAtsRepo.create.mock.calls[0] as [
+    const [, atsPayload] = mockManager.create.mock.calls[0] as [
+      unknown,
       { missingKeywords: string[]; keywordHits: Array<{ keyword: string }>; atsScore: number },
     ];
 
@@ -547,9 +618,9 @@ describe('AnalysisService — submit() / process()', () => {
     expect(atsPayload.atsScore).toBeLessThan(20);
 
     // Recommendation output is not flooded with one card per keyword.
-    const [, updatePayload] = mockAnalysisRepo.update.mock.calls.find(
-      ([, payload]) => (payload as { status?: string }).status === 'done',
-    ) as [string, { suggestions: Array<{ text: string }> }];
+    const [, , updatePayload] = mockManager.update.mock.calls.find(
+      ([, , payload]) => (payload as { status?: string }).status === 'done',
+    ) as [unknown, string, { suggestions: Array<{ text: string }> }];
     expect(updatePayload.suggestions.length).toBeLessThanOrEqual(8);
     // No surviving suggestion is about a purely generic verb.
     for (const verb of ['developing', 'maintaining', 'designing', 'testing']) {
@@ -564,5 +635,72 @@ describe('AnalysisService — submit() / process()', () => {
 
     expect(mockAiService.runAnalysis).not.toHaveBeenCalled();
     expect(mockAnalysisRepo.update).toHaveBeenCalledWith('analysis-1', { status: 'failed' });
+  });
+
+  // ─── Quota-refund fix — durable usage logging ──────────────────────────────
+  // BillingService counts these audit_logs records, not live analyses rows,
+  // to compute monthly usage (see usage-actions.ts) — so a genuine success
+  // must log exactly once, and a failure must never log at all.
+
+  it('logs a durable usage record via AuditService on genuine success — never on failure', async () => {
+    mockAnalysisRepo.findOneByOrFail.mockResolvedValue({
+      id: 'analysis-1',
+      userId: 'user-1',
+      jobDescription: 'Looking for a backend engineer with Kubernetes experience.',
+    });
+    mockAiService.runAnalysis.mockResolvedValue({
+      result: {
+        match_score: 70,
+        suggestions: [],
+        ats_keywords: [],
+      },
+      modelUsed: 'gpt-4o',
+      tokensUsed: 100,
+    });
+
+    await runProcess();
+
+    // Reliability fix: written via logTransactional(), inside the same
+    // transaction as the analysis/ATS report update above — see
+    // analysis.service.ts.
+    expect(mockAuditService.logTransactional).toHaveBeenCalledWith(mockManager, {
+      userId: 'user-1',
+      action: 'analysis.generated',
+      entityType: 'analysis',
+      entityId: 'analysis-1',
+    });
+  });
+
+  it('never logs a usage record when the analysis fails', async () => {
+    mockCvService.findById.mockResolvedValue({ ...MOCK_CV, parsedContent: undefined });
+
+    await runProcess();
+
+    expect(mockAuditService.logTransactional).not.toHaveBeenCalled();
+    expect(mockAuditService.log).not.toHaveBeenCalled();
+  });
+
+  // Reliability fix — a "successful" analysis can never exist without its
+  // usage event: if the transactional audit write fails, the whole
+  // transaction (result + ATS report + audit log) rolls back together, so
+  // the outer catch marks the analysis 'failed' instead of silently
+  // reporting success with untracked usage.
+  it('marks the analysis failed when the transactional audit write fails, rather than reporting success with untracked usage', async () => {
+    mockAnalysisRepo.findOneByOrFail.mockResolvedValue({
+      id: 'analysis-1',
+      userId: 'user-1',
+      jobDescription: 'Looking for a backend engineer with Kubernetes experience.',
+    });
+    mockAiService.runAnalysis.mockResolvedValue({
+      result: { match_score: 70, suggestions: [], ats_keywords: [] },
+      modelUsed: 'gpt-4o',
+      tokensUsed: 100,
+    });
+    mockAuditService.logTransactional.mockRejectedValueOnce(new Error('DB unavailable'));
+
+    await runProcess();
+
+    expect(mockAnalysisRepo.update).toHaveBeenCalledWith('analysis-1', { status: 'failed' });
+    expect(mockEventEmitter.emit).not.toHaveBeenCalledWith('analysis.completed', expect.anything());
   });
 });

@@ -1,6 +1,6 @@
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import {
   ForbiddenException,
@@ -15,6 +15,7 @@ import { TailoringEntity } from '../../entities/tailoring.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { CvService } from '../cv/cv.service';
+import { AuditService } from '../audit/audit.service';
 import type { CvContent, TailoringDecision, TailoringSuggestion } from '@cvpilot/shared';
 
 const MOCK_USER = { id: 'user-1', clerkId: 'clerk-1', plan: 'pro' };
@@ -182,6 +183,7 @@ describe('TailoringService', () => {
     create: jest.fn(),
     save: jest.fn(),
     update: jest.fn(),
+    delete: jest.fn(),
     findOne: jest.fn(),
     findOneBy: jest.fn(),
     findOneByOrFail: jest.fn(),
@@ -197,6 +199,21 @@ describe('TailoringService', () => {
     createTailored: jest.fn(),
   };
   const mockTailoringAiService = { runTailoring: jest.fn() };
+  const mockAuditService = {
+    log: jest.fn(),
+    logTransactional: jest.fn(),
+    countDistinctEntitiesSince: jest.fn(),
+  };
+  // Reliability fix: runTailoring()'s success path now writes the tailoring
+  // result/status and the audit usage event inside one short DB transaction
+  // (see tailoring.service.ts) — mirrors the dataSource.transaction()
+  // mocking pattern already used elsewhere in this codebase.
+  const mockManager = { update: jest.fn(), create: jest.fn(), save: jest.fn() };
+  const mockDataSource = {
+    transaction: jest.fn(async (cb: (manager: typeof mockManager) => Promise<void>) =>
+      cb(mockManager),
+    ),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -207,7 +224,9 @@ describe('TailoringService', () => {
         { provide: UserService, useValue: mockUserService },
         { provide: BillingService, useValue: mockBillingService },
         { provide: CvService, useValue: mockCvService },
+        { provide: AuditService, useValue: mockAuditService },
         { provide: TailoringAiService, useValue: mockTailoringAiService },
+        { provide: getDataSourceToken(), useValue: mockDataSource },
       ],
     }).compile();
 
@@ -217,9 +236,13 @@ describe('TailoringService', () => {
     mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
     mockBillingService.getUserPlan.mockResolvedValue('pro');
     mockRepo.count.mockResolvedValue(0);
+    mockAuditService.countDistinctEntitiesSince.mockResolvedValue(0);
     mockRepo.create.mockReturnValue(MOCK_TAILORING);
     mockRepo.save.mockResolvedValue(MOCK_TAILORING);
     mockCvService.findById.mockResolvedValue(MOCK_CV);
+    mockDataSource.transaction.mockImplementation(
+      async (cb: (manager: typeof mockManager) => Promise<void>) => cb(mockManager),
+    );
   });
 
   // ─── submit() ─────────────────────────────────────────────────────────────────
@@ -388,6 +411,55 @@ describe('TailoringService', () => {
       expect(result.status).toBe('applied');
       expect(result.decisions).toEqual(applied.decisions);
       expect(result.tailoredCv).toEqual(applied.tailoredCv);
+    });
+  });
+
+  // ─── deleteTailoring() ──────────────────────────────────────────────────────
+  // Genuine hard delete — see the doc comment on deleteTailoring() itself
+  // for why this can never cascade to the master/tailored CV rows.
+
+  describe('deleteTailoring()', () => {
+    it("deletes the caller's own tailoring by id after the ownership lookup", async () => {
+      mockRepo.findOne.mockResolvedValue(MOCK_DONE_TAILORING);
+      mockRepo.delete.mockResolvedValue({ affected: 1 });
+
+      await service.deleteTailoring('clerk-1', 'tailor-1');
+
+      expect(mockRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'tailor-1', userId: 'user-1' },
+        relations: ['masterCv', 'tailoredCv'],
+      });
+      expect(mockRepo.delete).toHaveBeenCalledWith('tailor-1');
+    });
+
+    it("throws NotFoundException and never deletes when the tailoring belongs to another user (findOneForUser's userId scoping already excludes it)", async () => {
+      mockRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.deleteTailoring('clerk-1', 'tailor-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(mockRepo.delete).not.toHaveBeenCalled();
+    });
+
+    it('a repeat delete 404s via the same ownership lookup, once the row is gone', async () => {
+      mockRepo.findOne.mockResolvedValueOnce(MOCK_DONE_TAILORING).mockResolvedValueOnce(null);
+      mockRepo.delete.mockResolvedValue({ affected: 1 });
+
+      await service.deleteTailoring('clerk-1', 'tailor-1');
+      await expect(service.deleteTailoring('clerk-1', 'tailor-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(mockRepo.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it('only deletes the targeted tailoring by its own id — never touches other rows', async () => {
+      mockRepo.findOne.mockResolvedValue({ ...MOCK_DONE_TAILORING, id: 'tailor-2' });
+      mockRepo.delete.mockResolvedValue({ affected: 1 });
+
+      await service.deleteTailoring('clerk-1', 'tailor-2');
+
+      expect(mockRepo.delete).toHaveBeenCalledWith('tailor-2');
+      expect(mockRepo.delete).not.toHaveBeenCalledWith('tailor-1');
     });
   });
 
@@ -582,12 +654,56 @@ describe('TailoringService', () => {
     it('sets status to processing then done on success', async () => {
       await service.runTailoring('tailor-1');
 
-      expect(mockRepo.update).toHaveBeenNthCalledWith(1, 'tailor-1', { status: 'processing' });
-      expect(mockRepo.update).toHaveBeenNthCalledWith(
-        2,
+      // 'processing' is set directly, before the transaction opens.
+      expect(mockRepo.update).toHaveBeenCalledWith('tailor-1', { status: 'processing' });
+      // Reliability fix: the final 'done' write happens inside the
+      // dataSource.transaction() (see tailoring.service.ts), via `manager`
+      // rather than the injected repo directly.
+      expect(mockManager.update).toHaveBeenCalledWith(
+        TailoringEntity,
         'tailor-1',
         expect.objectContaining({ status: 'done' }),
       );
+    });
+
+    // Quota-refund fix — durable usage logging (see usage-actions.ts):
+    // checkTailoringLimit() counts these audit_logs records, not live
+    // tailorings rows, to compute monthly usage — so a genuine success must
+    // log exactly once, keyed by this tailoring's own userId/id. Reliability
+    // fix: written via logTransactional(), inside the same transaction as
+    // the tailoring update above.
+    it('logs a durable usage record via AuditService on genuine success', async () => {
+      await service.runTailoring('tailor-1');
+
+      expect(mockAuditService.logTransactional).toHaveBeenCalledWith(mockManager, {
+        userId: 'user-1',
+        action: 'tailoring.generated',
+        entityType: 'tailoring',
+        entityId: 'tailor-1',
+      });
+    });
+
+    it('never logs a usage record when the tailoring fails', async () => {
+      mockTailoringAiService.runTailoring.mockRejectedValue(new Error('AI provider error'));
+
+      await service.runTailoring('tailor-1');
+
+      expect(mockRepo.update).toHaveBeenCalledWith('tailor-1', { status: 'failed' });
+      expect(mockAuditService.logTransactional).not.toHaveBeenCalled();
+      expect(mockAuditService.log).not.toHaveBeenCalled();
+    });
+
+    // Reliability fix — a "successful" tailoring can never exist without its
+    // usage event: if the transactional audit write fails, the whole
+    // transaction (result + audit log) rolls back together, so the outer
+    // catch marks the tailoring 'failed' instead of silently reporting
+    // success with untracked usage.
+    it('marks the tailoring failed when the transactional audit write fails, rather than reporting success with untracked usage', async () => {
+      mockAuditService.logTransactional.mockRejectedValueOnce(new Error('DB unavailable'));
+
+      await service.runTailoring('tailor-1');
+
+      expect(mockRepo.update).toHaveBeenCalledWith('tailor-1', { status: 'failed' });
     });
 
     it('persists suggestions sorted by priority then section regardless of AI output order', async () => {
@@ -653,7 +769,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       const ids = saved.suggestions.map((s) => s.id);
@@ -696,7 +812,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       const persistedNames = saved.suggestions.map((s) => s.suggestedContent);
@@ -725,7 +841,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       expect(saved.suggestions.map((s) => s.suggestedContent)).toEqual(['REST APIs']);
@@ -754,7 +870,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       expect(saved.suggestions).toHaveLength(0);
@@ -779,7 +895,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       expect(saved.suggestions).toHaveLength(1);
@@ -814,7 +930,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       expect(saved.suggestions).toHaveLength(0);
@@ -852,7 +968,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       expect(saved.suggestions).toHaveLength(0);
@@ -876,7 +992,7 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      const saved = (mockRepo.update.mock.calls[1] as unknown[])[1] as {
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
         suggestions: TailoringSuggestion[];
       };
       expect(saved.suggestions).toHaveLength(0);
@@ -893,7 +1009,8 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
-      expect(mockRepo.update).toHaveBeenLastCalledWith(
+      expect(mockManager.update).toHaveBeenCalledWith(
+        TailoringEntity,
         'tailor-1',
         expect.objectContaining({
           suggestions: [],
