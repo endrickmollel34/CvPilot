@@ -12,11 +12,12 @@ import { CvModule } from '../cv/cv.module';
 import { AnalysisModule } from '../analysis/analysis.module';
 import { AuditModule } from '../audit/audit.module';
 import { R2StorageService } from '../../common/services/r2-storage.service';
+import { QUEUE_JOB_RETENTION } from '../../common/constants/queue-retention';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([CoverLetterEntity]),
-    BullModule.registerQueue({ name: 'cover-letter' }),
+    BullModule.registerQueue({ name: 'cover-letter', defaultJobOptions: QUEUE_JOB_RETENTION }),
     BillingModule,
     UserModule,
     CvModule,

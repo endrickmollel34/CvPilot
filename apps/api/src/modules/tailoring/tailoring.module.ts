@@ -11,11 +11,12 @@ import { CvModule } from '../cv/cv.module';
 import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
 import { AuditModule } from '../audit/audit.module';
+import { QUEUE_JOB_RETENTION } from '../../common/constants/queue-retention';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([TailoringEntity]),
-    BullModule.registerQueue({ name: 'cv-tailoring' }),
+    BullModule.registerQueue({ name: 'cv-tailoring', defaultJobOptions: QUEUE_JOB_RETENTION }),
     CvModule,
     BillingModule,
     UserModule,

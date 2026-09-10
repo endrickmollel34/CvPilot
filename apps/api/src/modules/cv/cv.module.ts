@@ -10,11 +10,12 @@ import { CvEntity } from '../../entities/cv.entity';
 import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
 import { R2StorageService } from '../../common/services/r2-storage.service';
+import { QUEUE_JOB_RETENTION } from '../../common/constants/queue-retention';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([CvEntity]),
-    BullModule.registerQueue({ name: 'cv-parsing' }),
+    BullModule.registerQueue({ name: 'cv-parsing', defaultJobOptions: QUEUE_JOB_RETENTION }),
     BillingModule,
     UserModule,
   ],
