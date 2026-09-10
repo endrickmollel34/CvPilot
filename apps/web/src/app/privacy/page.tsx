@@ -103,14 +103,16 @@ export default function PrivacyPage() {
         <h2>4. AI processing of your content</h2>
         <p>
           To generate match scores, suggestions, tailored CVs, and cover letters, CVPilot sends
-          relevant parts of your CV content and any job description you supply to third-party AI
-          providers — currently OpenAI, with Anthropic configured as a fallback provider used if the
-          primary provider is unavailable. These providers process your content solely to generate
-          the response returned to you within CVPilot; we do not separately publish or share this
-          content with anyone else. We do not control, and this policy does not cover, these
-          providers&rsquo; own data-handling practices beyond what is necessary to provide the
-          Service — please refer to the respective provider for details of how they handle data
-          submitted through their APIs.
+          relevant parts of your CV content and any job description you supply to a third-party AI
+          provider. OpenAI is currently used to provide these AI-powered features. CVPilot may
+          support additional AI providers, such as Anthropic, as optional fallback or alternative
+          providers when configured — no such additional provider is currently active in production,
+          so no user data is currently sent to it. Whichever provider we actively use processes your
+          content solely to generate the response returned to you within CVPilot; we do not
+          separately publish or share this content with anyone else. We do not control, and this
+          policy does not cover, these providers&rsquo; own data-handling practices beyond what is
+          necessary to provide the Service — please refer to the respective provider for details of
+          how they handle data submitted through their APIs.
         </p>
       </section>
 
@@ -129,8 +131,10 @@ export default function PrivacyPage() {
             files.
           </li>
           <li>
-            <strong>OpenAI</strong> and, as a fallback, <strong>Anthropic</strong> — AI processing
-            of CV and job-description content, as described above.
+            <strong>OpenAI</strong> — AI processing of CV and job-description content, as described
+            above. CVPilot may also support additional AI providers, such as{' '}
+            <strong>Anthropic</strong>, as an optional fallback or alternative when configured; no
+            such additional provider is currently active.
           </li>
           <li>
             <strong>Stripe</strong> — payment processing and subscription billing.
@@ -138,6 +142,12 @@ export default function PrivacyPage() {
           <li>
             <strong>Resend</strong> — our transactional email infrastructure, used if we need to
             send you account or service-related email.
+          </li>
+          <li>
+            <strong>Upstash</strong> — Redis infrastructure used for asynchronous job processing
+            (for example, while a CV analysis, tailoring request, or cover letter is being
+            generated). Job data may include identifiers and job-description content necessary to
+            complete that processing.
           </li>
           <li>
             Our application and database hosting providers, who store and run the Service and its
