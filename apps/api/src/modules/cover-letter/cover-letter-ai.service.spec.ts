@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 
 import { CoverLetterAiService, describeError } from './cover-letter-ai.service';
+import type { CvEvidence } from './cv-evidence.util';
 
 // openai and @anthropic-ai/sdk are real HTTP clients constructed directly in
 // CoverLetterAiService's constructor — mocked here so tests never make
@@ -652,6 +653,367 @@ describe('CoverLetterAiService', () => {
     it('falls back to a safe label for a non-Error, non-string throw', () => {
       expect(describeError({ weird: true })).toBe('Unknown error');
       expect(describeError(undefined)).toBe('Unknown error');
+    });
+  });
+
+  // ─── Reliability fix: repair-aware retries ─────────────────────────────────
+  // Production Railway evidence: OpenAI calls succeed, but the SAME kind of
+  // over-claiming phrasing (python, java, rest api, postgresql, mysql, git,
+  // docker, ci/cd, cloud platforms, database design, authentication) gets
+  // regenerated blind on every retry with no knowledge of what was rejected,
+  // exhausting all attempts even though a corrected draft would pass.
+  describe('repair-aware retries', () => {
+    type ChatMessage = { role: string; content: string };
+    function messagesFromCall(call: unknown): ChatMessage[] {
+      return (call as [{ messages: ChatMessage[] }])[0].messages;
+    }
+
+    // Mirrors the exact production failure set: technologies genuinely
+    // listed as skills only, never demonstrated in a work bullet.
+    const PRODUCTION_SKILL_EVIDENCE: CvEvidence = {
+      experienceText:
+        'Acme Tanzania — Junior Developer. Built and maintained internal tooling, fixed bugs ' +
+        'reported by users, and wrote unit tests for existing services.',
+      skillsOnlyTerms: [
+        'Python',
+        'Java',
+        'REST APIs',
+        'PostgreSQL',
+        'MySQL',
+        'Git',
+        'Docker',
+        'CI/CD',
+        'Cloud platforms',
+        'Database design',
+      ],
+    };
+
+    const overclaimingLetter = (companyName: string, jobTitle: string) =>
+      `Dear Hiring Manager,\n\nI am writing to apply for the ${jobTitle} role at ${companyName}. ` +
+      'I have extensive hands-on experience with Python and Java, and I have led production ' +
+      `PostgreSQL and MySQL deployments using Git and Docker.\n\nSincerely, contributing to ${companyName}.`;
+
+    // ─── (5)/(6): repair feedback reaches attempt 2, safely ────────────────
+
+    it('sends attempt 2 a private repair instruction naming only the rejected terms, absent from attempt 1', async () => {
+      const badLetter = overclaimingLetter('Acme Corp', 'Backend Engineer');
+      const goodLetter = cleanLetter('Acme Corp', 'Backend Engineer');
+      mockOpenAICreate
+        .mockResolvedValueOnce(openAiResponse(badLetter))
+        .mockResolvedValueOnce(openAiResponse(goodLetter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        PRODUCTION_SKILL_EVIDENCE,
+      );
+
+      expect(result.content).toBe(goodLetter);
+      // (7) The repaired attempt succeeded — no need to exhaust all 3.
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(2);
+
+      const firstMessages = messagesFromCall(mockOpenAICreate.mock.calls[0]);
+      const secondMessages = messagesFromCall(mockOpenAICreate.mock.calls[1]);
+
+      // Attempt 1 carries no repair note — nothing to repair yet.
+      expect(firstMessages).toHaveLength(2);
+      expect(firstMessages.every((m) => m.role !== 'system' || m.content.length > 0)).toBe(true);
+
+      // Attempt 2 carries an extra system message with the repair instruction.
+      expect(secondMessages).toHaveLength(3);
+      const repairMessage = secondMessages[1]!;
+      expect(repairMessage.role).toBe('system');
+
+      // (6) Only the unsupported term names appear — never the CV, the job
+      // description, the previous draft, or any excerpt of its wording.
+      expect(repairMessage.content).toContain('python');
+      expect(repairMessage.content).toContain('java');
+      expect(repairMessage.content).toContain('postgresql');
+      expect(repairMessage.content).toContain('mysql');
+      expect(repairMessage.content).toContain('git');
+      expect(repairMessage.content).toContain('docker');
+      expect(repairMessage.content).not.toContain(NO_TECH_CV_TEXT);
+      expect(repairMessage.content).not.toContain(JOB_DESCRIPTION);
+      expect(repairMessage.content).not.toContain(badLetter);
+      expect(repairMessage.content).not.toContain('extensive hands-on experience');
+    });
+
+    // Accumulation fix: a fresh grounding rejection must ADD to the repair
+    // feedback, never REPLACE it — otherwise an earlier attempt's flagged
+    // term could legitimately reappear in a later draft once it's no
+    // longer mentioned in the (now stale, replaced) feedback.
+    it('accumulates unsupported terms across grounding failures — attempt 3 still names attempt 1s terms, not only attempt 2s new one', async () => {
+      // Anthropic is not configured in production — this test uses the
+      // OpenAI-only path to match that reality (see the module report).
+      const noAnthropicService = buildService(undefined);
+
+      const pythonDockerLetter = (companyName: string, jobTitle: string) =>
+        `Dear Hiring Manager,\n\nI am writing to apply for the ${jobTitle} role at ${companyName}. ` +
+        'I have extensive hands-on experience with Python and Docker from several academic and ' +
+        `personal projects.\n\nSincerely, contributing to ${companyName}.`;
+      const postgresqlLetter = (companyName: string, jobTitle: string) =>
+        `Dear Hiring Manager,\n\nI am writing to apply for the ${jobTitle} role at ${companyName}. ` +
+        'I have extensive hands-on experience with PostgreSQL from several production projects.' +
+        `\n\nSincerely, contributing to ${companyName}.`;
+
+      const attempt1Letter = pythonDockerLetter('Acme Corp', 'Backend Engineer'); // rejects: python, docker
+      const attempt2Letter = postgresqlLetter('Acme Corp', 'Backend Engineer'); // avoids python/docker; rejects: postgresql (new)
+      const attempt3Letter = cleanLetter('Acme Corp', 'Backend Engineer'); // clean — succeeds
+
+      mockOpenAICreate
+        .mockResolvedValueOnce(openAiResponse(attempt1Letter))
+        .mockResolvedValueOnce(openAiResponse(attempt2Letter))
+        .mockResolvedValueOnce(openAiResponse(attempt3Letter));
+
+      const result = await noAnthropicService.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        PRODUCTION_SKILL_EVIDENCE,
+      );
+
+      expect(result.content).toBe(attempt3Letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+
+      const attempt1Messages = messagesFromCall(mockOpenAICreate.mock.calls[0]);
+      const attempt2Messages = messagesFromCall(mockOpenAICreate.mock.calls[1]);
+      const attempt3Messages = messagesFromCall(mockOpenAICreate.mock.calls[2]);
+
+      // Attempt 1: no repair note yet.
+      expect(attempt1Messages).toHaveLength(2);
+
+      // Attempt 2: repair note names only attempt 1's rejected terms.
+      expect(attempt2Messages).toHaveLength(3);
+      const attempt2Repair = attempt2Messages[1]!.content;
+      expect(attempt2Repair).toContain('python');
+      expect(attempt2Repair).toContain('docker');
+      expect(attempt2Repair).not.toContain('postgresql');
+
+      // Attempt 3: repair note names ALL THREE terms — python and docker
+      // (attempt 1) ACCUMULATED with postgresql (attempt 2's new
+      // rejection). This is the exact required behavior: an earlier
+      // rejection's terms must not disappear just because a later attempt
+      // introduced a different violation.
+      expect(attempt3Messages).toHaveLength(3);
+      const attempt3Repair = attempt3Messages[1]!.content;
+      expect(attempt3Repair).toContain('python');
+      expect(attempt3Repair).toContain('docker');
+      expect(attempt3Repair).toContain('postgresql');
+
+      // Still privacy-safe: no CV/job description/generated-letter content.
+      expect(attempt3Repair).not.toContain(NO_TECH_CV_TEXT);
+      expect(attempt3Repair).not.toContain(JOB_DESCRIPTION);
+      expect(attempt3Repair).not.toContain(attempt1Letter);
+      expect(attempt3Repair).not.toContain(attempt2Letter);
+    });
+
+    it('does not lose accumulated repair terms when an intervening attempt fails for a non-grounding reason (e.g. a timeout)', async () => {
+      const noAnthropicService = buildService(undefined);
+
+      const pythonDockerLetter = (companyName: string, jobTitle: string) =>
+        `Dear Hiring Manager,\n\nI am writing to apply for the ${jobTitle} role at ${companyName}. ` +
+        'I have extensive hands-on experience with Python and Docker from several academic and ' +
+        `personal projects.\n\nSincerely, contributing to ${companyName}.`;
+
+      const attempt1Letter = pythonDockerLetter('Acme Corp', 'Backend Engineer');
+      const attempt3Letter = cleanLetter('Acme Corp', 'Backend Engineer');
+
+      mockOpenAICreate
+        .mockResolvedValueOnce(openAiResponse(attempt1Letter))
+        .mockRejectedValueOnce(new Error('Request timed out')) // non-grounding failure
+        .mockResolvedValueOnce(openAiResponse(attempt3Letter));
+
+      const result = await noAnthropicService.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        PRODUCTION_SKILL_EVIDENCE,
+      );
+
+      expect(result.content).toBe(attempt3Letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+
+      // Attempt 3's repair note still carries attempt 1's terms — the
+      // intervening timeout did not clear the accumulated set.
+      const attempt3Messages = messagesFromCall(mockOpenAICreate.mock.calls[2]);
+      expect(attempt3Messages).toHaveLength(3);
+      expect(attempt3Messages[1]!.content).toContain('python');
+      expect(attempt3Messages[1]!.content).toContain('docker');
+    });
+
+    it('never exposes the repair instruction to the caller — only the final clean content is returned', async () => {
+      const badLetter = overclaimingLetter('Acme Corp', 'Backend Engineer');
+      const goodLetter = cleanLetter('Acme Corp', 'Backend Engineer');
+      mockOpenAICreate
+        .mockResolvedValueOnce(openAiResponse(badLetter))
+        .mockResolvedValueOnce(openAiResponse(goodLetter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        PRODUCTION_SKILL_EVIDENCE,
+      );
+
+      expect(result.content).toBe(goodLetter);
+      expect(result).not.toHaveProperty('repairInstruction');
+      expect(result.content).not.toContain('previous draft was rejected');
+    });
+
+    // ─── (9): the final grounding guard still runs on every attempt ────────
+
+    it('still validates a repaired attempt — a second rejection is caught, not blindly trusted', async () => {
+      const badLetter1 = overclaimingLetter('Acme Corp', 'Backend Engineer');
+      const badLetter2 = 'Too short to pass validation.'; // still rejected, different reason
+      const goodLetter = cleanLetter('Acme Corp', 'Backend Engineer');
+      mockOpenAICreate
+        .mockResolvedValueOnce(openAiResponse(badLetter1))
+        .mockResolvedValueOnce(openAiResponse(badLetter2))
+        .mockResolvedValueOnce(openAiResponse(goodLetter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        PRODUCTION_SKILL_EVIDENCE,
+      );
+
+      expect(result.content).toBe(goodLetter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+
+      // Attempt 3 still carries a repair note (repair feedback persists
+      // across the intervening non-grounding "too short" rejection).
+      const thirdMessages = messagesFromCall(mockOpenAICreate.mock.calls[2]);
+      expect(thirdMessages).toHaveLength(3);
+      expect(thirdMessages[1]!.content).toContain('python');
+    });
+
+    // ─── (8): continuous fabrication still exhausts all attempts ───────────
+
+    it('still fails after all attempts when the model keeps fabricating the same unsupported experience', async () => {
+      const badLetter = overclaimingLetter('Acme Corp', 'Backend Engineer');
+      mockOpenAICreate.mockResolvedValue(openAiResponse(badLetter));
+      mockAnthropicCreate.mockResolvedValue(anthropicResponse(badLetter));
+
+      await expect(
+        service.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+          PRODUCTION_SKILL_EVIDENCE,
+        ),
+      ).rejects.toThrow('Cover letter generation failed after retries');
+
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(3);
+
+      // Repair feedback carries over into the Anthropic fallback too — same
+      // underlying CV/evidence, same rejection reason still applies.
+      const anthropicCall = (mockAnthropicCreate.mock.calls[0] as [{ system: string }])[0];
+      expect(anthropicCall.system).toContain('python');
+      expect(anthropicCall.system).not.toContain(badLetter);
+    });
+
+    // ─── (1)/(2)/(3): genuinely unsupported vs. genuinely safe phrasing ────
+
+    it('(1) still rejects a genuinely unsupported professional-experience claim even with repair feedback available', async () => {
+      const badLetter =
+        'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role at Acme Corp. ' +
+        'I have hands-on Kubernetes experience from leading several production deployments.' +
+        '\n\nSincerely, contributing to Acme Corp.';
+      mockOpenAICreate.mockResolvedValue(openAiResponse(badLetter));
+      mockAnthropicCreate.mockResolvedValue(anthropicResponse(badLetter));
+
+      await expect(
+        service.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Acme Corp',
+          'professional',
+          PRODUCTION_SKILL_EVIDENCE, // Kubernetes is not listed anywhere
+        ),
+      ).rejects.toThrow('Cover letter generation failed after retries');
+    });
+
+    it('(2) does not treat a CV-listed skill as unsupported (first attempt passes, no repair needed)', async () => {
+      const letter =
+        'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role at Acme Corp. ' +
+        'I have knowledge of Python and Git from my coursework and personal projects. I am excited ' +
+        'about the opportunity to bring this foundation to your team and contribute to meaningful ' +
+        'work from day one.\n\nThank you for your consideration.\n\nSincerely, contributing to Acme Corp.';
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        PRODUCTION_SKILL_EVIDENCE, // Python and Git are genuinely listed skills
+      );
+
+      expect(result.content).toBe(letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('(3) describing an unsupported job requirement as a learning interest passes without rejection', async () => {
+      const letter =
+        'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role at Acme Corp. ' +
+        "The role's focus on CI/CD and cloud platforms is particularly appealing to me, and I am " +
+        'eager to grow my experience in these areas.\n\nSincerely, contributing to Acme Corp.';
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        PRODUCTION_SKILL_EVIDENCE,
+      );
+
+      expect(result.content).toBe(letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
+    });
+
+    // ─── (4): soft-skill wording does not create obvious false positives ───
+
+    it('(4) a modest, CV-listed soft-skill mention does not trigger a technology-possession-style rejection', async () => {
+      const evidenceWithSoftSkill: CvEvidence = {
+        ...PRODUCTION_SKILL_EVIDENCE,
+        skillsOnlyTerms: [...PRODUCTION_SKILL_EVIDENCE.skillsOnlyTerms, 'Problem-solving'],
+      };
+      const letter =
+        'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role at Acme Corp. ' +
+        'I have strong problem-solving experience from my coursework and side projects, and I have ' +
+        'knowledge of Python.\n\nSincerely, contributing to Acme Corp.';
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+        evidenceWithSoftSkill,
+      );
+
+      expect(result.content).toBe(letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
     });
   });
 });

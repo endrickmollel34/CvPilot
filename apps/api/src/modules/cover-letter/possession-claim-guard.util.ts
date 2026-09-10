@@ -410,6 +410,18 @@ function resolveGoverningTier(
  * earlier in the same sentence ("my familiarity with Python, Java...") into
  * a requirement for work-history evidence, rejecting valid letters until all
  * retries were exhausted.
+ *
+ * Reliability fix (see the module report): a SOFT_SKILL_TERMS entry never
+ * held to the strict experienceText-only bar even when its governing claim
+ * pattern is nominally 'experience' tier. Unlike a technology — which has a
+ * meaningful "used it on the job" vs. "merely listed" distinction — a soft
+ * skill has no equivalent clean split; requiring one to be found in
+ * experienceText specifically (and not, say, a structured CV's own skills
+ * entry naming that trait) was an unintentionally stricter bar than hard
+ * technologies get for a genuinely modest, honestly-hedged claim. Hard
+ * technologies/concepts keep their existing tier bars completely unchanged
+ * — including the deliberate skills-list-only capability-claim strictness
+ * (see the "day one" test in possession-claim-guard.util.spec.ts).
  */
 export function findUnsupportedPossessionClaims(
   letterText: string,
@@ -427,7 +439,9 @@ export function findUnsupportedPossessionClaims(
         const tier = resolveGoverningTier(termIndex, spans);
         if (tier === undefined || isExemptTier(tier)) continue;
 
-        const requiredEvidence = tier === 'experience' ? evidence.experienceText : fullEvidenceText;
+        const isSoftSkill = (SOFT_SKILL_TERMS as readonly string[]).includes(term);
+        const requiredEvidence =
+          tier === 'experience' && !isSoftSkill ? evidence.experienceText : fullEvidenceText;
         if (!containsWholePhrase(requiredEvidence, term)) {
           violations.push(`"${term}" in: "${sentence}"`);
         }

@@ -206,6 +206,33 @@ describe('findUnsupportedPossessionClaims()', () => {
       );
       expect(violations).toEqual([]);
     });
+
+    // Reliability fix (see the module report): a soft skill has no meaningful
+    // "used on the job" vs. "merely listed" split the way a technology does,
+    // so an EXPERIENCE-tier soft-skill claim is now satisfied by the skill
+    // simply being named ANYWHERE in the CV — including a structured CV's
+    // own skills entry — not experienceText specifically. Hard
+    // technologies/capability-claim strictness (see the "day one" test
+    // above) are completely unaffected by this change.
+    it('does not flag an experience-level soft-skill claim when the skill is listed as a skills-only entry (fix)', () => {
+      const evidenceWithSoftSkillListed: CvEvidence = {
+        experienceText: SKILL_ONLY_EVIDENCE.experienceText,
+        skillsOnlyTerms: [...SKILL_ONLY_EVIDENCE.skillsOnlyTerms, 'Problem-solving'],
+      };
+      const violations = findUnsupportedPossessionClaims(
+        'I have extensive problem-solving experience from my academic and professional work.',
+        evidenceWithSoftSkillListed,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('still flags the same experience-level soft-skill claim when it is not listed anywhere at all', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I have extensive problem-solving experience from my academic and professional work.',
+        SKILL_ONLY_EVIDENCE, // no soft skills listed in either tier
+      );
+      expect(violations.some((v) => v.includes('problem-solving'))).toBe(true);
+    });
   });
 
   // ─── V2.1 — unsupported FUTURE CAPABILITY claims ───────────────────────────

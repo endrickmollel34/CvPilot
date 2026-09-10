@@ -165,40 +165,143 @@ function resolveGuardEvidence(cvText: string, evidence: CvEvidence | undefined):
   return evidence ?? { experienceText: cvText, skillsOnlyTerms: [] };
 }
 
+export type CoverLetterValidationCategory =
+  | 'too_short'
+  | 'too_long'
+  | 'placeholder_brackets'
+  | 'missing_company_name'
+  | 'missing_job_title'
+  | 'unsupported_possession_claim';
+
+/**
+ * Structured validateOutput() failure — reliability fix (see the module
+ * report). Carries a machine-readable `category` and, for a grounding
+ * rejection, the specific `unsupportedTerms` — just enough for the
+ * repair-aware retry loop below to build corrective feedback for the NEXT
+ * generation attempt without parsing a human-readable log string. Extends
+ * Error (not a bare data object) so it still flows through the existing
+ * describeError()/logger.error() plumbing unchanged.
+ *
+ * `unsupportedTerms` deliberately carries ONLY the term names (e.g.
+ * "python", "docker") — never the full generated sentence, the CV, the job
+ * description, or any secret. Same privacy-safe-logging property the
+ * diagnostic-loss fix already established for this Error's `.message`.
+ */
+export class CoverLetterValidationError extends Error {
+  constructor(
+    message: string,
+    public readonly category: CoverLetterValidationCategory,
+    public readonly unsupportedTerms: string[] = [],
+  ) {
+    super(message);
+    this.name = 'CoverLetterValidationError';
+  }
+}
+
 function validateOutput(
   text: string,
   companyName: string,
   jobTitle: string,
   guardEvidence: CvEvidence,
 ): void {
-  if (text.length < 200) throw new Error('Generated cover letter is too short (min 200 chars)');
-  if (text.length > 5000) throw new Error('Generated cover letter is too long (max 5000 chars)');
+  if (text.length < 200) {
+    throw new CoverLetterValidationError(
+      'Generated cover letter is too short (min 200 chars)',
+      'too_short',
+    );
+  }
+  if (text.length > 5000) {
+    throw new CoverLetterValidationError(
+      'Generated cover letter is too long (max 5000 chars)',
+      'too_long',
+    );
+  }
   if (text.includes('[') || text.includes(']')) {
-    throw new Error('Generated cover letter contains placeholder brackets');
+    throw new CoverLetterValidationError(
+      'Generated cover letter contains placeholder brackets',
+      'placeholder_brackets',
+    );
   }
   if (!text.toLowerCase().includes(companyName.toLowerCase())) {
-    throw new Error(`Cover letter does not mention company name: ${companyName}`);
+    throw new CoverLetterValidationError(
+      `Cover letter does not mention company name: ${companyName}`,
+      'missing_company_name',
+    );
   }
   if (!text.toLowerCase().includes(jobTitle.toLowerCase())) {
-    throw new Error(`Cover letter does not mention job title: ${jobTitle}`);
+    throw new CoverLetterValidationError(
+      `Cover letter does not mention job title: ${jobTitle}`,
+      'missing_job_title',
+    );
   }
 
   const claims = findUnsupportedPossessionClaims(text, guardEvidence);
   if (claims.length > 0) {
-    // Privacy-safe logging: this message now reaches Railway logs via the
-    // retry loop's describeError() (see the intermittent-generation-fix
-    // module report), so it must carry the unsupported term(s) — the
-    // actual diagnostic signal — without the full generated sentence each
-    // was found in. findUnsupportedPossessionClaims()'s own return format
-    // is `"<term>" in: "<generated sentence>"`; only the term half (before
-    // ` in: `) is safe/useful to persist in a production log. The guard's
-    // own detection logic and its own return value are unchanged — this
-    // only affects how the violation is summarized for this thrown Error.
-    const unsupportedTerms = claims.map((claim) => claim.split(' in: ')[0]).join('; ');
-    throw new Error(
-      `Generated cover letter claims possession of technology/skill not supported by the CV: ${unsupportedTerms}`,
+    // Privacy-safe logging (unchanged from the diagnostic-loss fix): only
+    // the unsupported term(s) are kept, never the full generated sentence
+    // each was found in. findUnsupportedPossessionClaims()'s own return
+    // format is `"<term>" in: "<generated sentence>"`; only the quoted
+    // term half (before ` in: `) is safe/useful here. Deduplicated since
+    // the same term can be flagged in more than one sentence.
+    const unsupportedTerms = [
+      ...new Set(claims.map((claim) => claim.split(' in: ')[0]!.replace(/^"|"$/g, ''))),
+    ];
+    throw new CoverLetterValidationError(
+      `Generated cover letter claims possession of technology/skill not supported by the CV: ${unsupportedTerms.map((t) => `"${t}"`).join('; ')}`,
+      'unsupported_possession_claim',
+      unsupportedTerms,
     );
   }
+}
+
+/**
+ * Repair-aware retries (see the module report): a private, backend-only
+ * developer instruction added to the NEXT generation attempt after a
+ * grounding rejection, so retries stop blindly re-sampling the same
+ * over-claiming phrasing and instead correct specifically what was
+ * rejected. Never surfaced to the user — it only ever reaches the OpenAI/
+ * Anthropic request, never the returned `content`. Built entirely from
+ * `unsupportedTerms` (already privacy-sanitized term names) — never the
+ * CV, the job description, or the previous draft's actual text.
+ */
+function buildRepairInstruction(unsupportedTerms: string[]): string {
+  return (
+    `Your previous draft was rejected because it claimed experience or possession — not supported ` +
+    `by CANDIDATE_EVIDENCE — for: ${unsupportedTerms.join(', ')}. Rewrite the letter without making ` +
+    'unsupported possession/experience claims for these items. You may: omit them; describe them only ' +
+    "as part of the role's requirements without claiming the candidate has them; express genuine " +
+    'interest or eagerness to learn them; or use weaker, knowledge/familiarity-only wording ONLY where ' +
+    'CANDIDATE_EVIDENCE genuinely supports that wording for that specific item. Do not invent new ' +
+    'evidence, and do not simply repeat the same claim in different words.'
+  );
+}
+
+/**
+ * Merges a caught error's unsupported terms (if any) into the running,
+ * deduplicated set accumulated across ALL attempts so far — a NEW rejection
+ * must never make an EARLIER one's terms disappear from the repair
+ * instruction, or an already-flagged term could legitimately reappear in a
+ * later draft (attempt 1 rejected for python/docker, attempt 2's repaired
+ * draft introduces a NEW violation for postgresql: attempt 3 must still be
+ * told about python and docker, not just postgresql). A caught error with
+ * no term-level feedback (a network/timeout error, or a structural
+ * validation failure like "too short") leaves the set untouched — there is
+ * nothing new to add, and nothing already accumulated should be lost.
+ */
+function accumulateUnsupportedTerms(err: unknown, seen: Set<string>): void {
+  if (err instanceof CoverLetterValidationError) {
+    for (const term of err.unsupportedTerms) seen.add(term);
+  }
+}
+
+/** Builds the current repair instruction from the accumulated term set, or
+ *  undefined when nothing has been flagged yet — retrying blindly is still
+ *  correct in that case; there is nothing specific to repair. */
+function repairInstructionFor(seen: Set<string>): string | undefined {
+  if (seen.size > 0) {
+    return buildRepairInstruction([...seen]);
+  }
+  return undefined;
 }
 
 export interface CoverLetterAiResult {
@@ -263,15 +366,30 @@ export class CoverLetterAiService {
     const guardEvidence = resolveGuardEvidence(cvText, evidence);
 
     let lastError: unknown;
+    // Repair-aware retries (see the module report): unsupportedTermsSeen
+    // ACCUMULATES across every attempt (deduplicated) — a fresh grounding
+    // rejection ADDS to it rather than replacing it, so an earlier attempt's
+    // flagged term is never dropped from later feedback just because a
+    // subsequent draft introduced a different violation. Persists across an
+    // intervening non-grounding failure too (e.g. attempt 2 times out) —
+    // accumulateUnsupportedTerms() only ever adds, never clears.
+    const unsupportedTermsSeen = new Set<string>();
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.callOpenAI(userPrompt, companyName, jobTitle, guardEvidence);
+        return await this.callOpenAI(
+          userPrompt,
+          companyName,
+          jobTitle,
+          guardEvidence,
+          repairInstructionFor(unsupportedTermsSeen),
+        );
       } catch (err) {
         lastError = err;
         this.logger.warn(
           `OpenAI cover letter attempt ${attempt}/${MAX_ATTEMPTS} failed: ${describeError(err)}`,
         );
+        accumulateUnsupportedTerms(err, unsupportedTermsSeen);
       }
     }
 
@@ -284,12 +402,19 @@ export class CoverLetterAiService {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.callAnthropic(userPrompt, companyName, jobTitle, guardEvidence);
+        return await this.callAnthropic(
+          userPrompt,
+          companyName,
+          jobTitle,
+          guardEvidence,
+          repairInstructionFor(unsupportedTermsSeen),
+        );
       } catch (err) {
         lastError = err;
         this.logger.warn(
           `Anthropic cover letter attempt ${attempt}/${MAX_ATTEMPTS} failed: ${describeError(err)}`,
         );
+        accumulateUnsupportedTerms(err, unsupportedTermsSeen);
       }
     }
 
@@ -301,14 +426,22 @@ export class CoverLetterAiService {
     companyName: string,
     jobTitle: string,
     guardEvidence: CvEvidence,
+    repairInstruction?: string,
   ): Promise<CoverLetterAiResult> {
+    // The repair instruction (when present) rides as an additional system
+    // message rather than being appended to userPrompt — keeps it clearly
+    // separated as a developer-only correction, never mixed into the
+    // user-turn content the rest of buildUserPrompt() already constructed.
+    const messages: { role: 'system' | 'user'; content: string }[] = [
+      { role: 'system', content: SYSTEM_PROMPT_V1 },
+    ];
+    if (repairInstruction) messages.push({ role: 'system', content: repairInstruction });
+    messages.push({ role: 'user', content: userPrompt });
+
     const response = await this.openai.chat.completions.create({
       model: 'gpt-4o',
       temperature: 0.7,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT_V1 },
-        { role: 'user', content: userPrompt },
-      ],
+      messages,
     });
 
     const content = response.choices[0]?.message?.content?.trim() ?? '';
@@ -326,6 +459,7 @@ export class CoverLetterAiService {
     companyName: string,
     jobTitle: string,
     guardEvidence: CvEvidence,
+    repairInstruction?: string,
   ): Promise<CoverLetterAiResult> {
     // Unreachable in practice — generateCoverLetter() never enters the
     // Anthropic retry loop when this.anthropic is undefined — kept as a
@@ -334,11 +468,18 @@ export class CoverLetterAiService {
       throw new Error('Anthropic client is not configured');
     }
 
+    // Anthropic's API takes a single top-level `system` string rather than
+    // multiple system-role messages — the repair instruction is appended
+    // there instead of the messages array.
+    const system = repairInstruction
+      ? `${SYSTEM_PROMPT_V1}\n\n${repairInstruction}`
+      : SYSTEM_PROMPT_V1;
+
     const response = await this.anthropic.messages.create({
       model: 'claude-3-5-sonnet-20241022',
       max_tokens: 2048,
       temperature: 0.7,
-      system: SYSTEM_PROMPT_V1,
+      system,
       messages: [{ role: 'user', content: userPrompt }],
     });
 
