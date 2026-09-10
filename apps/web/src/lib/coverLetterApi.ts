@@ -134,6 +134,17 @@ export async function regenerateCoverLetter(
   return res.json() as Promise<CoverLetterDto>;
 }
 
+// Mirrors the backend's R2-first-then-DB deletion (see cover-letter.service.ts):
+// a 503 here means the stored PDF couldn't be cleaned up and the letter was
+// deliberately NOT deleted, so its backend-provided message is safe to show
+// as-is (it never contains R2 internals — see r2-storage.service.ts).
+export async function deleteCoverLetter(token: TokenSource, id: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/cover-letters/${id}`, token, { method: 'DELETE' });
+  if (res.ok || res.status === 204) return;
+  const body = await res.json().catch(() => ({}));
+  throwApiError(body, 'Could not delete this cover letter. Please try again.', res.status);
+}
+
 export async function downloadCoverLetterPdf(token: TokenSource, id: string): Promise<void> {
   const res = await authFetch(`${API_URL}/cover-letters/${id}/download`, token, {
     method: 'POST',

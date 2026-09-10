@@ -2,8 +2,9 @@
 
 import { useCallback, useDeferredValue, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@clerk/nextjs';
-import { Download } from 'lucide-react';
+import { Download, Trash2 } from 'lucide-react';
 
 import type { CvDto } from '@/lib/cvApi';
 import {
@@ -12,6 +13,7 @@ import {
   updateCoverLetter,
   regenerateCoverLetter,
   downloadCoverLetterPdf,
+  deleteCoverLetter,
   type CoverLetterDto,
   type CoverLetterTone,
   type UpdateCoverLetterParams,
@@ -139,6 +141,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
 
 export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill }: Props) {
   const { getToken } = useAuth();
+  const router = useRouter();
   const readyCvs = initialCvs.filter((c) => c.parseStatus === 'done');
 
   const [letter, setLetter] = useState<CoverLetterDto | null>(initialLetter ?? null);
@@ -168,8 +171,11 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
   const [mobileTab, setMobileTab] = useState<'edit' | 'preview'>('edit');
   const [submitting, setSubmitting] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const formError = useApiError();
   const downloadError = useApiError();
+  const deleteError = useApiError();
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Bumped by stopPolling()/startPolling() on every polling generation —
@@ -352,6 +358,21 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
     }
   }
 
+  async function handleDeleteLetter() {
+    if (!letter) return;
+    deleteError.clear();
+    setDeleting(true);
+    try {
+      await deleteCoverLetter(getToken, letter.id);
+      router.push('/cover-letters');
+    } catch (err) {
+      // Letter was not actually deleted — stay put and surface why.
+      deleteError.setFromError(err, 'Could not delete this cover letter. Please try again.');
+      setDeleting(false);
+      setConfirmingDelete(false);
+    }
+  }
+
   const deferredContent = useDeferredValue(content);
 
   const selectedCvContent =
@@ -394,9 +415,46 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
           {downloadError.message && (
             <span className="text-xs text-red-600">{downloadError.message}</span>
           )}
+          {deleteError.message && (
+            <span className="text-xs text-red-600">{deleteError.message}</span>
+          )}
         </div>
         <div className="flex items-center gap-3">
-          {letter && (
+          {letter && confirmingDelete && (
+            <div className="flex items-center gap-1.5">
+              <span className="hidden text-xs text-gray-500 sm:inline">
+                Delete? This cannot be undone.
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleDeleteLetter()}
+                disabled={deleting}
+                className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                {deleting ? 'Deleting…' : 'Confirm'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleting}
+                className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {letter && !confirmingDelete && (
+            <button
+              type="button"
+              onClick={() => setConfirmingDelete(true)}
+              aria-label="Delete cover letter"
+              title="Delete this cover letter? This cannot be undone."
+              className="flex items-center gap-1 text-xs text-gray-400 hover:text-red-600"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {letter && !confirmingDelete && (
             <Link href="/cover-letter" className="text-xs text-gray-500 hover:underline">
               New letter
             </Link>
