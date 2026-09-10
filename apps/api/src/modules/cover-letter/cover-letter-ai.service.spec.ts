@@ -387,13 +387,12 @@ describe('CoverLetterAiService', () => {
     expect(systemPrompt).toMatch(/dynamic and innovative environment/i); // boilerplate example listed
   });
 
-  // (I) Job-title validation investigation: the prompt's prior wording
-  // ("mention the job title naturally") did not require the model to
-  // reproduce the exact given string, which — combined with the tone
-  // contracts' encouragement to vary sentence structure — plausibly let a
-  // compound title like "Backend Software Engineer" get paraphrased into
-  // something validateOutput()'s exact-substring check would reject. This
-  // asserts the strengthened instruction actually reaches the model.
+  // (I) The prompt still asks the model to mention the exact given job
+  // title naturally (encouraging a faithful, role-specific letter) — this
+  // asserts that guidance still reaches the model. Note: validateOutput()
+  // no longer HARD-REQUIRES the body to reproduce it verbatim (see the
+  // "brittle structured-metadata presence" reliability fix below) — this
+  // is prompt-level guidance only, not a terminal pass/fail gate.
   it('(I) instructs the model to include the exact given job title verbatim', async () => {
     mockOpenAICreate.mockResolvedValue(
       openAiResponse(cleanLetter('Acme Corp', 'Backend Software Engineer')),
@@ -437,7 +436,12 @@ describe('CoverLetterAiService', () => {
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
   });
 
-  it('still rejects and retries on the pre-existing validations (e.g. missing company name)', async () => {
+  // Note: this fixture is short enough to fail the length check regardless
+  // of company/job-title content — kept named around its original intent
+  // (a structurally unusable draft) now that exact company/job-title body
+  // presence is no longer its own validation category (see the "brittle
+  // structured-metadata presence" reliability fix below).
+  it('still rejects and retries on other pre-existing validations (e.g. too short)', async () => {
     mockOpenAICreate.mockResolvedValue(
       openAiResponse('A letter that never mentions the employer at all, only the role title.'),
     );
@@ -457,6 +461,120 @@ describe('CoverLetterAiService', () => {
       // (too short, since this fixture is well under 200 chars) must
       // survive into the final error rather than a generic message.
     ).rejects.toThrow(/Cover letter generation failed after retries: .*too short/);
+  });
+
+  // ─── Reliability fix: brittle structured-metadata presence removed ────────
+  // Production Railway evidence: structured companyName = "Technova
+  // Solutioins" (a user-entered typo). The old validateOutput() required
+  // the AI-generated BODY to contain that exact string, case-insensitively
+  // — every one of the 3 OpenAI attempts (deterministically) failed since
+  // the model naturally normalized the spelling, exhausting retries for an
+  // otherwise perfectly usable letter. companyName/jobTitle are structured
+  // data already rendered verbatim in the recipient/letterhead block (see
+  // cover-letter-pdf.util.ts) — body repetition was never a grounding
+  // requirement, only a brittle proxy for "reads as written for this
+  // role." Removed as a terminal validator gate; the prompt still
+  // encourages natural inclusion (see the "(I)" test above).
+  describe('reliability fix: brittle company-name/job-title body presence', () => {
+    it('does not fail when the model normalizes a typo-containing structured company name differently in the body', async () => {
+      const structuredCompanyName = 'Technova Solutioins'; // exact production typo
+      const letter = cleanLetter('TechNova Solutions', 'Backend Engineer'); // model's normalized spelling
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        structuredCompanyName,
+        'professional',
+      );
+
+      expect(result.content).toBe(letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(1); // no retries burned by the mismatch
+    });
+
+    it('does not fail when the body refers to "your team" without repeating the company name at all', async () => {
+      const letter =
+        'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role. ' +
+        'My academic background in Computer Science, combined with hands-on project work building an ' +
+        'inventory tracking tool, has given me a solid foundation to build on. In my retail role I ' +
+        'regularly balanced competing priorities while handling customer queries.\n\n' +
+        'I would welcome the chance to bring this mindset to your team and grow alongside everyone. ' +
+        'Thank you for your consideration.\n\nSincerely';
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Technova Solutioins',
+        'professional',
+      );
+
+      expect(result.content).toBe(letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not fail when the body paraphrases the job title instead of repeating it exactly', async () => {
+      const letter =
+        'Dear Hiring Manager,\n\nI am writing to apply for the backend engineering role at Acme Corp. ' +
+        'My academic background in Computer Science, combined with hands-on project work building an ' +
+        'inventory tracking tool, has given me a solid foundation to build on. In my retail role I ' +
+        'regularly balanced competing priorities while handling customer queries.\n\n' +
+        'I would welcome the chance to bring this mindset to Acme Corp and grow alongside the team. ' +
+        'Thank you for your consideration.\n\nSincerely';
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
+
+      const result = await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Software Engineer', // structured jobTitle — never repeated verbatim in the body
+        'Acme Corp',
+        'professional',
+      );
+
+      expect(result.content).toBe(letter);
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('never mutates the structured companyName/jobTitle inputs, even when the body wording differs', async () => {
+      const structuredCompanyName = 'Technova Solutioins';
+      const structuredJobTitle = 'Backend Software Engineer';
+      const letter = cleanLetter('TechNova Solutions', 'backend engineering role');
+      mockOpenAICreate.mockResolvedValue(openAiResponse(letter));
+
+      await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        structuredJobTitle,
+        structuredCompanyName,
+        'professional',
+      );
+
+      // Persistence/rendering must still see exactly what the user typed —
+      // no autocorrection, no normalization, no mutation.
+      expect(structuredCompanyName).toBe('Technova Solutioins');
+      expect(structuredJobTitle).toBe('Backend Software Engineer');
+    });
+
+    it('a fabricated unsupported professional-experience claim is still rejected regardless of company/job-title wording', async () => {
+      const badLetter =
+        'Dear Hiring Manager,\n\nI am writing to apply for the Backend Engineer role at TechNova Solutions. ' +
+        'I have hands-on Kubernetes experience from leading several production deployments.' +
+        '\n\nSincerely, contributing to the team.';
+      mockOpenAICreate.mockResolvedValue(openAiResponse(badLetter));
+      mockAnthropicCreate.mockResolvedValue(anthropicResponse(badLetter));
+
+      await expect(
+        service.generateCoverLetter(
+          NO_TECH_CV_TEXT,
+          JOB_DESCRIPTION,
+          'Backend Engineer',
+          'Technova Solutioins',
+          'professional',
+        ),
+      ).rejects.toThrow('claims possession of technology/skill not supported by the CV');
+    });
   });
 
   // ─── Anthropic is a genuinely optional fallback ────────────────────────────

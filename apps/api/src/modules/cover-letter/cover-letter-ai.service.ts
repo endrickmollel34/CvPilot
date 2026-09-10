@@ -169,8 +169,6 @@ export type CoverLetterValidationCategory =
   | 'too_short'
   | 'too_long'
   | 'placeholder_brackets'
-  | 'missing_company_name'
-  | 'missing_job_title'
   | 'unsupported_possession_claim';
 
 /**
@@ -198,12 +196,7 @@ export class CoverLetterValidationError extends Error {
   }
 }
 
-function validateOutput(
-  text: string,
-  companyName: string,
-  jobTitle: string,
-  guardEvidence: CvEvidence,
-): void {
+function validateOutput(text: string, guardEvidence: CvEvidence): void {
   if (text.length < 200) {
     throw new CoverLetterValidationError(
       'Generated cover letter is too short (min 200 chars)',
@@ -222,18 +215,25 @@ function validateOutput(
       'placeholder_brackets',
     );
   }
-  if (!text.toLowerCase().includes(companyName.toLowerCase())) {
-    throw new CoverLetterValidationError(
-      `Cover letter does not mention company name: ${companyName}`,
-      'missing_company_name',
-    );
-  }
-  if (!text.toLowerCase().includes(jobTitle.toLowerCase())) {
-    throw new CoverLetterValidationError(
-      `Cover letter does not mention job title: ${jobTitle}`,
-      'missing_job_title',
-    );
-  }
+  // Reliability fix (see the module report): companyName/jobTitle are
+  // structured data, already rendered verbatim in the recipient/letterhead
+  // block (see cover-letter-pdf.util.ts and the live preview) — the AI-
+  // generated BODY repeating them exact-substring, case-insensitively, was
+  // never a grounding or usability requirement, only a proxy for "does this
+  // read as written for this role." That proxy is brittle: a user typo in
+  // companyName (e.g. "Technova Solutioins"), the model's own spelling
+  // normalization (e.g. "TechNova Solutions"), or a natural paraphrase like
+  // "your team" / "the backend engineering role" all produce an otherwise
+  // valid, professionally-written letter that this exact-substring check
+  // rejected unconditionally — deterministically, on every one of the 3
+  // retries, since resampling the same prompt never fixes a fixed typo or a
+  // model's spelling preference. Removed as a terminal validator gate
+  // rather than replaced with fuzzy matching (explicitly out of scope —
+  // see the module report): the prompt still asks the model to mention the
+  // company/role naturally (buildUserPrompt() below), this just stops
+  // enforcing verbatim reproduction as a hard pass/fail condition. This
+  // does NOT touch the possession-claim grounding guard immediately below,
+  // which still fails a letter that fabricates unsupported experience.
 
   const claims = findUnsupportedPossessionClaims(text, guardEvidence);
   if (claims.length > 0) {
@@ -379,8 +379,6 @@ export class CoverLetterAiService {
       try {
         return await this.callOpenAI(
           userPrompt,
-          companyName,
-          jobTitle,
           guardEvidence,
           repairInstructionFor(unsupportedTermsSeen),
         );
@@ -404,8 +402,6 @@ export class CoverLetterAiService {
       try {
         return await this.callAnthropic(
           userPrompt,
-          companyName,
-          jobTitle,
           guardEvidence,
           repairInstructionFor(unsupportedTermsSeen),
         );
@@ -423,8 +419,6 @@ export class CoverLetterAiService {
 
   private async callOpenAI(
     userPrompt: string,
-    companyName: string,
-    jobTitle: string,
     guardEvidence: CvEvidence,
     repairInstruction?: string,
   ): Promise<CoverLetterAiResult> {
@@ -445,7 +439,7 @@ export class CoverLetterAiService {
     });
 
     const content = response.choices[0]?.message?.content?.trim() ?? '';
-    validateOutput(content, companyName, jobTitle, guardEvidence);
+    validateOutput(content, guardEvidence);
 
     return {
       content,
@@ -456,8 +450,6 @@ export class CoverLetterAiService {
 
   private async callAnthropic(
     userPrompt: string,
-    companyName: string,
-    jobTitle: string,
     guardEvidence: CvEvidence,
     repairInstruction?: string,
   ): Promise<CoverLetterAiResult> {
@@ -489,7 +481,7 @@ export class CoverLetterAiService {
     }
 
     const content = block.text.trim();
-    validateOutput(content, companyName, jobTitle, guardEvidence);
+    validateOutput(content, guardEvidence);
 
     return {
       content,
