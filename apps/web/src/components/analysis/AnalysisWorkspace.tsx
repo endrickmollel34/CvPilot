@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@clerk/nextjs';
-import { Upload } from 'lucide-react';
 
 import type { CvDto } from '@/lib/cvApi';
 import { getUploadUrl, confirmUpload, getCv } from '@/lib/cvApi';
@@ -13,13 +12,10 @@ import { useApiError } from '@/hooks/useApiError';
 import { ActionableError } from '@/components/ui/ActionableError';
 import { AnalysisResults } from '@/components/analysis/AnalysisResults';
 import { UsageHint } from '@/components/billing/UsageCard';
+import { CvDropzone } from '@/components/cv/CvDropzone';
+import { validateCvFile } from '@/components/cv/resolveDroppedCvFile';
 
 type Phase = 'setup' | 'processing' | 'results';
-
-const ACCEPTED_TYPES = [
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-];
 
 export function AnalysisWorkspace({
   initialCvs,
@@ -59,11 +55,10 @@ export function AnalysisWorkspace({
     [],
   );
 
-  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!ACCEPTED_TYPES.includes(file.type)) {
-      uploadError.setMessage('Only PDF and DOCX files are supported.');
+  async function handleFileSelected(file: File) {
+    const validation = validateCvFile(file);
+    if (!validation.valid) {
+      uploadError.setMessage(validation.message);
       return;
     }
     uploadError.clear();
@@ -113,7 +108,6 @@ export function AnalysisWorkspace({
       uploadError.setFromError(err, 'Upload failed. Please try again.');
     } finally {
       setUploading(false);
-      e.target.value = '';
     }
   }
 
@@ -238,20 +232,14 @@ export function AnalysisWorkspace({
             </p>
           )}
 
-          <label className="flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-gray-300 bg-white p-5 text-center hover:border-indigo-400 transition-colors">
-            <Upload className="h-6 w-6 text-gray-400" />
-            <span className="text-sm font-medium text-gray-700">
-              {uploading ? 'Uploading…' : 'Upload a CV'}
-            </span>
-            <span className="text-xs text-gray-400">PDF or DOCX, max 5 MB</span>
-            <input
-              type="file"
-              accept=".pdf,.docx"
-              onChange={(e) => void handleFileChange(e)}
-              disabled={uploading}
-              className="sr-only"
-            />
-          </label>
+          <CvDropzone
+            className="rounded-lg border-2 border-dashed p-5"
+            label={uploading ? 'Uploading…' : 'Upload a CV'}
+            hint="PDF or DOCX, max 5 MB"
+            disabled={uploading}
+            onFile={(file) => void handleFileSelected(file)}
+            onRejected={(message) => uploadError.setMessage(message)}
+          />
           {uploadError.message && (
             <p className="mt-2 text-xs text-red-600">
               <ActionableError message={uploadError.message} quota={uploadError.quota} />
