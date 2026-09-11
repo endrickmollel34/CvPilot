@@ -637,6 +637,31 @@ describe('AnalysisService — submit() / process()', () => {
     expect(mockAnalysisRepo.update).toHaveBeenCalledWith('analysis-1', { status: 'failed' });
   });
 
+  // AI data minimization (see ai-safe-cv-text.util.ts, shared with Cover
+  // Letter): the raw parsedContent used to be sent to the AI provider
+  // completely untouched, exposing whatever contact detail the uploaded
+  // file happened to contain. Analysis's match-scoring never needs it.
+  it('sends AI-redacted CV text (no email) to the AI provider, never the raw parsedContent', async () => {
+    mockCvService.findById.mockResolvedValue({
+      ...MOCK_CV,
+      parsedContent:
+        'Jane Doe\njane.doe@example.com\n\n' +
+        'Senior Backend Engineer at Acme Corp with 5 years of Node.js experience.',
+    });
+    mockAiService.runAnalysis.mockResolvedValue({
+      result: { match_score: 70, suggestions: [], ats_keywords: [] },
+      modelUsed: 'gpt-4o',
+      tokensUsed: 100,
+    });
+
+    await runProcess();
+
+    const [cvTextArg] = mockAiService.runAnalysis.mock.calls[0] as [string, string];
+    expect(cvTextArg).not.toContain('jane.doe@example.com');
+    expect(cvTextArg).toContain('Acme Corp');
+    expect(cvTextArg).toContain('Node.js');
+  });
+
   // ─── Quota-refund fix — durable usage logging ──────────────────────────────
   // BillingService counts these audit_logs records, not live analyses rows,
   // to compute monthly usage (see usage-actions.ts) — so a genuine success

@@ -106,4 +106,58 @@ describe('resolveCoverLetterCvText()', () => {
   it('treats whitespace-only parsedContent as unusable', () => {
     expect(resolveCoverLetterCvText(cv({ parsedContent: '   ' }))).toBeUndefined();
   });
+
+  // ─── AI data minimization (shared with Analysis — see ai-safe-cv-text.util.ts) ─
+
+  it('redacts an email address and LinkedIn profile URL from an uploaded CV before it reaches the AI', () => {
+    const text = resolveCoverLetterCvText(
+      cv({
+        source: 'upload',
+        parsedContent:
+          'Jane Doe\njane.doe@example.com | linkedin.com/in/janedoe\n\nSenior Engineer at Acme Corp.',
+      }),
+    );
+
+    expect(text).not.toContain('jane.doe@example.com');
+    expect(text).not.toContain('linkedin.com/in/janedoe');
+    expect(text).toContain('Acme Corp');
+  });
+
+  it('does not mutate the original CvEntity.parsedContent while redacting', () => {
+    const source = cv({
+      source: 'upload',
+      parsedContent: 'Contact: jane@example.com — Senior Engineer at Acme Corp.',
+    });
+
+    resolveCoverLetterCvText(source);
+
+    expect(source.parsedContent).toBe('Contact: jane@example.com — Senior Engineer at Acme Corp.');
+  });
+
+  it('includes fullName but excludes email/phone/location/linkedIn/website for a structured CV (Cover Letter needs the name to address the letter)', () => {
+    const text = resolveCoverLetterCvText(
+      cv({
+        source: 'prefill',
+        content: {
+          ...STRUCTURED_CONTENT,
+          personalDetails: {
+            fullName: 'Jane Doe',
+            email: 'jane@example.com',
+            phone: '+1 555 123 4567',
+            location: '123 Main St',
+            linkedIn: 'linkedin.com/in/janedoe',
+            website: 'janedoe.dev',
+            jobTitle: 'Engineer',
+          },
+        },
+      }),
+    );
+
+    expect(text).toContain('Jane Doe');
+    expect(text).not.toContain('jane@example.com');
+    expect(text).not.toContain('+1 555 123 4567');
+    expect(text).not.toContain('123 Main St');
+    expect(text).not.toContain('linkedin.com/in/janedoe');
+    expect(text).not.toContain('janedoe.dev');
+  });
 });

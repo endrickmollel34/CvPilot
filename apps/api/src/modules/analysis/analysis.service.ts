@@ -23,6 +23,7 @@ import { CvService } from '../cv/cv.service';
 import { BillingService } from '../billing/billing.service';
 import { AuditService } from '../audit/audit.service';
 import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
+import { resolveAiSafeCvText } from '../../common/utils/ai-safe-cv-text.util';
 import { AiService } from './ai.service';
 import { groundSuggestions } from './recommendation-grounding.util';
 import { classifyAndVerifyKeywords, computeAtsScore } from './ats-keyword.util';
@@ -111,8 +112,19 @@ export class AnalysisService extends WorkerHost {
         throw new Error(`CV ${cvId} has no parsed content`);
       }
 
+      // AI data minimization — see ai-safe-cv-text.util.ts (shared with
+      // Cover Letter). Analysis's match-scoring never needs the candidate's
+      // name, email, phone, location, or LinkedIn/website — includeFullName
+      // is false here (unlike Cover Letter, which needs the name to address
+      // the letter). cv.parsedContent itself is never mutated; this is a
+      // freshly-derived, redacted copy sent to the AI provider only.
+      const cvTextForAi = resolveAiSafeCvText(cv, { includeFullName: false });
+      if (!cvTextForAi) {
+        throw new Error(`CV ${cvId} has no usable content for analysis`);
+      }
+
       const { result, modelUsed, tokensUsed } = await this.aiService.runAnalysis(
-        cv.parsedContent,
+        cvTextForAi,
         analysis.jobDescription,
       );
 
@@ -188,7 +200,14 @@ export class AnalysisService extends WorkerHost {
       this.eventEmitter.emit('analysis.completed', { analysisId });
       this.logger.log(`Analysis ${analysisId} completed (score: ${result.match_score})`);
     } catch (err) {
-      this.logger.error(`Analysis ${analysisId} failed`, err);
+      // Privacy-safe logging: never pass the raw SDK error object through —
+      // an OpenAI/Anthropic client error's .message is not a guaranteed-
+      // safe value (it is provider-authored, not code-authored, so it could
+      // in principle echo back request/prompt detail). Only the error's
+      // .name (a fixed, enumerable type) is logged, matching the same
+      // convention already used for Stripe/R2 errors elsewhere in this app.
+      const errorType = err instanceof Error ? err.name : 'UnknownError';
+      this.logger.error(`Analysis ${analysisId} failed (${errorType})`);
       await this.analysisRepo.update(analysisId, { status: 'failed' });
     }
   }

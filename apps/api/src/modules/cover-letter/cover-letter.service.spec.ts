@@ -357,6 +357,42 @@ describe('CoverLetterService', () => {
     });
   });
 
+  // AI data minimization (see ai-safe-cv-text.util.ts, shared with
+  // Analysis): an uploaded CV's parsedContent used to be sent to the AI
+  // provider completely untouched, exposing whatever contact detail the
+  // source file happened to contain.
+  it('sends AI-redacted CV text (no email/LinkedIn) to the AI provider for an uploaded CV, never the raw parsedContent', async () => {
+    mockAiService.generateCoverLetter.mockResolvedValue({
+      content: 'Dear Hiring Manager, ...',
+      modelUsed: 'gpt-4o',
+      tokensUsed: 300,
+    });
+    mockCvService.findById.mockResolvedValue({
+      ...MOCK_CV,
+      parsedContent:
+        'Jane Doe\njane.doe@example.com | linkedin.com/in/janedoe\n\n' +
+        'Senior Engineer at Acme Corp with 3 years of TypeScript experience.',
+    });
+
+    await service.process({
+      data: {
+        coverLetterId: 'letter-1',
+        userId: 'user-1',
+        cvId: 'cv-1',
+        jobTitle: 'Senior Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Lead backend development.',
+        tone: 'professional',
+      },
+    } as unknown as Job<CoverLetterJobData>);
+
+    const [cvTextArg] = mockAiService.generateCoverLetter.mock.calls[0] as [string];
+    expect(cvTextArg).not.toContain('jane.doe@example.com');
+    expect(cvTextArg).not.toContain('linkedin.com/in/janedoe');
+    expect(cvTextArg).toContain('Acme Corp');
+    expect(cvTextArg).toContain('TypeScript');
+  });
+
   // Reliability fix — a "successful" letter can never exist without its
   // usage event: if the transactional audit write fails, the whole
   // transaction (content/status update + audit log) rolls back together, so

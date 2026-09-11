@@ -81,6 +81,15 @@ export const AnalysisResponseSchema = z.object({
 
 export type AnalysisAiResult = z.infer<typeof AnalysisResponseSchema>;
 
+// Privacy-safe logging helper: only a caught error's .name is ever safe to
+// log — never its .message (provider-authored, not code-authored) or the
+// raw error object itself, either of which could in principle echo back
+// request/prompt content. Matches the same convention already used for
+// Stripe/R2 errors elsewhere in this app.
+function errorType(err: unknown): string {
+  return err instanceof Error ? err.name : 'UnknownError';
+}
+
 interface AiCallResult {
   result: AnalysisAiResult;
   modelUsed: string;
@@ -110,7 +119,13 @@ export class AiService {
       try {
         return await this.callOpenAI(cvText, jobDescription);
       } catch (err) {
-        this.logger.warn(`OpenAI analysis attempt ${attempt}/${MAX_ATTEMPTS} failed`, err);
+        // Privacy-safe logging: only the error's .name (a fixed, enumerable
+        // SDK error type) is logged — never the raw error object or its
+        // .message, which is provider-authored and not a guaranteed-safe
+        // value (it could in principle echo back request/prompt detail).
+        this.logger.warn(
+          `OpenAI analysis attempt ${attempt}/${MAX_ATTEMPTS} failed (${errorType(err)})`,
+        );
       }
     }
 
@@ -125,7 +140,9 @@ export class AiService {
       try {
         return await this.callAnthropic(cvText, jobDescription);
       } catch (err) {
-        this.logger.warn(`Anthropic analysis attempt ${attempt}/${MAX_ATTEMPTS} failed`, err);
+        this.logger.warn(
+          `Anthropic analysis attempt ${attempt}/${MAX_ATTEMPTS} failed (${errorType(err)})`,
+        );
       }
     }
 
