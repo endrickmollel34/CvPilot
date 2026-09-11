@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 
 import type { CvContent } from '@cvpilot/shared';
+import { MAX_FILE_SIZE_BYTES } from './dto/generate-upload-url.dto';
 import { CvService } from './cv.service';
 import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
@@ -20,12 +21,23 @@ import { PdfGenerationService } from './pdf-generation.service';
 import { R2StorageService } from '../../common/services/r2-storage.service';
 
 // S3Client is constructed unconditionally in CvService's constructor —
-// mocked so tests never attempt a real R2 connection.
+// mocked so tests never attempt a real R2 connection. mockS3Send is a
+// single shared jest.fn() (matching the pattern already established in
+// cover-letter.service.spec.ts) so confirmUpload() tests can control/assert
+// the HeadObjectCommand/CopyObjectCommand calls CvService makes through its
+// one `this.s3` instance.
+const mockS3Send = jest.fn();
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn().mockImplementation(() => ({ send: jest.fn() })),
-  PutObjectCommand: jest.fn(),
-  GetObjectCommand: jest.fn(),
-  DeleteObjectCommand: jest.fn(),
+  S3Client: jest
+    .fn()
+    .mockImplementation(() => ({ send: (...args: unknown[]) => mockS3Send(...args) })),
+  PutObjectCommand: jest.fn().mockImplementation((input: unknown) => ({ __cmd: 'Put', input })),
+  GetObjectCommand: jest.fn().mockImplementation((input: unknown) => ({ __cmd: 'Get', input })),
+  DeleteObjectCommand: jest
+    .fn()
+    .mockImplementation((input: unknown) => ({ __cmd: 'Delete', input })),
+  HeadObjectCommand: jest.fn().mockImplementation((input: unknown) => ({ __cmd: 'Head', input })),
+  CopyObjectCommand: jest.fn().mockImplementation((input: unknown) => ({ __cmd: 'Copy', input })),
 }));
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn().mockResolvedValue('https://r2.example.com/signed-put-url'),
@@ -43,7 +55,13 @@ function makeConfig() {
   return { getOrThrow: jest.fn((key: string) => vals[key]) };
 }
 
-describe('CvService — confirmUpload() ownership validation', () => {
+// ─── Upload hardening — verified-size pending-upload flow ──────────────────
+// See the upload-hardening audit report: dto.fileSizeBytes was previously
+// trusted outright (a presigned PUT has no server-side size enforcement).
+// confirmUpload() now HEADs the actual pending-cvs/ object in R2 and treats
+// ONLY that ContentLength as authoritative, before promoting it to the
+// permanent cvs/ prefix, writing the DB row, and enqueueing parsing.
+describe('CvService — confirmUpload() verified-size pending upload flow', () => {
   let service: CvService;
 
   const mockCvRepo = { create: jest.fn(), save: jest.fn() };
@@ -52,13 +70,44 @@ describe('CvService — confirmUpload() ownership validation', () => {
   const mockBillingService = { canPerformAction: jest.fn() };
   const mockPrefillService = {};
   const mockPdfService = {};
+  const mockR2Storage = { deleteObject: jest.fn() };
+
+  const PENDING_KEY = `pending-cvs/${MOCK_USER.id}/some-uuid-resume.pdf`;
+  const PERMANENT_KEY = `cvs/${MOCK_USER.id}/some-uuid-resume.pdf`;
 
   const validDto = {
-    r2ObjectKey: `cvs/${MOCK_USER.id}/some-uuid-resume.pdf`,
+    r2ObjectKey: PENDING_KEY,
     fileName: 'resume.pdf',
-    fileSizeBytes: 1024,
+    fileSizeBytes: 1024, // non-authoritative — see the HEAD-based tests below
     mimeType: 'application/pdf',
   };
+
+  function headInput(command: unknown) {
+    return command as { __cmd: string; input: { Bucket: string; Key: string } };
+  }
+
+  // Routes every this.s3.send() call by the tagged command type set up in
+  // the module mock above — lets each test control HEAD/COPY behavior
+  // independently without caring about call order.
+  function mockS3Routes(opts: {
+    headContentLength?: number | 'missing';
+    headError?: Error;
+    copyError?: Error;
+  }) {
+    mockS3Send.mockImplementation((command: unknown) => {
+      const { __cmd } = headInput(command);
+      if (__cmd === 'Head') {
+        if (opts.headError) return Promise.reject(opts.headError);
+        if (opts.headContentLength === 'missing') return Promise.resolve({});
+        return Promise.resolve({ ContentLength: opts.headContentLength });
+      }
+      if (__cmd === 'Copy') {
+        if (opts.copyError) return Promise.reject(opts.copyError);
+        return Promise.resolve({});
+      }
+      return Promise.resolve({});
+    });
+  }
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -73,7 +122,7 @@ describe('CvService — confirmUpload() ownership validation', () => {
         { provide: BillingService, useValue: mockBillingService },
         { provide: PrefillExtractionService, useValue: mockPrefillService },
         { provide: PdfGenerationService, useValue: mockPdfService },
-        { provide: R2StorageService, useValue: { deleteObject: jest.fn() } },
+        { provide: R2StorageService, useValue: mockR2Storage },
         { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
       ],
     }).compile();
@@ -86,49 +135,217 @@ describe('CvService — confirmUpload() ownership validation', () => {
       Promise.resolve({ id: 'cv-1', ...(data as object) }),
     );
     mockQueue.add.mockResolvedValue({ id: 'job-1' });
+    mockR2Storage.deleteObject.mockResolvedValue(true);
+    mockS3Routes({ headContentLength: 1024 * 1024 }); // 1 MB default — under the limit
   });
 
-  it("accepts a key within the authenticated user's own namespace", async () => {
+  // ── A: valid object under 5 MB ──
+  it('A: promotes a valid under-5MB pending object — HEAD, copy, pending cleanup, verified DB values, parsing enqueued', async () => {
+    mockS3Routes({ headContentLength: 1024 * 1024 });
+
     const result = await service.confirmUpload('clerk-1', validDto);
 
-    expect(mockCvRepo.create).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: MOCK_USER.id, r2ObjectKey: validDto.r2ObjectKey }),
+    // HEAD called against the pending key
+    expect(mockS3Send).toHaveBeenCalledWith(
+      expect.objectContaining({ __cmd: 'Head', input: { Bucket: 'bucket', Key: PENDING_KEY } }),
     );
-    expect(mockCvRepo.save).toHaveBeenCalled();
+    // Permanent copy occurs, with CopySource passed as the SDK's own
+    // documented raw "bucket/key" form — NOT manually URL-encoded (see the
+    // dedicated CopySource test below for why that matters).
+    expect(mockS3Send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        __cmd: 'Copy',
+        input: {
+          Bucket: 'bucket',
+          CopySource: `bucket/${PENDING_KEY}`,
+          Key: PERMANENT_KEY,
+        },
+      }),
+    );
+    // Pending object removed after successful promotion
+    expect(mockR2Storage.deleteObject).toHaveBeenCalledWith(PENDING_KEY);
+    // DB stores the permanent key and the actual HEAD-measured size, not
+    // the client-declared dto.fileSizeBytes (1024)
+    expect(mockCvRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ r2ObjectKey: PERMANENT_KEY, fileSizeBytes: 1024 * 1024 }),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({ r2ObjectKey: PERMANENT_KEY, fileSizeBytes: 1024 * 1024 }),
+    );
+    // Parsing enqueued only after everything above succeeded
     expect(mockQueue.add).toHaveBeenCalledWith('parse-cv', { cvId: 'cv-1' });
-    expect(result).toEqual(expect.objectContaining({ r2ObjectKey: validDto.r2ObjectKey }));
   });
 
-  it("rejects a key inside another user's namespace", async () => {
-    const foreignKeyDto = {
-      ...validDto,
-      r2ObjectKey: 'cvs/some-other-user-id/leaked-uuid-resume.pdf',
-    };
+  // CopySource correctness (see the pre-commit hardening report): the SDK
+  // sends CopySource verbatim as the x-amz-copy-source header and does NOT
+  // percent-encode it — confirmed by directly inspecting the installed
+  // @aws-sdk/client-s3's outgoing request. A manually encodeURIComponent()-ed
+  // value turns the required literal `/` separators into `%2F`, which R2/S3
+  // never re-decodes, breaking the bucket/key split the API expects. This
+  // app's own key charset (see safeFileName in generateUploadUrl()) already
+  // strips everything outside [a-zA-Z0-9._-], so no character occurring in a
+  // real pendingKey ever needs percent-encoding in the first place.
+  it('passes CopySource in the raw "bucket/key" form, with literal `/` separators, not manually percent-encoded', async () => {
+    mockS3Routes({ headContentLength: 1024 });
 
-    await expect(service.confirmUpload('clerk-1', foreignKeyDto)).rejects.toThrow(
-      ForbiddenException,
+    await service.confirmUpload('clerk-1', validDto);
+
+    const copyCall = mockS3Send.mock.calls.find(
+      ([command]: [{ __cmd?: string }]) => command.__cmd === 'Copy',
+    );
+    const copySource = (copyCall?.[0] as { input: { CopySource: string } }).input.CopySource;
+
+    expect(copySource).toBe(`bucket/${PENDING_KEY}`);
+    expect(copySource).not.toContain('%2F');
+    expect(copySource).not.toContain('%');
+  });
+
+  it('produces a correctly-formed CopySource even for an original filename containing spaces/unsafe characters, via the existing safeFileName sanitization — no manual encoding is needed or applied', async () => {
+    // Mirrors generateUploadUrl()'s own sanitization: an original filename
+    // like "My Resume (final)!.pdf" becomes a key containing only
+    // [a-zA-Z0-9._-] before it's ever used as an R2 key — so the pending
+    // key confirmUpload receives here already reflects that, exactly as a
+    // real client would send it back.
+    const sanitizedSuffix = 'My_Resume__final__.pdf'; // spaces/parens/! → "_"
+    const pendingKeyWithSanitizedName = `pending-cvs/${MOCK_USER.id}/${sanitizedSuffix}`;
+    const permanentKeyWithSanitizedName = `cvs/${MOCK_USER.id}/${sanitizedSuffix}`;
+    mockS3Routes({ headContentLength: 1024 });
+
+    await service.confirmUpload('clerk-1', {
+      ...validDto,
+      r2ObjectKey: pendingKeyWithSanitizedName,
+    });
+
+    const copyCall = mockS3Send.mock.calls.find(
+      ([command]: [{ __cmd?: string }]) => command.__cmd === 'Copy',
+    );
+    const input = (copyCall?.[0] as { input: { CopySource: string; Key: string } }).input;
+
+    expect(input.CopySource).toBe(`bucket/${pendingKeyWithSanitizedName}`);
+    expect(input.Key).toBe(permanentKeyWithSanitizedName);
+    expect(input.CopySource).not.toContain('%');
+  });
+
+  // ── B: exactly 5 MB ──
+  it('B: accepts an object of exactly 5 MB (boundary)', async () => {
+    mockS3Routes({ headContentLength: MAX_FILE_SIZE_BYTES });
+
+    await expect(service.confirmUpload('clerk-1', validDto)).resolves.toEqual(
+      expect.objectContaining({ fileSizeBytes: MAX_FILE_SIZE_BYTES }),
+    );
+    expect(mockR2Storage.deleteObject).not.toHaveBeenCalledWith(
+      expect.stringContaining('oversized'),
+    );
+    expect(mockCvRepo.save).toHaveBeenCalled();
+  });
+
+  // ── C: over 5 MB ──
+  it('C: rejects an object over 5 MB — deletes the pending object, no promotion, no DB save, no parsing', async () => {
+    mockS3Routes({ headContentLength: MAX_FILE_SIZE_BYTES + 1 });
+
+    await expect(service.confirmUpload('clerk-1', validDto)).rejects.toThrow(
+      'CV files must be 5 MB or smaller.',
+    );
+    expect(mockR2Storage.deleteObject).toHaveBeenCalledWith(PENDING_KEY);
+    expect(mockS3Send).not.toHaveBeenCalledWith(expect.objectContaining({ __cmd: 'Copy' }));
+    expect(mockCvRepo.create).not.toHaveBeenCalled();
+    expect(mockCvRepo.save).not.toHaveBeenCalled();
+    expect(mockQueue.add).not.toHaveBeenCalled();
+  });
+
+  // ── D: client lies about size ──
+  it('D: a lying dto.fileSizeBytes (1 byte) is ignored — rejected based on the real 50MB HEAD result', async () => {
+    const lyingDto = { ...validDto, fileSizeBytes: 1 };
+    mockS3Routes({ headContentLength: 50 * 1024 * 1024 });
+
+    await expect(service.confirmUpload('clerk-1', lyingDto)).rejects.toThrow(
+      'CV files must be 5 MB or smaller.',
+    );
+    expect(mockCvRepo.save).not.toHaveBeenCalled();
+    expect(mockQueue.add).not.toHaveBeenCalled();
+  });
+
+  // ── E: missing object ──
+  it('E: a missing pending object (HEAD NotFound) is rejected — no DB save, no parsing', async () => {
+    const notFound = Object.assign(new Error('Not Found'), { name: 'NotFound' });
+    mockS3Routes({ headError: notFound });
+
+    await expect(service.confirmUpload('clerk-1', validDto)).rejects.toThrow(NotFoundException);
+    expect(mockCvRepo.create).not.toHaveBeenCalled();
+    expect(mockCvRepo.save).not.toHaveBeenCalled();
+    expect(mockQueue.add).not.toHaveBeenCalled();
+  });
+
+  // ── F: R2 HEAD / network failure ──
+  it('F: a generic R2 HEAD failure fails closed — no DB save, no parsing', async () => {
+    const networkError = Object.assign(new Error('ECONNRESET'), { name: 'NetworkingError' });
+    mockS3Routes({ headError: networkError });
+
+    await expect(service.confirmUpload('clerk-1', validDto)).rejects.toThrow(
+      ServiceUnavailableException,
     );
     expect(mockCvRepo.create).not.toHaveBeenCalled();
     expect(mockCvRepo.save).not.toHaveBeenCalled();
     expect(mockQueue.add).not.toHaveBeenCalled();
   });
 
-  it('rejects a malformed key with no cvs/ prefix at all', async () => {
+  it('fails closed when HEAD succeeds but returns no usable ContentLength', async () => {
+    mockS3Routes({ headContentLength: 'missing' });
+
+    await expect(service.confirmUpload('clerk-1', validDto)).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+    expect(mockCvRepo.save).not.toHaveBeenCalled();
+    expect(mockQueue.add).not.toHaveBeenCalled();
+  });
+
+  // ── G: copy failure ──
+  it('G: a failed promote-copy fails closed — no DB save, no parsing; pending object is left for lifecycle cleanup', async () => {
+    const copyError = Object.assign(new Error('copy failed'), { name: 'InternalError' });
+    mockS3Routes({ headContentLength: 1024, copyError });
+
+    await expect(service.confirmUpload('clerk-1', validDto)).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+    expect(mockCvRepo.create).not.toHaveBeenCalled();
+    expect(mockCvRepo.save).not.toHaveBeenCalled();
+    expect(mockQueue.add).not.toHaveBeenCalled();
+    // The pending object is NOT explicitly deleted on copy failure — it's
+    // left for the pending-cvs/ lifecycle rule rather than risking deleting
+    // the only copy of data that failed to promote.
+    expect(mockR2Storage.deleteObject).not.toHaveBeenCalledWith(PENDING_KEY);
+  });
+
+  // ── H: wrong user's pending prefix ──
+  it("H: rejects a pending key inside another user's namespace before any HEAD/promotion happens", async () => {
+    const foreignKeyDto = {
+      ...validDto,
+      r2ObjectKey: 'pending-cvs/some-other-user-id/leaked-uuid-resume.pdf',
+    };
+
+    await expect(service.confirmUpload('clerk-1', foreignKeyDto)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(mockCvRepo.create).not.toHaveBeenCalled();
+    expect(mockCvRepo.save).not.toHaveBeenCalled();
+    expect(mockQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed key with no pending-cvs/ prefix at all', async () => {
     const malformedDto = { ...validDto, r2ObjectKey: 'not-a-real-object-key' };
 
     await expect(service.confirmUpload('clerk-1', malformedDto)).rejects.toThrow(
       ForbiddenException,
     );
+    expect(mockS3Send).not.toHaveBeenCalled();
     expect(mockCvRepo.create).not.toHaveBeenCalled();
   });
 
   it("rejects a key whose prefix merely starts with this user's id (no path separator) — prevents a UUID-prefix collision bypass", async () => {
-    // e.g. another real user id happens to start with this user's id as a
-    // string prefix; without requiring the trailing "/", startsWith() alone
-    // would wrongly accept this.
     const collisionDto = {
       ...validDto,
-      r2ObjectKey: `cvs/${MOCK_USER.id}-extra-suffix/resume.pdf`,
+      r2ObjectKey: `pending-cvs/${MOCK_USER.id}-extra-suffix/resume.pdf`,
     };
 
     await expect(service.confirmUpload('clerk-1', collisionDto)).rejects.toThrow(
@@ -137,15 +354,55 @@ describe('CvService — confirmUpload() ownership validation', () => {
     expect(mockCvRepo.create).not.toHaveBeenCalled();
   });
 
+  it('rejects a key already promoted to the permanent cvs/ prefix — confirm only ever accepts pending-cvs/ keys', async () => {
+    const permanentKeyDto = { ...validDto, r2ObjectKey: PERMANENT_KEY };
+
+    await expect(service.confirmUpload('clerk-1', permanentKeyDto)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
   it('does not leak whether a foreign key exists — throws a generic message', async () => {
     const foreignKeyDto = {
       ...validDto,
-      r2ObjectKey: 'cvs/some-other-user-id/leaked-uuid-resume.pdf',
+      r2ObjectKey: 'pending-cvs/some-other-user-id/leaked-uuid-resume.pdf',
     };
 
     await expect(service.confirmUpload('clerk-1', foreignKeyDto)).rejects.toMatchObject({
       message: expect.not.stringContaining('some-other-user-id') as unknown as string,
     });
+  });
+
+  // ── I: normal flow unchanged (DOCX variant) ──
+  it('I: a normal DOCX upload under 5 MB completes exactly like the PDF case', async () => {
+    const docxDto = {
+      ...validDto,
+      fileName: 'resume.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    };
+    mockS3Routes({ headContentLength: 2048 });
+
+    const result = await service.confirmUpload('clerk-1', docxDto);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        r2ObjectKey: PERMANENT_KEY,
+        fileSizeBytes: 2048,
+        mimeType: docxDto.mimeType,
+      }),
+    );
+    expect(mockQueue.add).toHaveBeenCalledWith('parse-cv', { cvId: 'cv-1' });
+  });
+
+  it('cleans up the newly-promoted permanent object if the DB save fails after a successful copy', async () => {
+    mockS3Routes({ headContentLength: 1024 });
+    mockCvRepo.save.mockRejectedValueOnce(new Error('connection reset'));
+
+    await expect(service.confirmUpload('clerk-1', validDto)).rejects.toThrow('connection reset');
+
+    expect(mockR2Storage.deleteObject).toHaveBeenCalledWith(PERMANENT_KEY);
+    expect(mockQueue.add).not.toHaveBeenCalled();
   });
 });
 

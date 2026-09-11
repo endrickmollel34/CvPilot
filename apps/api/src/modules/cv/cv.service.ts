@@ -13,7 +13,12 @@ import { type Repository, type DataSource, In } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  HeadObjectCommand,
+  CopyObjectCommand,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 import { PLAN_LIMITS } from '@cvpilot/shared';
@@ -26,6 +31,7 @@ import { PrefillExtractionService } from './prefill-extraction.service';
 import { PdfGenerationService } from './pdf-generation.service';
 import { R2StorageService } from '../../common/services/r2-storage.service';
 import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
+import { MAX_FILE_SIZE_BYTES } from './dto/generate-upload-url.dto';
 import type { ConfirmUploadDto } from './dto/confirm-upload.dto';
 import type { CreateCvDto } from './dto/create-cv.dto';
 import type { UpdateCvContentDto } from './dto/update-cv-content.dto';
@@ -94,8 +100,16 @@ export class CvService {
       );
     }
 
+    // Uploaded straight into a dedicated pending-cvs/ prefix, never directly
+    // into the permanent cvs/ prefix — see confirmUpload() below for why:
+    // the declared fileSizeBytes above is client-supplied and unverified,
+    // so nothing under this key is treated as a real, usable CV until a
+    // HEAD-verified copy has been promoted to cvs/. pending-cvs/ is the
+    // exact (and only) prefix an R2 lifecycle rule should target, so an
+    // abandoned/never-confirmed pending object is automatically reclaimed
+    // without any risk to confirmed CVs living under cvs/.
     const safeFileName = dto.fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const r2ObjectKey = `cvs/${user.id}/${randomUUID()}-${safeFileName}`;
+    const r2ObjectKey = `pending-cvs/${user.id}/${randomUUID()}-${safeFileName}`;
 
     const command = new PutObjectCommand({
       Bucket: this.bucket,
@@ -110,30 +124,120 @@ export class CvService {
     return { uploadUrl, r2ObjectKey };
   }
 
+  /**
+   * Verified-size pending-upload flow (see the upload-hardening audit
+   * report): dto.fileSizeBytes is client-declared and was never trustworthy
+   * — a browser PUT to a presigned URL has no server-side size enforcement
+   * (the presigned PutObjectCommand only signs Bucket/Key/ContentType, never
+   * ContentLength), so a malicious client could previously claim any size
+   * ≤5 MB while actually uploading an arbitrarily large object. The pending
+   * object is now HEAD-verified here — the ONLY authoritative size is
+   * whatever R2 itself reports back for the bytes actually stored — before
+   * it is ever promoted to a permanent key, written to the DB, or handed to
+   * ParsingService (which unconditionally buffers the whole object into
+   * memory; an unverified oversized object must never reach it).
+   */
   async confirmUpload(clerkId: string, dto: ConfirmUploadDto) {
     const user = await this.userService.findByClerkId(clerkId);
 
     // The presigned URL issued by generateUploadUrl always scopes the R2 key
-    // under this exact prefix; a client submitting a key outside its own
-    // namespace (someone else's, or a malformed one) is rejected rather than
-    // trusted, so a CV row can never be created pointing at another user's —
-    // or a nonexistent — R2 object. Deliberately generic error: this must
-    // not confirm or deny another user's key even exists.
-    if (!dto.r2ObjectKey.startsWith(`cvs/${user.id}/`)) {
+    // under this exact pending-cvs/ prefix; a client submitting a key
+    // outside its own namespace (someone else's, or a malformed one, or one
+    // already promoted to the permanent cvs/ prefix) is rejected rather
+    // than trusted. Deliberately generic error: this must not confirm or
+    // deny another user's key even exists.
+    const pendingPrefix = `pending-cvs/${user.id}/`;
+    if (!dto.r2ObjectKey.startsWith(pendingPrefix)) {
       throw new ForbiddenException('Invalid upload reference.');
     }
+    const pendingKey = dto.r2ObjectKey;
+
+    let actualSizeBytes: number;
+    try {
+      const head = await this.s3.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: pendingKey }),
+      );
+      if (typeof head.ContentLength !== 'number' || !Number.isFinite(head.ContentLength)) {
+        this.logger.warn('R2 HEAD returned no usable ContentLength during confirmUpload');
+        throw new ServiceUnavailableException(
+          "We couldn't verify the uploaded file right now. Please try again.",
+        );
+      }
+      actualSizeBytes = head.ContentLength;
+    } catch (err) {
+      if (err instanceof ServiceUnavailableException) throw err;
+      if (err instanceof Error && err.name === 'NotFound') {
+        throw new NotFoundException('Uploaded file not found. Please try uploading again.');
+      }
+      const errorType = err instanceof Error ? err.name : 'UnknownError';
+      this.logger.warn(`R2 HEAD failed during confirmUpload (error: ${errorType})`);
+      throw new ServiceUnavailableException(
+        "We couldn't verify the uploaded file right now. Please try again.",
+      );
+    }
+
+    if (actualSizeBytes > MAX_FILE_SIZE_BYTES) {
+      await this.r2Storage.deleteObject(pendingKey);
+      throw new UnprocessableEntityException('CV files must be 5 MB or smaller.');
+    }
+
+    // Promote: R2 has no rename, so this is a copy-to-permanent-key followed
+    // by best-effort pending-key cleanup. The permanent key reuses the exact
+    // same (already-UUID-unique) suffix the pending key was created with —
+    // no new UUID is generated here — so promotion can never collide with
+    // or overwrite another CV's object.
+    const permanentKey = `cvs/${user.id}/${pendingKey.slice(pendingPrefix.length)}`;
+    try {
+      // CopySource is sent by the SDK verbatim as the x-amz-copy-source
+      // header — it does NOT get percent-encoded by @aws-sdk/client-s3
+      // (verified directly against the installed SDK version: a manually
+      // encodeURIComponent()-ed value comes out the other end with its `/`
+      // separators turned into literal `%2F`, which R2/S3 does not
+      // re-decode, breaking the bucket/key split the API expects). The
+      // official AWS SDK v3 examples pass `${bucket}/${key}` raw for exactly
+      // this reason. This app's own key charset is already fully
+      // pre-sanitized (see safeFileName above and randomUUID()), so no
+      // character in pendingKey ever needs percent-encoding in the first
+      // place — there is nothing here for manual encoding to legitimately
+      // protect against.
+      await this.s3.send(
+        new CopyObjectCommand({
+          Bucket: this.bucket,
+          CopySource: `${this.bucket}/${pendingKey}`,
+          Key: permanentKey,
+        }),
+      );
+    } catch (err) {
+      const errorType = err instanceof Error ? err.name : 'UnknownError';
+      this.logger.warn(`R2 promote-copy failed during confirmUpload (error: ${errorType})`);
+      throw new ServiceUnavailableException("We couldn't finish saving your CV. Please try again.");
+    }
+    // Best-effort — a leftover pending object is harmless (never referenced
+    // by any DB row) and self-cleans via the pending-cvs/ lifecycle rule.
+    await this.r2Storage.deleteObject(pendingKey);
 
     const cv = this.cvRepo.create({
       userId: user.id,
       source: 'upload',
       fileName: dto.fileName,
-      r2ObjectKey: dto.r2ObjectKey,
-      fileSizeBytes: dto.fileSizeBytes,
+      r2ObjectKey: permanentKey,
+      fileSizeBytes: actualSizeBytes,
       mimeType: dto.mimeType,
       parseStatus: 'pending',
     });
 
-    const saved = await this.cvRepo.save(cv);
+    let saved: CvEntity;
+    try {
+      saved = await this.cvRepo.save(cv);
+    } catch (err) {
+      // The permanent object now exists but no DB row will ever reference
+      // it — clean it up rather than leave an orphan. Best-effort: if this
+      // also fails, R2StorageService.deleteObject() already logs it, and
+      // the object is otherwise unreachable through the app either way.
+      await this.r2Storage.deleteObject(permanentKey);
+      throw err;
+    }
+
     await this.parsingQueue.add('parse-cv', { cvId: saved.id });
     return saved;
   }
