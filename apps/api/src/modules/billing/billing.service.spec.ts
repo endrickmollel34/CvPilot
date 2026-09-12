@@ -1,7 +1,7 @@
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { In } from 'typeorm';
 
 import type { Plan, SubscriptionStatus } from '@cvpilot/shared';
@@ -125,13 +125,18 @@ describe('BillingService', () => {
       );
     });
 
-    it('reuses the existing Stripe customer when the user already has a subscription record', async () => {
-      // Covers "already-Pro user clicks Start Pro again" — Stripe should
-      // reuse the same customer rather than creating a duplicate one.
+    it('reuses the existing Stripe customer for a previously-subscribed-but-now-cancelled user', async () => {
+      // Covers "past Pro subscriber, now cancelled, clicks Start Pro again"
+      // — Stripe should reuse the same customer rather than creating a
+      // duplicate one. status: 'cancelled' is what makes this checkout
+      // allowed at all post-fix (resolveEffectivePlan resolves 'free' for
+      // it) — see the duplicate-checkout-blocking tests below for the
+      // active/trialing cases that must NOT reach this far.
       mockSubscriptionRepo.findOneBy.mockResolvedValue({
         userId: 'user-1',
         providerCustomerId: 'cus_existing123',
         plan: 'pro',
+        status: 'cancelled',
       });
       mockStripeProvider.createCheckoutSession.mockResolvedValue({
         url: 'https://checkout.stripe.com/session-3',
@@ -178,6 +183,108 @@ describe('BillingService', () => {
       await expect(service.createCheckoutSession('clerk-1', 'pro_monthly')).rejects.toThrow(
         'Payments are not configured for this environment.',
       );
+    });
+  });
+
+  // ─── createCheckoutSession() — duplicate-subscription protection ──────────
+  // See the duplicate-subscription/billing-state audit report AND its
+  // follow-up review: checkout eligibility is deliberately NOT the same
+  // question as entitlement. A past_due or incomplete subscription
+  // correctly has Free entitlement (resolveEffectivePlan), but the
+  // underlying Stripe subscription is still live and can recover on its
+  // own (a retried charge succeeding, an initial payment finishing) without
+  // any new Stripe object being created — so it must still block a second
+  // checkout exactly like active/trialing do. Only a genuinely terminal
+  // 'cancelled' status, or no subscription row at all, may proceed.
+  describe('createCheckoutSession() — duplicate-subscription blocking', () => {
+    it('blocks a new checkout when the user has an active subscription', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'active'));
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_monthly')).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(mockStripeProvider.createCheckoutSession).not.toHaveBeenCalled();
+    });
+
+    it('blocks a new checkout when the user has a trialing subscription', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'trialing'));
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_annual')).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(mockStripeProvider.createCheckoutSession).not.toHaveBeenCalled();
+    });
+
+    // The exact scenario from the audit: Stripe keeps status: 'active' for
+    // the whole remaining paid period even after a cancellation is
+    // scheduled — the checkout guard must respect that, not just check
+    // cancelAtPeriodEnd in isolation.
+    it('blocks a new checkout when the existing subscription is active with cancelAtPeriodEnd=true and the period has not ended', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(
+        mockSub('pro', 'active', { cancelAtPeriodEnd: true }),
+      );
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_monthly')).rejects.toThrow(
+        'You already have an active subscription. Manage your existing subscription from Billing.',
+      );
+      expect(mockStripeProvider.createCheckoutSession).not.toHaveBeenCalled();
+    });
+
+    it('blocks a new checkout for a legacy Student subscription that is still active — it already resolves to Pro entitlement', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('student', 'active'));
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_annual')).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(mockStripeProvider.createCheckoutSession).not.toHaveBeenCalled();
+    });
+
+    // ─── The exact concern from the follow-up review ───────────────────────
+    // resolveEffectivePlan(sub) !== 'free' was the ORIGINAL (too permissive)
+    // guard — it allows past_due/incomplete through because their
+    // *entitlement* is Free, even though the *Stripe subscription itself*
+    // is still live and non-terminal. hasNonTerminalSubscription() is the
+    // dedicated checkout-eligibility check that correctly blocks these.
+
+    it('blocks a new checkout when the existing subscription is past_due — it is still a live, potentially-recoverable Stripe subscription, not a terminal one', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'past_due'));
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_monthly')).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(mockStripeProvider.createCheckoutSession).not.toHaveBeenCalled();
+    });
+
+    it('blocks a new checkout when the existing subscription is incomplete — still non-terminal, not yet a settled outcome', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'incomplete'));
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_annual')).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(mockStripeProvider.createCheckoutSession).not.toHaveBeenCalled();
+    });
+
+    it('allows checkout for a cancelled subscriber — the only genuinely terminal status', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('pro', 'cancelled'));
+      mockStripeProvider.createCheckoutSession.mockResolvedValue({
+        url: 'https://checkout.stripe.com/session-new',
+      });
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_monthly')).resolves.toEqual({
+        url: 'https://checkout.stripe.com/session-new',
+      });
+      expect(mockStripeProvider.createCheckoutSession).toHaveBeenCalled();
+    });
+
+    it('allows checkout for a genuinely free user with no subscription row at all', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
+      mockStripeProvider.createCheckoutSession.mockResolvedValue({
+        url: 'https://checkout.stripe.com/session-new-3',
+      });
+
+      await expect(service.createCheckoutSession('clerk-1', 'pro_monthly')).resolves.toEqual({
+        url: 'https://checkout.stripe.com/session-new-3',
+      });
     });
   });
 
@@ -632,18 +739,96 @@ describe('BillingService', () => {
       );
     });
 
+    // ─── Activation period-date fix (duplicate-subscription audit) ─────────
+    // onSubscriptionActivated previously never wrote currentPeriodStart/End
+    // at all — a brand-new checkout's row kept showing whatever period end
+    // was already there (e.g. an old Student subscription's Oct 1) until
+    // some later subscription.updated event happened to correct it. The
+    // fix persists these fields unconditionally on every activation.
+
+    it('onSubscriptionActivated persists currentPeriodStart/currentPeriodEnd from the activation event', async () => {
+      await fireEvent({
+        type: 'subscription.activated',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_new_pro',
+        plan: 'pro',
+        billingProduct: 'pro_monthly',
+        subscriptionStatus: 'trialing',
+        paymentMethod: 'CARD',
+        currentPeriodStart: new Date('2026-09-12T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-09-19T00:00:00.000Z'),
+        metadata: { internalUserId: 'user-1' },
+      });
+
+      expect(mockSubscriptionRepo.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerSubscriptionId: 'sub_new_pro',
+          currentPeriodStart: new Date('2026-09-12T00:00:00.000Z'),
+          currentPeriodEnd: new Date('2026-09-19T00:00:00.000Z'),
+        }),
+        { conflictPaths: ['userId'] },
+      );
+    });
+
+    // The row is a single upsert keyed by userId — this proves the new
+    // subscription's dates are what actually get written, regardless of
+    // what an older subscription's dates might have been (e.g. Oct 1 from
+    // a legacy Student subscription) — there is no merge with the previous
+    // row's values, only a full replacement of these fields every time.
+    it('activation writes the new subscription’s period dates rather than merging with/preserving any prior value', async () => {
+      await fireEvent({
+        type: 'subscription.activated',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_new_pro',
+        plan: 'pro',
+        subscriptionStatus: 'trialing',
+        currentPeriodStart: new Date('2026-09-12T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-09-19T00:00:00.000Z'), // NOT Oct 1
+        metadata: { internalUserId: 'user-1' },
+      });
+
+      const upsertPayload = mockSubscriptionRepo.upsert.mock.calls[0]?.[0] as Record<
+        string,
+        unknown
+      >;
+      expect(upsertPayload['currentPeriodEnd']).toEqual(new Date('2026-09-19T00:00:00.000Z'));
+      expect(upsertPayload['currentPeriodEnd']).not.toEqual(new Date('2026-10-01T00:00:00.000Z'));
+    });
+
+    it('onSubscriptionActivated writes explicit null period dates when the activation event genuinely has none, rather than silently omitting the columns', async () => {
+      await fireEvent({
+        type: 'subscription.activated',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_new_pro',
+        plan: 'pro',
+        subscriptionStatus: 'active',
+        metadata: { internalUserId: 'user-1' },
+      });
+
+      const upsertPayload = mockSubscriptionRepo.upsert.mock.calls[0]?.[0] as Record<
+        string,
+        unknown
+      >;
+      expect(upsertPayload).toHaveProperty('currentPeriodStart', null);
+      expect(upsertPayload).toHaveProperty('currentPeriodEnd', null);
+    });
+
     it('subscription.updated persists billingProduct into providerMetadata when the event carries one', async () => {
       await fireEvent({
         type: 'subscription.updated',
         provider: 'STRIPE',
         providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
         plan: 'pro',
         billingProduct: 'pro_annual',
         subscriptionStatus: 'active',
       });
 
       expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
-        { providerCustomerId: 'cus_1' },
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_1' },
         expect.objectContaining({ providerMetadata: { billingProduct: 'pro_annual' } }),
       );
     });
@@ -665,6 +850,7 @@ describe('BillingService', () => {
         type: 'subscription.updated',
         provider: 'STRIPE',
         providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
         plan: 'pro',
         subscriptionStatus: 'active',
         currentPeriodStart: new Date('2026-01-01'),
@@ -673,7 +859,7 @@ describe('BillingService', () => {
       });
 
       expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
-        { providerCustomerId: 'cus_1' },
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_1' },
         expect.objectContaining({
           plan: 'pro',
           status: 'active',
@@ -689,25 +875,29 @@ describe('BillingService', () => {
         type: 'subscription.updated',
         provider: 'STRIPE',
         providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
         cancelAtPeriodEnd: true,
       });
 
       expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
-        { providerCustomerId: 'cus_1' },
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_1' },
         { cancelAtPeriodEnd: true },
       );
     });
 
-    it('subscription.updated restoring status to active reinstates paid entitlements (recovery from past_due)', async () => {
+    // ─── current matching events still apply normally ──────────────────────
+
+    it('current matching subscription.updated still works — restoring status to active reinstates paid entitlements (recovery from past_due)', async () => {
       await fireEvent({
         type: 'subscription.updated',
         provider: 'STRIPE',
         providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_current',
         subscriptionStatus: 'active',
       });
 
       expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
-        { providerCustomerId: 'cus_1' },
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_current' },
         { status: 'active' },
       );
 
@@ -716,7 +906,99 @@ describe('BillingService', () => {
       await expect(service.getUserPlan('user-1')).resolves.toBe('pro');
     });
 
-    it('subscription.cancelled (subscription deleted) resets status to cancelled and plan to free', async () => {
+    it('current matching cancellation still works — subscription.cancelled resets status to cancelled and plan to free', async () => {
+      await fireEvent({
+        type: 'subscription.cancelled',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_current',
+        subscriptionStatus: 'cancelled',
+      });
+
+      expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_current' },
+        { status: 'cancelled', plan: 'free', cancelAtPeriodEnd: false },
+      );
+    });
+
+    it('current matching payment.failed still works — sets status to past_due without touching plan', async () => {
+      await fireEvent({
+        type: 'payment.failed',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_current',
+        paymentStatus: 'failed',
+      });
+
+      expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_current' },
+        { status: 'past_due' },
+      );
+    });
+
+    // ─── Stale/older-subscription webhook protection (duplicate-subscription audit) ─
+    // Every mutation below is scoped to BOTH providerCustomerId AND
+    // providerSubscriptionId, never providerCustomerId alone — so an event
+    // about a subscription that is no longer the one on file for this
+    // customer (e.g. a legacy Student subscription's own webhooks, arriving
+    // after a newer Pro subscription has taken over the row) can only ever
+    // match zero rows in the real database, never the current row. These
+    // tests prove the call is always narrowly scoped, which is exactly the
+    // mechanism that makes a stale event's WHERE clause harmless — a plain
+    // customerId-only match (asserted absent below) is what would have let
+    // it silently overwrite the current row instead.
+
+    it('scopes subscription.updated by both providerCustomerId and providerSubscriptionId — never providerCustomerId alone', async () => {
+      await fireEvent({
+        type: 'subscription.updated',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_old_student',
+        subscriptionStatus: 'active',
+        currentPeriodEnd: new Date('2026-10-01'),
+      });
+
+      expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_old_student' },
+        expect.anything(),
+      );
+      expect(mockSubscriptionRepo.update).not.toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1' },
+        expect.anything(),
+      );
+    });
+
+    it('does not mutate the subscription row when subscription.updated is missing providerSubscriptionId — fails safe rather than a providerCustomerId-only update', async () => {
+      await fireEvent({
+        type: 'subscription.updated',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        subscriptionStatus: 'active',
+      });
+
+      expect(mockSubscriptionRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('scopes subscription.cancelled by both providerCustomerId and providerSubscriptionId — never providerCustomerId alone', async () => {
+      await fireEvent({
+        type: 'subscription.cancelled',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_old_student',
+        subscriptionStatus: 'cancelled',
+      });
+
+      expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_old_student' },
+        expect.anything(),
+      );
+      expect(mockSubscriptionRepo.update).not.toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1' },
+        expect.anything(),
+      );
+    });
+
+    it('does not mutate the subscription row when subscription.cancelled is missing providerSubscriptionId — fails safe rather than a providerCustomerId-only update', async () => {
       await fireEvent({
         type: 'subscription.cancelled',
         provider: 'STRIPE',
@@ -724,13 +1006,29 @@ describe('BillingService', () => {
         subscriptionStatus: 'cancelled',
       });
 
+      expect(mockSubscriptionRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('scopes payment.failed by both providerCustomerId and providerSubscriptionId — never providerCustomerId alone', async () => {
+      await fireEvent({
+        type: 'payment.failed',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_old_student',
+        paymentStatus: 'failed',
+      });
+
       expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1', providerSubscriptionId: 'sub_old_student' },
+        expect.anything(),
+      );
+      expect(mockSubscriptionRepo.update).not.toHaveBeenCalledWith(
         { providerCustomerId: 'cus_1' },
-        { status: 'cancelled', plan: 'free', cancelAtPeriodEnd: false },
+        expect.anything(),
       );
     });
 
-    it('payment.failed sets status to past_due without touching plan', async () => {
+    it('does not mutate the subscription row when payment.failed is missing providerSubscriptionId (e.g. a non-subscription invoice) — fails safe rather than a providerCustomerId-only update', async () => {
       await fireEvent({
         type: 'payment.failed',
         provider: 'STRIPE',
@@ -738,10 +1036,7 @@ describe('BillingService', () => {
         paymentStatus: 'failed',
       });
 
-      expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
-        { providerCustomerId: 'cus_1' },
-        { status: 'past_due' },
-      );
+      expect(mockSubscriptionRepo.update).not.toHaveBeenCalled();
     });
 
     it('payment.succeeded records the payment and does not itself alter subscription status (recovery arrives via a paired subscription.updated event)', async () => {

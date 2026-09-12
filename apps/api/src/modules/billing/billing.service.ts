@@ -1,4 +1,10 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { type Repository, In } from 'typeorm';
 
@@ -48,6 +54,17 @@ export class BillingService {
     const provider = this.getProvider(providerType);
     const user = await this.userService.findByClerkId(clerkId);
     const sub = await this.subscriptionRepo.findOneBy({ userId: user.id });
+
+    // Checkout eligibility is deliberately a DIFFERENT question from
+    // entitlement (resolveEffectivePlan) — see hasNonTerminalSubscription's
+    // own doc comment below for why a past_due/incomplete subscription
+    // (Free entitlement, but still a live, potentially-recoverable Stripe
+    // subscription) must still block a second checkout.
+    if (hasNonTerminalSubscription(sub)) {
+      throw new ForbiddenException(
+        'You already have an active subscription. Manage your existing subscription from Billing.',
+      );
+    }
 
     return provider.createCheckoutSession({
       userId: user.id,
@@ -271,6 +288,23 @@ export class BillingService {
         status: event.subscriptionStatus ?? 'active',
         paymentMethod: event.paymentMethod,
         billingCycle: 'recurring',
+        // Unconditional — a brand-new checkout's activation must fully
+        // replace any older subscription's period dates, not just add to
+        // them. Conditionally including these (skip if the event happens
+        // not to carry them) is exactly what let this row keep showing a
+        // stale renewal date left over from a previous subscription until
+        // some later subscription.updated event happened to correct it
+        // (see the duplicate-subscription audit report). Explicit null
+        // when the event genuinely has none is still a real write, never a
+        // silent no-op that leaves an old value in place.
+        // TypeORM's upsert typing only accepts Date | undefined for this
+        // nullable column, not null — but passing undefined here would make
+        // TypeORM skip the column entirely (leaving whatever was already in
+        // it), which is exactly the silent-no-op this fix needs to avoid.
+        // The null cast below is TypeORM's own documented workaround for
+        // nullable-column writes in this position.
+        currentPeriodStart: event.currentPeriodStart ?? (null as unknown as Date),
+        currentPeriodEnd: event.currentPeriodEnd ?? (null as unknown as Date),
         // No schema change — reuses the existing, previously-unused jsonb
         // column so BillingSummary can distinguish Monthly vs Annual Pro
         // without Plan itself ever needing to know about billing cadence.
@@ -285,8 +319,24 @@ export class BillingService {
   private async onSubscriptionUpdated(event: InternalBillingEvent): Promise<void> {
     if (!event.providerCustomerId) return;
 
+    // Never mutate subscription state by customer alone — a Stripe customer
+    // can have more than one subscription over time (e.g. a legacy Student
+    // subscription still winding down alongside a brand-new Pro one), and
+    // matching by providerCustomerId only would let a stale event from a
+    // subscription that is no longer authoritative silently overwrite the
+    // current one (see the duplicate-subscription audit report). Matching
+    // on providerSubscriptionId too makes a stale event a safe no-op the
+    // moment a newer subscription's id is on file, rather than falling back
+    // to a broader, unsafe match.
+    if (!event.providerSubscriptionId) {
+      this.logger.warn(
+        'subscription.updated event missing providerSubscriptionId — ignoring rather than risking a providerCustomerId-only mutation',
+      );
+      return;
+    }
+
     this.logger.log(
-      `Persisting subscription.updated for sub ...${event.providerSubscriptionId?.slice(-8) ?? 'unknown'}: ` +
+      `Persisting subscription.updated for sub ...${event.providerSubscriptionId.slice(-8)}: ` +
         `status=${event.subscriptionStatus ?? '(unchanged)'}, ` +
         `cancelAtPeriodEnd=${event.cancelAtPeriodEnd ?? '(unchanged)'}, ` +
         `currentPeriodEnd=${event.currentPeriodEnd?.toISOString() ?? '(unchanged)'}, ` +
@@ -294,7 +344,10 @@ export class BillingService {
     );
 
     await this.subscriptionRepo.update(
-      { providerCustomerId: event.providerCustomerId },
+      {
+        providerCustomerId: event.providerCustomerId,
+        providerSubscriptionId: event.providerSubscriptionId,
+      },
       {
         ...(event.plan && { plan: event.plan }),
         ...(event.subscriptionStatus && { status: event.subscriptionStatus }),
@@ -313,8 +366,22 @@ export class BillingService {
   private async onSubscriptionCancelled(event: InternalBillingEvent): Promise<void> {
     if (!event.providerCustomerId) return;
 
+    // Same protection as onSubscriptionUpdated above — an old subscription's
+    // own deletion (e.g. a legacy Student subscription finally winding down)
+    // must never be able to cancel a newer, still-live subscription's row
+    // just because they share a Stripe customer.
+    if (!event.providerSubscriptionId) {
+      this.logger.warn(
+        'subscription.cancelled event missing providerSubscriptionId — ignoring rather than risking a providerCustomerId-only mutation',
+      );
+      return;
+    }
+
     await this.subscriptionRepo.update(
-      { providerCustomerId: event.providerCustomerId },
+      {
+        providerCustomerId: event.providerCustomerId,
+        providerSubscriptionId: event.providerSubscriptionId,
+      },
       { status: 'cancelled', plan: 'free', cancelAtPeriodEnd: false },
     );
   }
@@ -362,8 +429,24 @@ export class BillingService {
   private async onPaymentFailed(event: InternalBillingEvent): Promise<void> {
     if (!event.providerCustomerId) return;
 
+    // Same protection as onSubscriptionUpdated/onSubscriptionCancelled — a
+    // failed invoice always names its own subscription, but
+    // resolveSubscriptionIdFromInvoice() can legitimately return undefined
+    // (e.g. a manually-created, non-subscription invoice). Without this
+    // check that would fall through to a providerCustomerId-only update and
+    // could mark an unrelated, still-healthy subscription past_due.
+    if (!event.providerSubscriptionId) {
+      this.logger.warn(
+        'payment.failed event missing providerSubscriptionId — ignoring rather than risking a providerCustomerId-only mutation',
+      );
+      return;
+    }
+
     await this.subscriptionRepo.update(
-      { providerCustomerId: event.providerCustomerId },
+      {
+        providerCustomerId: event.providerCustomerId,
+        providerSubscriptionId: event.providerSubscriptionId,
+      },
       { status: 'past_due' },
     );
 
@@ -428,4 +511,35 @@ function resolveEffectivePlan(sub: Pick<SubscriptionEntity, 'plan' | 'status'> |
     default:
       return 'free';
   }
+}
+
+// ── Checkout eligibility ─────────────────────────────────────────────────
+// Deliberately a DIFFERENT question from resolveEffectivePlan() above, and
+// must stay that way — see the duplicate-subscription audit report.
+// Entitlement asks "does this user get Pro features right now"; a past_due
+// or incomplete subscription correctly answers "no" there. Checkout
+// eligibility asks "does a live Stripe subscription for this user still
+// exist" — CVPilot intentionally supports only ONE Stripe subscription per
+// user, so a second checkout must stay blocked for any status that is
+// merely a *temporary loss of entitlement*, not an actually-terminated
+// Stripe subscription:
+//   - active, trialing        → obviously still live
+//   - past_due                → Stripe is still retrying the charge; the
+//     same subscription can recover straight back to 'active' with no new
+//     Stripe object ever being created
+//   - incomplete              → covers Stripe's own 'incomplete' (initial
+//     payment still processing, can still succeed) — mapStripeStatus()'s
+//     catch-all default also folds 'incomplete_expired'/'unpaid'/'paused'
+//     into this same internal status, and since this model can't tell
+//     those apart, the safe choice is to treat all of 'incomplete' as
+//     non-terminal here too, exactly as the duplicate-subscription incident
+//     showed the cost of guessing wrong
+//   - cancelled                → the only status onSubscriptionCancelled
+//     ever writes, and only in response to a real
+//     customer.subscription.deleted event — genuinely terminal, safe to
+//     allow a new checkout
+//   - no subscription row      → nothing to conflict with, safe
+function hasNonTerminalSubscription(sub: Pick<SubscriptionEntity, 'status'> | null): boolean {
+  if (!sub) return false;
+  return sub.status !== 'cancelled';
 }
