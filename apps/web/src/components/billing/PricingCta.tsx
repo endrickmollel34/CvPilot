@@ -4,21 +4,21 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@clerk/nextjs';
 
-import { createCheckoutSession, type BillingPlan } from '@/lib/billingApi';
+import { createCheckoutSession, type BillingProduct } from '@/lib/billingApi';
 import { getFriendlyErrorMessage } from '@/lib/errorMessage';
 
 interface Props {
-  plan: BillingPlan;
+  product: BillingProduct;
   label: string;
   className: string;
 }
 
 // Fixes the bug where an authenticated user clicking a paid-plan CTA
-// (Pro/Student) landed on Clerk's sign-up screen instead of Stripe Checkout:
-// that CTA was a plain `<Link href="/sign-up">`, identical to the Free plan's
-// button, with no billing wiring at all. Signed-out visitors still go to
-// sign-up (unchanged); signed-in users get a real checkout session.
-export function PricingCta({ plan, label, className }: Props) {
+// landed on Clerk's sign-up screen instead of Stripe Checkout: that CTA was
+// a plain `<Link href="/sign-up">`, identical to the Free plan's button,
+// with no billing wiring at all. Signed-out visitors still go to sign-up
+// (unchanged); signed-in users get a real checkout session.
+export function PricingCta({ product, label, className }: Props) {
   const { isSignedIn, getToken } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -35,7 +35,7 @@ export function PricingCta({ plan, label, className }: Props) {
     setLoading(true);
     setError('');
     try {
-      const { url } = await createCheckoutSession(getToken, plan);
+      const { url } = await createCheckoutSession(getToken, product);
       if (!url) {
         setError('Could not start checkout. Please try again.');
         return;

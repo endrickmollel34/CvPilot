@@ -19,7 +19,7 @@ function TailoringUsageNote({ usage }: { usage?: UsageCounter }) {
   if (!usage) return null;
   return (
     <p className="text-xs text-gray-400">
-      {usage.limit === null ? 'Unlimited' : 'Tailoring is available on Pro and Student plans'}
+      {usage.limit === null ? 'Unlimited' : 'Tailoring is available on Pro'}
     </p>
   );
 }

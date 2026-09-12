@@ -16,7 +16,16 @@ import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
 
 const MOCK_USER = { id: 'user-1', clerkId: 'clerk-1' };
 
-function mockSub(plan: Plan, status: SubscriptionStatus, extra: Record<string, unknown> = {}) {
+// 'student' is deliberately allowed here alongside Plan — it's no longer a
+// valid Plan value, but these tests deliberately simulate a pre-existing DB
+// row that still literally contains the old string (see
+// resolveEffectivePlan's legacy-compatibility normalization; TypeORM never
+// validates a column's raw value against the TS union it's typed as).
+function mockSub(
+  plan: Plan | 'student',
+  status: SubscriptionStatus,
+  extra: Record<string, unknown> = {},
+) {
   return { userId: 'user-1', providerCustomerId: 'cus_1', plan, status, ...extra };
 }
 
@@ -90,29 +99,29 @@ describe('BillingService', () => {
         url: 'https://checkout.stripe.com/session-1',
       });
 
-      const result = await service.createCheckoutSession('clerk-1', 'pro');
+      const result = await service.createCheckoutSession('clerk-1', 'pro_monthly');
 
       expect(mockStripeProvider.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
           userId: 'user-1',
           providerCustomerId: undefined,
-          plan: 'pro',
+          product: 'pro_monthly',
           currency: 'GBP',
         }),
       );
       expect(result).toEqual({ url: 'https://checkout.stripe.com/session-1' });
     });
 
-    it('creates a student checkout session with plan "student"', async () => {
+    it('creates a checkout session for Pro Annual', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
       mockStripeProvider.createCheckoutSession.mockResolvedValue({
         url: 'https://checkout.stripe.com/session-2',
       });
 
-      await service.createCheckoutSession('clerk-1', 'student');
+      await service.createCheckoutSession('clerk-1', 'pro_annual');
 
       expect(mockStripeProvider.createCheckoutSession).toHaveBeenCalledWith(
-        expect.objectContaining({ plan: 'student' }),
+        expect.objectContaining({ product: 'pro_annual' }),
       );
     });
 
@@ -128,7 +137,7 @@ describe('BillingService', () => {
         url: 'https://checkout.stripe.com/session-3',
       });
 
-      await service.createCheckoutSession('clerk-1', 'pro');
+      await service.createCheckoutSession('clerk-1', 'pro_monthly');
 
       expect(mockStripeProvider.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({ providerCustomerId: 'cus_existing123' }),
@@ -141,7 +150,7 @@ describe('BillingService', () => {
         url: 'https://checkout.stripe.com/session-4',
       });
 
-      await service.createCheckoutSession('clerk-1', 'pro');
+      await service.createCheckoutSession('clerk-1', 'pro_monthly');
 
       expect(mockStripeProvider.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -154,9 +163,9 @@ describe('BillingService', () => {
     it('throws BadRequestException for an unknown payment provider', async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
 
-      await expect(service.createCheckoutSession('clerk-1', 'pro', 'CLICKPESA')).rejects.toThrow(
-        BadRequestException,
-      );
+      await expect(
+        service.createCheckoutSession('clerk-1', 'pro_monthly', 'CLICKPESA'),
+      ).rejects.toThrow(BadRequestException);
       expect(mockStripeProvider.createCheckoutSession).not.toHaveBeenCalled();
     });
 
@@ -166,7 +175,7 @@ describe('BillingService', () => {
         new Error('Payments are not configured for this environment.'),
       );
 
-      await expect(service.createCheckoutSession('clerk-1', 'pro')).rejects.toThrow(
+      await expect(service.createCheckoutSession('clerk-1', 'pro_monthly')).rejects.toThrow(
         'Payments are not configured for this environment.',
       );
     });
@@ -192,9 +201,13 @@ describe('BillingService', () => {
       await expect(service.getUserPlan('user-1')).resolves.toBe('pro');
     });
 
-    it('returns student for an active Student subscription', async () => {
+    // Legacy compatibility — Student was removed as a Plan value, but a
+    // pre-existing DB row can still literally contain the old 'student'
+    // string (no data migration rewrites it). This must normalize to the
+    // 'pro' entitlement, never fall through to 'free'.
+    it("normalizes a legacy plan='student' row to the 'pro' entitlement", async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('student', 'active'));
-      await expect(service.getUserPlan('user-1')).resolves.toBe('student');
+      await expect(service.getUserPlan('user-1')).resolves.toBe('pro');
     });
 
     it('retains paid access for a trialing Pro subscription', async () => {
@@ -202,9 +215,9 @@ describe('BillingService', () => {
       await expect(service.getUserPlan('user-1')).resolves.toBe('pro');
     });
 
-    it('retains paid access for a trialing Student subscription', async () => {
+    it("retains paid access for a trialing legacy plan='student' subscription, normalized to 'pro'", async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('student', 'trialing'));
-      await expect(service.getUserPlan('user-1')).resolves.toBe('student');
+      await expect(service.getUserPlan('user-1')).resolves.toBe('pro');
     });
 
     it('downgrades a past_due Pro subscription to free-level entitlements', async () => {
@@ -471,12 +484,12 @@ describe('BillingService', () => {
       expect(result.usage.builderCvs).toEqual({ used: 0, limit: null, remaining: null });
     });
 
-    it('reports unlimited (null limit/remaining) usage for an active Student subscription', async () => {
+    it("reports unlimited (null limit/remaining) usage for a legacy plan='student' subscription, normalized to 'pro'", async () => {
       mockSubscriptionRepo.findOneBy.mockResolvedValue(mockSub('student', 'active'));
 
       const result = await service.getUsageSummary('clerk-1');
 
-      expect(result.plan).toBe('student');
+      expect(result.plan).toBe('pro');
       expect(result.usage.analyses.limit).toBeNull();
       expect(result.usage.tailorings.limit).toBeNull();
     });
@@ -591,6 +604,47 @@ describe('BillingService', () => {
           status: 'active',
         }),
         { conflictPaths: ['userId'] },
+      );
+    });
+
+    // No schema change — billingProduct is stashed in the existing,
+    // previously-unused providerMetadata jsonb column so the dashboard can
+    // distinguish Monthly vs Annual Pro without Plan itself knowing about
+    // billing cadence.
+    it('subscription.activated persists billingProduct into providerMetadata when the event carries one', async () => {
+      await fireEvent({
+        type: 'subscription.activated',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
+        plan: 'pro',
+        billingProduct: 'pro_monthly',
+        subscriptionStatus: 'trialing',
+        paymentMethod: 'CARD',
+        metadata: { internalUserId: 'user-1' },
+      });
+
+      expect(mockSubscriptionRepo.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerMetadata: { billingProduct: 'pro_monthly' },
+        }),
+        { conflictPaths: ['userId'] },
+      );
+    });
+
+    it('subscription.updated persists billingProduct into providerMetadata when the event carries one', async () => {
+      await fireEvent({
+        type: 'subscription.updated',
+        provider: 'STRIPE',
+        providerCustomerId: 'cus_1',
+        plan: 'pro',
+        billingProduct: 'pro_annual',
+        subscriptionStatus: 'active',
+      });
+
+      expect(mockSubscriptionRepo.update).toHaveBeenCalledWith(
+        { providerCustomerId: 'cus_1' },
+        expect.objectContaining({ providerMetadata: { billingProduct: 'pro_annual' } }),
       );
     });
 

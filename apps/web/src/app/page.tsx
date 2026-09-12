@@ -107,68 +107,99 @@ export default function HomePage() {
             </p>
 
             <div className="mt-12 grid gap-6 sm:grid-cols-3">
-              {plans.map(({ name, price, period, features, cta, href, highlight, billingPlan }) => (
-                <div
-                  key={name}
-                  className={`rounded-xl border p-6 ${
-                    highlight
-                      ? 'border-neutral-900 bg-neutral-900 text-white'
-                      : 'border-neutral-200 bg-white'
-                  }`}
-                >
-                  <p
-                    className={`text-xs font-semibold uppercase tracking-widest ${
-                      highlight ? 'text-neutral-400' : 'text-neutral-500'
+              {plans.map(
+                ({
+                  name,
+                  badge,
+                  price,
+                  period,
+                  priceDetail,
+                  features,
+                  cta,
+                  href,
+                  highlight,
+                  billingProduct,
+                }) => (
+                  <div
+                    key={name}
+                    className={`rounded-xl border p-6 ${
+                      highlight
+                        ? 'border-neutral-900 bg-neutral-900 text-white'
+                        : 'border-neutral-200 bg-white'
                     }`}
                   >
-                    {name}
-                  </p>
-                  <div className="mt-2 flex items-baseline gap-1">
-                    <span className="text-3xl font-extrabold">{price}</span>
-                    <span
-                      className={`text-sm ${highlight ? 'text-neutral-400' : 'text-neutral-500'}`}
+                    {badge && (
+                      <span
+                        className={`mb-3 inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                          highlight ? 'bg-white text-neutral-900' : 'bg-neutral-900 text-white'
+                        }`}
+                      >
+                        {badge}
+                      </span>
+                    )}
+                    <p
+                      className={`text-xs font-semibold uppercase tracking-widest ${
+                        highlight ? 'text-neutral-400' : 'text-neutral-500'
+                      }`}
                     >
-                      {period}
-                    </span>
+                      {name}
+                    </p>
+                    <div className="mt-2 flex items-baseline gap-1">
+                      <span className="text-3xl font-extrabold">{price}</span>
+                      <span
+                        className={`text-sm ${highlight ? 'text-neutral-400' : 'text-neutral-500'}`}
+                      >
+                        {period}
+                      </span>
+                    </div>
+                    {priceDetail && (
+                      <p
+                        className={`mt-2 text-xs leading-relaxed ${
+                          highlight ? 'text-neutral-400' : 'text-neutral-500'
+                        }`}
+                      >
+                        {priceDetail}
+                      </p>
+                    )}
+
+                    <ul className="mt-6 mb-8 space-y-3">
+                      {features.map((f) => (
+                        <li key={f} className="flex items-start gap-2 text-sm">
+                          <Check
+                            className={`mt-0.5 h-4 w-4 flex-shrink-0 ${
+                              highlight ? 'text-neutral-400' : 'text-neutral-400'
+                            }`}
+                          />
+                          {f}
+                        </li>
+                      ))}
+                    </ul>
+
+                    {billingProduct ? (
+                      <PricingCta
+                        product={billingProduct}
+                        label={cta}
+                        className={`block w-full rounded-md py-2 text-center text-sm font-semibold transition-colors ${
+                          highlight
+                            ? 'bg-white text-neutral-900 hover:bg-neutral-100'
+                            : 'bg-neutral-900 text-white hover:bg-neutral-700'
+                        }`}
+                      />
+                    ) : (
+                      <Link
+                        href={href}
+                        className={`block w-full rounded-md py-2 text-center text-sm font-semibold transition-colors ${
+                          highlight
+                            ? 'bg-white text-neutral-900 hover:bg-neutral-100'
+                            : 'bg-neutral-900 text-white hover:bg-neutral-700'
+                        }`}
+                      >
+                        {cta}
+                      </Link>
+                    )}
                   </div>
-
-                  <ul className="mt-6 mb-8 space-y-3">
-                    {features.map((f) => (
-                      <li key={f} className="flex items-start gap-2 text-sm">
-                        <Check
-                          className={`mt-0.5 h-4 w-4 flex-shrink-0 ${
-                            highlight ? 'text-neutral-400' : 'text-neutral-400'
-                          }`}
-                        />
-                        {f}
-                      </li>
-                    ))}
-                  </ul>
-
-                  {billingPlan ? (
-                    <PricingCta
-                      plan={billingPlan}
-                      label={cta}
-                      className={`block w-full rounded-md py-2 text-center text-sm font-semibold transition-colors ${
-                        highlight
-                          ? 'bg-white text-neutral-900 hover:bg-neutral-100'
-                          : 'bg-neutral-900 text-white hover:bg-neutral-700'
-                      }`}
-                    />
-                  ) : (
-                    <Link
-                      href={href}
-                      className={`block w-full rounded-md py-2 text-center text-sm font-semibold transition-colors ${
-                        highlight
-                          ? 'bg-white text-neutral-900 hover:bg-neutral-100'
-                          : 'bg-neutral-900 text-white hover:bg-neutral-700'
-                      }`}
-                    >
-                      {cta}
-                    </Link>
-                  )}
-                </div>
-              ))}
+                ),
+              )}
             </div>
           </div>
         </section>
@@ -222,32 +253,39 @@ const steps = [
 const plans = [
   {
     name: 'Free',
-    price: 'Free',
+    badge: undefined,
+    price: '€0',
     period: '',
+    priceDetail: undefined,
     features: ['2 CV analyses per month', '1 cover letter per month', 'PDF & DOCX support'],
     cta: 'Get started free',
     href: '/sign-up',
     highlight: false,
-    billingPlan: undefined,
+    billingProduct: undefined,
   },
   {
-    name: 'Pro',
-    price: '£9.99',
-    period: '/ month',
+    name: '7-Day Pro Access',
+    badge: 'Most Popular',
+    price: '€2.99',
+    period: 'first 7 days',
+    priceDetail:
+      '€2.99 today. After 7 days, your subscription renews at €14.99/month unless cancelled. Cancel anytime.',
     features: ['Unlimited CV analyses', 'Unlimited cover letters', 'Priority AI generation'],
-    cta: 'Start Pro',
+    cta: 'Start 7-Day Pro Access',
     href: '/sign-up',
     highlight: true,
-    billingPlan: 'pro',
+    billingProduct: 'pro_monthly',
   },
   {
-    name: 'Student',
-    price: '£4.99',
+    name: 'Annual Pro',
+    badge: 'Best Value',
+    price: '€6.67',
     period: '/ month',
-    features: ['Everything in Pro', 'Requires .ac.uk email', 'Best value for students'],
-    cta: 'Start Student plan',
+    priceDetail: '€79.99 billed annually. Renews yearly unless cancelled. Cancel anytime.',
+    features: ['Everything in 7-Day Pro Access', 'Best value for regular use'],
+    cta: 'Start Annual Pro',
     href: '/sign-up',
     highlight: false,
-    billingPlan: 'student',
+    billingProduct: 'pro_annual',
   },
 ] as const;

@@ -35,25 +35,31 @@ describe('BillingController', () => {
 
   // ─── createCheckout() — the endpoint the fixed frontend now calls ──────────
 
-  it('forwards the authenticated clerkId and validated plan to BillingService for Pro', async () => {
+  it('forwards the authenticated clerkId and validated product to BillingService for Pro Monthly', async () => {
     mockBillingService.createCheckoutSession.mockResolvedValue({
       url: 'https://checkout.stripe.com/x',
     });
 
-    const result = await controller.createCheckout({ clerkId: 'clerk-1' }, { plan: 'pro' });
+    const result = await controller.createCheckout(
+      { clerkId: 'clerk-1' },
+      { product: 'pro_monthly' },
+    );
 
-    expect(mockBillingService.createCheckoutSession).toHaveBeenCalledWith('clerk-1', 'pro');
+    expect(mockBillingService.createCheckoutSession).toHaveBeenCalledWith('clerk-1', 'pro_monthly');
     expect(result).toEqual({ url: 'https://checkout.stripe.com/x' });
   });
 
-  it('forwards the authenticated clerkId and validated plan to BillingService for Student', async () => {
+  it('forwards the authenticated clerkId and validated product to BillingService for Pro Annual', async () => {
     mockBillingService.createCheckoutSession.mockResolvedValue({
       url: 'https://checkout.stripe.com/y',
     });
 
-    const result = await controller.createCheckout({ clerkId: 'clerk-1' }, { plan: 'student' });
+    const result = await controller.createCheckout(
+      { clerkId: 'clerk-1' },
+      { product: 'pro_annual' },
+    );
 
-    expect(mockBillingService.createCheckoutSession).toHaveBeenCalledWith('clerk-1', 'student');
+    expect(mockBillingService.createCheckoutSession).toHaveBeenCalledWith('clerk-1', 'pro_annual');
     expect(result).toEqual({ url: 'https://checkout.stripe.com/y' });
   });
 

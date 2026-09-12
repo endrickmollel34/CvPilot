@@ -1,4 +1,10 @@
-export type Plan = 'free' | 'pro' | 'student';
+export type Plan = 'free' | 'pro';
+
+// Which Stripe product/price funded a 'pro' entitlement — deliberately
+// separate from Plan. Both billing products grant the exact same 'pro'
+// entitlement; PLAN_LIMITS is keyed by Plan only and has no knowledge of
+// which product a user is on. See StripePaymentProvider.productToPriceId.
+export type BillingProduct = 'pro_monthly' | 'pro_annual';
 
 export type SubscriptionStatus = 'active' | 'past_due' | 'cancelled' | 'trialing' | 'incomplete';
 
@@ -43,12 +49,6 @@ export const PLAN_LIMITS: Record<
 > = {
   free: { analysesPerMonth: 2, coverLettersPerMonth: 1, builderCvsTotal: 1, tailoringsPerMonth: 0 },
   pro: {
-    analysesPerMonth: Infinity,
-    coverLettersPerMonth: Infinity,
-    builderCvsTotal: Infinity,
-    tailoringsPerMonth: Infinity,
-  },
-  student: {
     analysesPerMonth: Infinity,
     coverLettersPerMonth: Infinity,
     builderCvsTotal: Infinity,

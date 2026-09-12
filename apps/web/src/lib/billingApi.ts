@@ -1,28 +1,31 @@
-import type { Plan, SubscriptionStatus, UsageSummary } from '@cvpilot/shared';
+import type { Plan, BillingProduct, SubscriptionStatus, UsageSummary } from '@cvpilot/shared';
 
 import { API_BASE_URL as API_URL } from './apiUrl';
 import { throwApiError } from './apiError';
 import { authFetch, type TokenSource } from './authFetch';
 
-export type { UsageSummary, UsageCounter } from '@cvpilot/shared';
-
-export type BillingPlan = 'pro' | 'student';
+export type { UsageSummary, UsageCounter, BillingProduct } from '@cvpilot/shared';
 
 export interface SubscriptionDto {
   plan: Plan;
   status: SubscriptionStatus;
   currentPeriodEnd?: string;
   cancelAtPeriodEnd: boolean;
+  // Which billing product funds a 'pro' subscription — absent for a legacy
+  // Student-price subscription (no current product to report, see
+  // StripePaymentProvider.resolveBillingProductFromSubscription) or a Free
+  // user. Display-only: never used for entitlement decisions.
+  providerMetadata?: { billingProduct?: BillingProduct };
 }
 
 export async function createCheckoutSession(
   token: TokenSource,
-  plan: BillingPlan,
+  product: BillingProduct,
 ): Promise<{ url: string | null }> {
   const res = await authFetch(`${API_URL}/billing/checkout`, token, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ plan }),
+    body: JSON.stringify({ product }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

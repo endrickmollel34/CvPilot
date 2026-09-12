@@ -32,7 +32,7 @@ export class BillingController {
   @Post('billing/checkout')
   @UseGuards(ClerkGuard)
   createCheckout(@CurrentUser() user: { clerkId: string }, @Body() dto: CreateCheckoutDto) {
-    return this.billingService.createCheckoutSession(user.clerkId, dto.plan);
+    return this.billingService.createCheckoutSession(user.clerkId, dto.product);
   }
 
   @Post('billing/portal')

@@ -25,8 +25,9 @@ export default function TermsPage() {
           CVPilot lets you build or upload a CV, receive an AI-generated match score and suggestions
           against a job description you provide, generate an AI-tailored version of your CV, and
           generate an AI-written cover letter. Some features are available on a Free plan with
-          monthly usage limits; paid plans (currently Pro and a Student plan) offer higher or
-          unlimited usage, as described on our pricing page at the time you subscribe.
+          monthly usage limits; a paid Pro plan — offered either as 7-Day Pro Access (an
+          introductory subscription) or Annual Pro — offers higher or unlimited usage, as described
+          on our pricing page at the time you subscribe.
         </p>
       </section>
 
@@ -98,17 +99,42 @@ export default function TermsPage() {
       <section>
         <h2>6. Subscriptions and billing</h2>
         <p>
-          Paid plans are billed on a recurring subscription basis through our payment processor,
-          Stripe. By subscribing, you authorise us (via Stripe) to charge your payment method on a
-          recurring basis until you cancel. Prices and included usage limits are shown at the time
-          of purchase and may change for future billing periods with notice.
+          Paid Pro access is billed on a recurring subscription basis through our payment processor,
+          Stripe, offered in two forms:
+        </p>
+        <ul>
+          <li>
+            <strong>7-Day Pro Access.</strong> You pay €2.99 upfront for 7 days of full Pro access.{' '}
+            <strong>
+              Automatic renewal: unless you cancel before the 7-day period ends, your subscription
+              automatically renews and you will be charged €14.99 per month from then on, on a
+              recurring basis, until you cancel.
+            </strong>{' '}
+            You can cancel at any time. If you cancel during the initial 7-day period, no further
+            renewal charge is taken, and you keep Pro access for the remainder of the 7 days you
+            already paid for, after which your account moves to the Free plan.
+          </li>
+          <li>
+            <strong>Annual Pro.</strong> You pay €79.99 upfront for 12 months of Pro access
+            (equivalent to €6.67/month).{' '}
+            <strong>
+              Automatic renewal: unless you cancel, your subscription automatically renews each year
+              at the then-current annual price.
+            </strong>{' '}
+            You can cancel the renewal at any time; if you cancel, you keep Pro access until the end
+            of the current annual period, after which your account moves to the Free plan.
+          </li>
+        </ul>
+        <p>
+          By subscribing to either option, you authorise us (via Stripe) to charge your payment
+          method as described above until you cancel. Prices and included usage limits are shown at
+          the time of purchase and may change for future billing periods with notice.
         </p>
         <p>
           You can manage or cancel your subscription at any time through the billing portal
-          available in your account. If you cancel, your paid plan remains active — including any
-          plan usage limits and features — until the end of your current billing period, after which
-          your account moves to the Free plan. We do not currently offer prorated refunds for
-          partial billing periods, except where required by law.
+          available in your account. We do not currently offer prorated refunds for partial billing
+          periods, except where required by law; the €2.99 7-Day Pro Access introductory charge is
+          likewise non-refundable except where required by law.
         </p>
       </section>
 

@@ -3,6 +3,7 @@ import type {
   PaymentMethodType,
   Currency,
   Plan,
+  BillingProduct,
   SubscriptionStatus,
   PaymentStatus,
   BillingEventType,
@@ -11,7 +12,8 @@ import type {
 export interface CheckoutSessionParams {
   userId: string;
   providerCustomerId?: string;
-  plan: Exclude<Plan, 'free'>;
+  /** Which billing product to purchase — both grant the same 'pro' entitlement. */
+  product: BillingProduct;
   currency: Currency;
   successUrl: string;
   cancelUrl: string;
@@ -35,6 +37,16 @@ export interface InternalBillingEvent {
   providerPaymentId?: string;
   providerTransactionReference?: string;
   plan?: Plan;
+  /**
+   * Which billing product this event's subscription is actually on, when
+   * resolvable — undefined for a legacy Student-price subscription (still
+   * correctly resolved to plan: 'pro' above, but with no current
+   * BillingProduct to report) or any other unrecognised price. Persisted
+   * into SubscriptionEntity.providerMetadata (no schema change) so the
+   * dashboard can distinguish Monthly vs Annual Pro without Plan itself
+   * ever needing to know about billing cadence.
+   */
+  billingProduct?: BillingProduct;
   subscriptionStatus?: SubscriptionStatus;
   paymentStatus?: PaymentStatus;
   paymentMethod?: PaymentMethodType;

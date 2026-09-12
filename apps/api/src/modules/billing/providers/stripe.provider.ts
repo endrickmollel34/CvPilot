@@ -7,7 +7,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 
-import type { Plan, SubscriptionStatus, Currency } from '@cvpilot/shared';
+import type { Plan, BillingProduct, SubscriptionStatus, Currency } from '@cvpilot/shared';
+import { resolveOptionalApiKey } from '../../../common/utils/optional-api-key.util';
 import type {
   PaymentProvider,
   CheckoutSessionParams,
@@ -22,18 +23,34 @@ export class StripePaymentProvider implements PaymentProvider {
 
   private readonly logger = new Logger(StripePaymentProvider.name);
   private readonly stripe: Stripe;
-  private readonly planToPriceId: Record<Exclude<Plan, 'free'>, string>;
+  // The one-time €2.99 introductory charge for Pro Monthly's first invoice
+  // only — never a line item on its own, always paired with productToPriceId
+  // .pro_monthly in the same checkout. See createCheckoutSession/buildLineItems.
+  private readonly introPriceId: string;
+  private readonly productToPriceId: Record<BillingProduct, string>;
+  // Legacy Student price id — Student is no longer offered for new checkout
+  // (see CreateCheckoutDto/buildLineItems, which never reference this), but
+  // an existing Student subscriber's webhook events must keep resolving to
+  // the Pro entitlement rather than falling back to 'free'. Genuinely
+  // optional: an environment that never had a Student plan configured
+  // simply has no legacy subscribers to account for.
+  private readonly legacyStudentPriceId: string | undefined;
   private readonly stripeConfigured: boolean;
 
   constructor(private readonly config: ConfigService) {
     const secretKey = this.config.getOrThrow<string>('STRIPE_SECRET_KEY');
     const webhookSecret = this.config.getOrThrow<string>('STRIPE_WEBHOOK_SECRET');
-    const proPriceId = this.config.getOrThrow<string>('STRIPE_PRICE_PRO_MONTHLY');
-    const studentPriceId = this.config.getOrThrow<string>('STRIPE_PRICE_STUDENT_MONTHLY');
+    const introPriceId = this.config.getOrThrow<string>('STRIPE_PRICE_PRO_MONTHLY_INTRO');
+    const monthlyPriceId = this.config.getOrThrow<string>('STRIPE_PRICE_PRO_MONTHLY');
+    const annualPriceId = this.config.getOrThrow<string>('STRIPE_PRICE_PRO_ANNUAL');
 
-    this.stripeConfigured = ![secretKey, webhookSecret, proPriceId, studentPriceId].some((v) =>
-      v.includes('placeholder'),
-    );
+    this.stripeConfigured = ![
+      secretKey,
+      webhookSecret,
+      introPriceId,
+      monthlyPriceId,
+      annualPriceId,
+    ].some((v) => v.includes('placeholder'));
     if (!this.stripeConfigured) {
       this.logger.warn(
         'STRIPE_* env vars are placeholders — billing requests will be rejected with a clear ' +
@@ -42,7 +59,9 @@ export class StripePaymentProvider implements PaymentProvider {
     }
 
     this.stripe = new Stripe(secretKey);
-    this.planToPriceId = { pro: proPriceId, student: studentPriceId };
+    this.introPriceId = introPriceId;
+    this.productToPriceId = { pro_monthly: monthlyPriceId, pro_annual: annualPriceId };
+    this.legacyStudentPriceId = resolveOptionalApiKey(this.config, 'STRIPE_PRICE_STUDENT_MONTHLY');
   }
 
   async createCheckoutSession(params: CheckoutSessionParams): Promise<{ url: string | null }> {
@@ -50,11 +69,22 @@ export class StripePaymentProvider implements PaymentProvider {
 
     const sessionParams: Stripe.Checkout.SessionCreateParams = {
       mode: 'subscription',
-      line_items: [{ price: this.planToPriceId[params.plan], quantity: 1 }],
+      line_items: this.buildLineItems(params.product),
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
-      metadata: { internalUserId: params.userId, plan: params.plan },
+      metadata: { internalUserId: params.userId, product: params.product },
     };
+
+    if (params.product === 'pro_monthly') {
+      // Defers the recurring €14.99/month price's first charge by 7 days —
+      // the €2.99 one-time line item above is what's actually charged today.
+      // Stripe reports the resulting subscription as status: 'trialing' for
+      // that window; BillingService.resolveEffectivePlan() already grants
+      // full 'pro' access for 'trialing', so this needs no entitlement-layer
+      // change. This is a PAID introductory period — never described as a
+      // "free trial" anywhere in CVPilot's own UI/legal copy.
+      sessionParams.subscription_data = { trial_period_days: 7 };
+    }
 
     if (params.providerCustomerId) {
       sessionParams.customer = params.providerCustomerId;
@@ -62,6 +92,24 @@ export class StripePaymentProvider implements PaymentProvider {
 
     const session = await this.stripe.checkout.sessions.create(sessionParams);
     return { url: session.url };
+  }
+
+  // pro_annual is a single recurring line item, identical in shape to what
+  // this method looked like before this change. pro_monthly additionally
+  // charges the one-time intro price on the same invoice as the recurring
+  // price's (trial-deferred) first cycle — Stripe's documented pattern for a
+  // paid-then-recurring offer; the one-time item never becomes part of the
+  // resulting Subscription.items (it's invoiced once, not repeated), so
+  // resolvePlanFromSubscription's single-item price lookup below is
+  // unaffected by it.
+  private buildLineItems(product: BillingProduct): Stripe.Checkout.SessionCreateParams.LineItem[] {
+    if (product === 'pro_monthly') {
+      return [
+        { price: this.introPriceId, quantity: 1 },
+        { price: this.productToPriceId.pro_monthly, quantity: 1 },
+      ];
+    }
+    return [{ price: this.productToPriceId.pro_annual, quantity: 1 }];
   }
 
   async createCustomerPortalSession(params: CustomerPortalParams): Promise<{ url: string }> {
@@ -117,14 +165,32 @@ export class StripePaymentProvider implements PaymentProvider {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session;
         if (session.mode !== 'subscription') return null;
-        const plan = (session.metadata?.['plan'] ?? 'free') as Plan;
+        const product = session.metadata?.['product'] as BillingProduct | undefined;
+        const subId = session.subscription as string;
+
+        // Re-fetch live subscription state rather than assuming 'active' —
+        // pro_monthly's checkout creates the subscription with
+        // subscription_data.trial_period_days: 7 (see createCheckoutSession
+        // above), so its real initial status is 'trialing', not 'active',
+        // for the first 7 days. Same re-fetch-don't-assume pattern already
+        // used for customer.subscription.updated below.
+        const sub = await this.stripe.subscriptions.retrieve(subId);
+        const periodEndSeconds = this.resolveCurrentPeriodEndSeconds(sub);
+        const periodStartSeconds = sub.items.data[0]?.current_period_start;
+
         return {
           type: 'subscription.activated',
           provider: 'STRIPE',
           providerCustomerId: session.customer as string,
-          providerSubscriptionId: session.subscription as string,
-          plan,
-          subscriptionStatus: 'active',
+          providerSubscriptionId: subId,
+          plan: product ? 'pro' : 'free',
+          billingProduct: product,
+          subscriptionStatus: this.mapStripeStatus(sub.status),
+          ...(periodStartSeconds !== undefined &&
+            periodEndSeconds !== undefined && {
+              currentPeriodStart: new Date(periodStartSeconds * 1000),
+              currentPeriodEnd: new Date(periodEndSeconds * 1000),
+            }),
           paymentMethod: 'CARD',
           currency: (session.currency?.toUpperCase() as Currency) ?? 'GBP',
           metadata: {
@@ -191,6 +257,7 @@ export class StripePaymentProvider implements PaymentProvider {
           providerCustomerId: sub.customer as string,
           providerSubscriptionId: sub.id,
           plan: this.resolvePlanFromSubscription(sub),
+          billingProduct: this.resolveBillingProductFromSubscription(sub),
           subscriptionStatus: this.mapStripeStatus(sub.status),
           ...(periodStartSeconds !== undefined &&
             periodEndSeconds !== undefined && {
@@ -298,15 +365,35 @@ export class StripePaymentProvider implements PaymentProvider {
     return sub.cancel_at != null && periodEndSeconds != null && sub.cancel_at === periodEndSeconds;
   }
 
+  // Both billing products — and the legacy Student price, if configured —
+  // resolve to the same 'pro' entitlement. This is the one place the old
+  // Student price id is still consulted: removing it here (rather than just
+  // from productToPriceId/CreateCheckoutDto) would silently downgrade any
+  // still-live Student subscriber to 'free' on their next webhook event,
+  // even though nothing about their actual Stripe subscription changed.
   private resolvePlanFromSubscription(sub: Stripe.Subscription): Plan {
     const priceId = sub.items.data[0]?.price.id;
-    for (const [plan, id] of Object.entries(this.planToPriceId) as [
-      Exclude<Plan, 'free'>,
+    if (!priceId) return 'free';
+    if (this.legacyStudentPriceId && priceId === this.legacyStudentPriceId) return 'pro';
+    if (Object.values(this.productToPriceId).includes(priceId)) return 'pro';
+    return 'free';
+  }
+
+  // Unlike resolvePlanFromSubscription, this deliberately returns undefined
+  // for the legacy Student price (and anything else unrecognised) — there
+  // is no current BillingProduct to report for a purchase option that no
+  // longer exists, only a Plan-level entitlement to preserve.
+  private resolveBillingProductFromSubscription(
+    sub: Stripe.Subscription,
+  ): BillingProduct | undefined {
+    const priceId = sub.items.data[0]?.price.id;
+    for (const [product, id] of Object.entries(this.productToPriceId) as [
+      BillingProduct,
       string,
     ][]) {
-      if (id === priceId) return plan;
+      if (id === priceId) return product;
     }
-    return 'free';
+    return undefined;
   }
 
   private mapStripeStatus(status: Stripe.Subscription.Status): SubscriptionStatus {

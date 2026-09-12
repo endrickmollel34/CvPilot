@@ -7,7 +7,17 @@ import { resolvePeriodLabel } from './billingLabels';
 const PLAN_LABELS: Record<string, string> = {
   free: 'Free',
   pro: 'Pro',
+  // Legacy — 'student' is no longer a purchasable plan (see the pricing
+  // restructure report), but a pre-existing subscriber's raw stored plan
+  // can still literally be this string (no data migration rewrites it).
+  // Kept only so their dashboard still reads correctly; their actual
+  // entitlement already resolves to Pro (BillingService.resolveEffectivePlan).
   student: 'Student',
+};
+
+const BILLING_PRODUCT_LABELS: Record<string, string> = {
+  pro_monthly: 'Pro (Monthly)',
+  pro_annual: 'Pro (Annual)',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -73,17 +83,18 @@ export function BillingSummary({ subscription }: Props) {
     );
   }
 
-  const { plan, status, currentPeriodEnd, cancelAtPeriodEnd } = subscription;
+  const { plan, status, currentPeriodEnd, cancelAtPeriodEnd, providerMetadata } = subscription;
   const renewalLabel = resolvePeriodLabel(cancelAtPeriodEnd);
+  const billingProduct = providerMetadata?.billingProduct;
+  const planLabel =
+    (billingProduct && BILLING_PRODUCT_LABELS[billingProduct]) || (PLAN_LABELS[plan] ?? plan);
 
   return (
     <section className="mb-8 flex items-center justify-between rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
       <div>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-400">Billing</h2>
         <div className="mt-1 flex items-center gap-2">
-          <p className="text-base font-semibold text-gray-900">
-            Current plan: {PLAN_LABELS[plan] ?? plan}
-          </p>
+          <p className="text-base font-semibold text-gray-900">Current plan: {planLabel}</p>
           <span
             className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_COLORS[status] ?? 'bg-gray-100 text-gray-600'}`}
           >

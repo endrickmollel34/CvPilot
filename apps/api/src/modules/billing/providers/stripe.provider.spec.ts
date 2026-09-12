@@ -57,18 +57,32 @@ function liveSubscription(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// STRIPE_PRICE_PRO_MONTHLY intentionally keeps the same literal value it had
+// before this change ('price_pro_real123') so liveSubscription()'s existing
+// default fixture continues resolving to plan 'pro' / billingProduct
+// 'pro_monthly' unchanged — only the two genuinely new prices get new ids.
 function makeConfig(overrides: Record<string, string> = {}) {
   const vals: Record<string, string> = {
     STRIPE_SECRET_KEY: 'sk_test_real123',
     STRIPE_WEBHOOK_SECRET: 'whsec_real123',
+    STRIPE_PRICE_PRO_MONTHLY_INTRO: 'price_pro_intro_real123',
     STRIPE_PRICE_PRO_MONTHLY: 'price_pro_real123',
+    STRIPE_PRICE_PRO_ANNUAL: 'price_pro_annual_real123',
     STRIPE_PRICE_STUDENT_MONTHLY: 'price_student_real123',
     ...overrides,
   };
-  return { getOrThrow: jest.fn((key: string) => vals[key]) };
+  return {
+    getOrThrow: jest.fn((key: string) => vals[key]),
+    // resolveOptionalApiKey (used for the legacy Student price id) reads
+    // via ConfigService.get(), not getOrThrow() — see stripe.provider.ts.
+    get: jest.fn((key: string) => vals[key]),
+  };
 }
 
-async function buildProvider(config: { getOrThrow: jest.Mock }): Promise<StripePaymentProvider> {
+async function buildProvider(config: {
+  getOrThrow: jest.Mock;
+  get: jest.Mock;
+}): Promise<StripePaymentProvider> {
   const module: TestingModule = await Test.createTestingModule({
     providers: [StripePaymentProvider, { provide: ConfigService, useValue: config }],
   }).compile();
@@ -77,7 +91,7 @@ async function buildProvider(config: { getOrThrow: jest.Mock }): Promise<StripeP
 
 const CHECKOUT_PARAMS = {
   userId: 'user-1',
-  plan: 'pro' as const,
+  product: 'pro_monthly' as const,
   currency: 'GBP' as const,
   successUrl: 'https://app.example.com/dashboard?checkout=success',
   cancelUrl: 'https://app.example.com/dashboard?checkout=cancelled',
@@ -94,8 +108,9 @@ describe('StripePaymentProvider', () => {
     it.each([
       'STRIPE_SECRET_KEY',
       'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_PRICE_PRO_MONTHLY_INTRO',
       'STRIPE_PRICE_PRO_MONTHLY',
-      'STRIPE_PRICE_STUDENT_MONTHLY',
+      'STRIPE_PRICE_PRO_ANNUAL',
     ])(
       'rejects createCheckoutSession with a controlled error when %s is a placeholder',
       async (key) => {
@@ -150,40 +165,46 @@ describe('StripePaymentProvider', () => {
   // ─── Normal operation when properly configured ─────────────────────────────
 
   describe('when properly configured', () => {
-    it('creates a Pro checkout session with the Pro price id and metadata', async () => {
+    it('creates a Pro Monthly checkout session with the one-time intro price + recurring price, and a 7-day trial', async () => {
       const provider = await buildProvider(makeConfig());
       mockCheckoutSessionsCreate.mockResolvedValue({
-        url: 'https://checkout.stripe.com/pro-session',
+        url: 'https://checkout.stripe.com/pro-monthly-session',
       });
 
-      const result = await provider.createCheckoutSession(CHECKOUT_PARAMS);
+      const result = await provider.createCheckoutSession(CHECKOUT_PARAMS); // product: 'pro_monthly'
 
       expect(mockCheckoutSessionsCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           mode: 'subscription',
-          line_items: [{ price: 'price_pro_real123', quantity: 1 }],
+          line_items: [
+            { price: 'price_pro_intro_real123', quantity: 1 },
+            { price: 'price_pro_real123', quantity: 1 },
+          ],
+          subscription_data: { trial_period_days: 7 },
           success_url: CHECKOUT_PARAMS.successUrl,
           cancel_url: CHECKOUT_PARAMS.cancelUrl,
-          metadata: { internalUserId: 'user-1', plan: 'pro' },
+          metadata: { internalUserId: 'user-1', product: 'pro_monthly' },
         }),
       );
-      expect(result).toEqual({ url: 'https://checkout.stripe.com/pro-session' });
+      expect(result).toEqual({ url: 'https://checkout.stripe.com/pro-monthly-session' });
     });
 
-    it('creates a Student checkout session with the Student price id', async () => {
+    it('creates a Pro Annual checkout session with only the annual recurring price and no trial', async () => {
       const provider = await buildProvider(makeConfig());
       mockCheckoutSessionsCreate.mockResolvedValue({
-        url: 'https://checkout.stripe.com/student-session',
+        url: 'https://checkout.stripe.com/pro-annual-session',
       });
 
-      await provider.createCheckoutSession({ ...CHECKOUT_PARAMS, plan: 'student' });
+      await provider.createCheckoutSession({ ...CHECKOUT_PARAMS, product: 'pro_annual' });
 
       expect(mockCheckoutSessionsCreate).toHaveBeenCalledWith(
         expect.objectContaining({
-          line_items: [{ price: 'price_student_real123', quantity: 1 }],
-          metadata: { internalUserId: 'user-1', plan: 'student' },
+          line_items: [{ price: 'price_pro_annual_real123', quantity: 1 }],
+          metadata: { internalUserId: 'user-1', product: 'pro_annual' },
         }),
       );
+      const callArgs = mockCheckoutSessionsCreate.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(callArgs['subscription_data']).toBeUndefined();
     });
 
     it('attaches an existing Stripe customer id when one is supplied', async () => {
@@ -218,7 +239,11 @@ describe('StripePaymentProvider', () => {
       expect(result).toEqual({ url: 'https://billing.stripe.com/portal-session' });
     });
 
-    it('verifies and maps a checkout.session.completed webhook event', async () => {
+    // checkout.session.completed now re-fetches the live subscription rather
+    // than assuming 'active' — pro_monthly's checkout creates the
+    // subscription with subscription_data.trial_period_days: 7, so its real
+    // initial status is 'trialing' for the first 7 days, not 'active'.
+    it('verifies and maps a checkout.session.completed webhook event for Pro Monthly — re-fetches live status since it starts trialing', async () => {
       const provider = await buildProvider(makeConfig());
       mockWebhooksConstructEvent.mockReturnValue({
         type: 'checkout.session.completed',
@@ -227,12 +252,77 @@ describe('StripePaymentProvider', () => {
             mode: 'subscription',
             customer: 'cus_1',
             subscription: 'sub_1',
-            currency: 'gbp',
-            metadata: { internalUserId: 'user-1', plan: 'pro' },
+            currency: 'eur',
+            metadata: { internalUserId: 'user-1', product: 'pro_monthly' },
             id: 'cs_1',
           },
         },
       });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          status: 'trialing',
+          items: {
+            data: [
+              {
+                price: { id: 'price_pro_real123' },
+                current_period_start: 1_700_000_000,
+                current_period_end: 1_700_604_800, // +7 days
+              },
+            ],
+          },
+        }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(mockSubscriptionsRetrieve).toHaveBeenCalledWith('sub_1');
+      expect(result).toEqual(
+        expect.objectContaining({
+          type: 'subscription.activated',
+          provider: 'STRIPE',
+          providerCustomerId: 'cus_1',
+          providerSubscriptionId: 'sub_1',
+          plan: 'pro',
+          billingProduct: 'pro_monthly',
+          subscriptionStatus: 'trialing',
+          currentPeriodStart: new Date(1_700_000_000 * 1000),
+          currentPeriodEnd: new Date(1_700_604_800 * 1000),
+        }),
+      );
+    });
+
+    it('verifies and maps a checkout.session.completed webhook event for Pro Annual — immediately active, no trial', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            mode: 'subscription',
+            customer: 'cus_1',
+            subscription: 'sub_1',
+            currency: 'eur',
+            metadata: { internalUserId: 'user-1', product: 'pro_annual' },
+            id: 'cs_1',
+          },
+        },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          status: 'active',
+          items: {
+            data: [
+              {
+                price: { id: 'price_pro_annual_real123' },
+                current_period_start: 1_700_000_000,
+                current_period_end: 1_731_536_000, // +365 days
+              },
+            ],
+          },
+        }),
+      );
 
       const result = await provider.verifyAndParseWebhook({
         rawBody: Buffer.from('{}'),
@@ -242,10 +332,9 @@ describe('StripePaymentProvider', () => {
       expect(result).toEqual(
         expect.objectContaining({
           type: 'subscription.activated',
-          provider: 'STRIPE',
-          providerCustomerId: 'cus_1',
-          providerSubscriptionId: 'sub_1',
           plan: 'pro',
+          billingProduct: 'pro_annual',
+          subscriptionStatus: 'active',
         }),
       );
     });
@@ -300,9 +389,36 @@ describe('StripePaymentProvider', () => {
         type: 'customer.subscription.updated',
         data: { object: { id: 'sub_1' } },
       });
+      mockSubscriptionsRetrieve.mockResolvedValue(liveSubscription({ cancel_at_period_end: true }));
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          plan: 'pro',
+          subscriptionStatus: 'active',
+          cancelAtPeriodEnd: true,
+        }),
+      );
+    });
+
+    // Backward compatibility (see the pricing restructure report): Student
+    // is no longer offered for new checkout, but an existing Student
+    // subscriber's webhook events must keep resolving to the Pro
+    // entitlement rather than silently falling back to 'free' the moment
+    // the old price id is removed from productToPriceId.
+    it('maps a legacy Student Stripe price id to the Pro entitlement, with no current billingProduct', async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_legacy_student',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
       mockSubscriptionsRetrieve.mockResolvedValue(
         liveSubscription({
-          cancel_at_period_end: true,
           items: {
             data: [
               {
@@ -320,12 +436,85 @@ describe('StripePaymentProvider', () => {
         signature: 'sig',
       });
 
-      expect(result).toEqual(
-        expect.objectContaining({
-          plan: 'student',
-          subscriptionStatus: 'active',
-          cancelAtPeriodEnd: true,
+      expect(result).toEqual(expect.objectContaining({ plan: 'pro', billingProduct: undefined }));
+    });
+
+    it('does not resolve to Pro for a legacy Student price when STRIPE_PRICE_STUDENT_MONTHLY is not configured in this environment', async () => {
+      const provider = await buildProvider(makeConfig({ STRIPE_PRICE_STUDENT_MONTHLY: '' }));
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_no_legacy',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          items: {
+            data: [
+              {
+                price: { id: 'price_student_real123' },
+                current_period_start: 1_700_000_000,
+                current_period_end: 1_702_592_000,
+              },
+            ],
+          },
         }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(expect.objectContaining({ plan: 'free' }));
+    });
+
+    it("resolves plan 'pro' and billingProduct 'pro_monthly' for a subscription on the Pro Monthly price", async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_monthly',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(liveSubscription());
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({ plan: 'pro', billingProduct: 'pro_monthly' }),
+      );
+    });
+
+    it("resolves plan 'pro' and billingProduct 'pro_annual' for a subscription on the Pro Annual price", async () => {
+      const provider = await buildProvider(makeConfig());
+      mockWebhooksConstructEvent.mockReturnValue({
+        id: 'evt_annual',
+        type: 'customer.subscription.updated',
+        data: { object: { id: 'sub_1' } },
+      });
+      mockSubscriptionsRetrieve.mockResolvedValue(
+        liveSubscription({
+          items: {
+            data: [
+              {
+                price: { id: 'price_pro_annual_real123' },
+                current_period_start: 1_700_000_000,
+                current_period_end: 1_731_536_000,
+              },
+            ],
+          },
+        }),
+      );
+
+      const result = await provider.verifyAndParseWebhook({
+        rawBody: Buffer.from('{}'),
+        signature: 'sig',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({ plan: 'pro', billingProduct: 'pro_annual' }),
       );
     });
 

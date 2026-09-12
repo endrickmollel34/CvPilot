@@ -2,7 +2,13 @@ import { Injectable, Logger, BadRequestException, NotFoundException } from '@nes
 import { InjectRepository } from '@nestjs/typeorm';
 import { type Repository, In } from 'typeorm';
 
-import type { Plan, PaymentProviderType, UsageCounter, UsageSummary } from '@cvpilot/shared';
+import type {
+  Plan,
+  BillingProduct,
+  PaymentProviderType,
+  UsageCounter,
+  UsageSummary,
+} from '@cvpilot/shared';
 import { PLAN_LIMITS } from '@cvpilot/shared';
 
 import { SubscriptionEntity } from '../../entities/subscription.entity';
@@ -36,7 +42,7 @@ export class BillingService {
 
   async createCheckoutSession(
     clerkId: string,
-    plan: Exclude<Plan, 'free'>,
+    product: BillingProduct,
     providerType: PaymentProviderType = 'STRIPE',
   ): Promise<{ url: string | null }> {
     const provider = this.getProvider(providerType);
@@ -46,7 +52,7 @@ export class BillingService {
     return provider.createCheckoutSession({
       userId: user.id,
       providerCustomerId: sub?.providerCustomerId,
-      plan,
+      product,
       currency: 'GBP',
       successUrl: `${process.env['FRONTEND_URL'] ?? ''}/dashboard?checkout=success`,
       cancelUrl: `${process.env['FRONTEND_URL'] ?? ''}/dashboard?checkout=cancelled`,
@@ -265,6 +271,12 @@ export class BillingService {
         status: event.subscriptionStatus ?? 'active',
         paymentMethod: event.paymentMethod,
         billingCycle: 'recurring',
+        // No schema change — reuses the existing, previously-unused jsonb
+        // column so BillingSummary can distinguish Monthly vs Annual Pro
+        // without Plan itself ever needing to know about billing cadence.
+        ...(event.billingProduct && {
+          providerMetadata: { billingProduct: event.billingProduct },
+        }),
       },
       { conflictPaths: ['userId'] },
     );
@@ -290,6 +302,9 @@ export class BillingService {
         ...(event.currentPeriodEnd && { currentPeriodEnd: event.currentPeriodEnd }),
         ...(event.cancelAtPeriodEnd !== undefined && {
           cancelAtPeriodEnd: event.cancelAtPeriodEnd,
+        }),
+        ...(event.billingProduct && {
+          providerMetadata: { billingProduct: event.billingProduct },
         }),
       },
     );
@@ -393,10 +408,20 @@ function toUsageCounter(used: number, limit: number): UsageCounter {
 function resolveEffectivePlan(sub: Pick<SubscriptionEntity, 'plan' | 'status'> | null): Plan {
   if (!sub || sub.plan === 'free') return 'free';
 
+  // Legacy compatibility: Student was removed as a Plan value, but an
+  // existing DB row can still literally contain the old 'student' string
+  // (TypeORM never validates a column's raw value against the TS union it's
+  // typed as) — no data migration rewrites those rows (see the pricing
+  // restructure report). Normalizing here, rather than adding 'student'
+  // back into PLAN_LIMITS, keeps PLAN_LIMITS itself genuinely just
+  // 'free'/'pro' everywhere else. Mirrors StripePaymentProvider's own
+  // legacy-price-id handling on the webhook side.
+  const plan: Plan = (sub.plan as string) === 'student' ? 'pro' : sub.plan;
+
   switch (sub.status) {
     case 'active':
     case 'trialing':
-      return sub.plan;
+      return plan;
     case 'past_due':
     case 'incomplete':
     case 'cancelled':
