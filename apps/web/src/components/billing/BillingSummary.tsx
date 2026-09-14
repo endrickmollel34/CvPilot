@@ -68,7 +68,7 @@ export function BillingSummary({ subscription }: Props) {
 
   if (!subscription || subscription.plan === 'free') {
     return (
-      <section className="mb-8 flex items-center justify-between rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+      <section className="mb-8 flex flex-col items-start gap-3 rounded-xl border border-gray-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-400">Billing</h2>
           <p className="mt-1 text-base font-semibold text-gray-900">Current plan: Free</p>
@@ -90,10 +90,10 @@ export function BillingSummary({ subscription }: Props) {
     (billingProduct && BILLING_PRODUCT_LABELS[billingProduct]) || (PLAN_LABELS[plan] ?? plan);
 
   return (
-    <section className="mb-8 flex items-center justify-between rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+    <section className="mb-8 flex flex-col items-start gap-3 rounded-xl border border-gray-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
       <div>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-400">Billing</h2>
-        <div className="mt-1 flex items-center gap-2">
+        <div className="mt-1 flex flex-wrap items-center gap-2">
           <p className="text-base font-semibold text-gray-900">Current plan: {planLabel}</p>
           <span
             className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_COLORS[status] ?? 'bg-gray-100 text-gray-600'}`}

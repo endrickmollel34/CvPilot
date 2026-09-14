@@ -3,24 +3,18 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { UserButton } from '@clerk/nextjs';
-import { LayoutDashboard, FileText, BarChart3, Mail, Plus } from 'lucide-react';
+import { Plus } from 'lucide-react';
 
-const NAV = [
-  { href: '/dashboard', label: 'Dashboard', Icon: LayoutDashboard, exact: true },
-  { href: '/cvs', label: 'My CVs', Icon: FileText, exact: false },
-  { href: '/analyze', label: 'Analyse CV', Icon: BarChart3, exact: false },
-  { href: '/cover-letter', label: 'Cover Letter', Icon: Mail, exact: false },
-];
+import { NAV_ITEMS, isNavItemActive } from './navItems';
 
+// Permanent sidebar — desktop only (lg and up). Below that breakpoint it
+// renders nothing; MobileNav provides the equivalent hamburger/drawer
+// navigation instead, reusing the same NAV_ITEMS data.
 export function SidebarNav() {
   const pathname = usePathname();
 
-  function isActive(href: string, exact: boolean) {
-    return exact ? pathname === href : pathname === href || pathname.startsWith(href + '/');
-  }
-
   return (
-    <aside className="flex h-screen w-56 shrink-0 flex-col border-r border-gray-200 bg-white">
+    <aside className="hidden h-screen w-56 shrink-0 flex-col border-r border-gray-200 bg-white lg:flex">
       {/* Brand */}
       <div className="flex h-14 items-center border-b border-gray-200 px-4">
         <Link href="/dashboard" className="text-base font-bold tracking-tight text-gray-900">
@@ -30,8 +24,8 @@ export function SidebarNav() {
 
       {/* Primary nav */}
       <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-3">
-        {NAV.map(({ href, label, Icon, exact }) => {
-          const active = isActive(href, exact);
+        {NAV_ITEMS.map(({ href, label, Icon, exact }) => {
+          const active = isNavItemActive(pathname, href, exact);
           return (
             <Link
               key={href}

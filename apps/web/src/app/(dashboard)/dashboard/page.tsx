@@ -104,7 +104,7 @@ export default async function DashboardPage({ searchParams }: Props) {
       <PlanUsageCard usage={usage} />
 
       {/* Stats */}
-      <div className="mb-8 grid grid-cols-3 gap-4">
+      <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
         {[
           { label: 'CVs', value: cvs.length, Icon: FileText, href: '/cvs' },
           {

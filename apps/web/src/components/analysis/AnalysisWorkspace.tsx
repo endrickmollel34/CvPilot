@@ -250,7 +250,7 @@ export function AnalysisWorkspace({
         {/* Job details */}
         <div className="space-y-4">
           <h2 className="text-sm font-semibold text-gray-700">Job details</h2>
-          <div className="flex gap-4">
+          <div className="flex flex-col gap-4 sm:flex-row">
             <div className="flex-1">
               <label className="mb-1 block text-xs font-medium text-gray-600">Job title *</label>
               <input

@@ -120,7 +120,7 @@ export function TailoringWorkspace({
         </p>
 
         <form onSubmit={(e) => void handleSubmit(e)} className="flex flex-col gap-5">
-          <div className="flex gap-4">
+          <div className="flex flex-col gap-4 sm:flex-row">
             <div className="flex-1">
               <label className="mb-1 block text-sm font-medium text-gray-700">Job title</label>
               <input

@@ -579,7 +579,7 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
             {/* Job details */}
             <div className="space-y-3">
               <h2 className="text-sm font-semibold text-gray-700">Job details</h2>
-              <div className="flex gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row">
                 <div className="flex-1">
                   <label className={labelCls}>Job title *</label>
                   <input
@@ -623,7 +623,7 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
             {/* Recipient */}
             <div className="space-y-3">
               <h2 className="text-sm font-semibold text-gray-700">Recipient (optional)</h2>
-              <div className="flex gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row">
                 <div className="flex-1">
                   <label className={labelCls}>Recipient name</label>
                   <input
