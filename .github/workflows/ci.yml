@@ -30,6 +30,26 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    # Several apps/api spec files build a real NestJS TestingModule wired to
+    # BullModule (RedisRepository/real Redis) rather than mocking it —
+    # ai-rate-limit.guard.integration.spec.ts, ai-rate-limit.service.spec.ts,
+    # cv-builder-quota-lock.integration.spec.ts, cv-prefill-lock.integration.spec.ts,
+    # prefill-lock.service.spec.ts. Confirmed via a real CI run's own logs
+    # (`gh run view --log-failed`) that without a Redis service + REDIS_URL,
+    # `ConfigService.getOrThrow('REDIS_URL')` throws during module
+    # compilation — this job never had Redis, unlike test-e2e below.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
 
