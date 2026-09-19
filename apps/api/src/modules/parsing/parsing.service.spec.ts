@@ -15,6 +15,13 @@ import { CvEntity } from '../../entities/cv.entity';
 // and that a no-text result is treated as a failure, not silently a success.
 jest.mock('pdf-parse', () => ({ PDFParse: jest.fn() }));
 jest.mock('mammoth', () => ({ extractRawText: jest.fn() }));
+// Mocked so these tests never depend on a real Sentry client/DSN — only
+// whether captureException was called on the failure path
+// (RABBIT_NOTEBOOK.md).
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/nestjs', () => ({
+  captureException: (...args: unknown[]) => mockCaptureException(...args),
+}));
 
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
@@ -163,6 +170,27 @@ describe('ParsingService', () => {
         'cv-1',
         expect.objectContaining({ parseStatus: 'done' }),
       );
+    });
+
+    it('reports a failed parsing job to Sentry (monitoring), without changing its swallow-and-mark-failed behavior', async () => {
+      mockRepo.findOneByOrFail.mockResolvedValue({
+        id: 'cv-1',
+        r2ObjectKey: 'cvs/user-1/file.pdf',
+        mimeType: 'application/pdf',
+      });
+      jest
+        .spyOn(S3Client.prototype, 'send')
+        .mockResolvedValue({ Body: readableFromBuffer(Buffer.from('irrelevant')) } as never);
+      const getText = jest.fn().mockResolvedValue({ text: '   ' });
+      mockPDFParse.mockImplementation(() => ({ getText, destroy: jest.fn() }));
+
+      await service.process({ data: { cvId: 'cv-1' } } as Job<{ cvId: string }>);
+
+      expect(mockCaptureException).toHaveBeenCalledWith(
+        expect.any(Error),
+        expect.objectContaining({ tags: { queue: 'cv-parsing' }, extra: { cvId: 'cv-1' } }),
+      );
+      expect(mockRepo.update).toHaveBeenLastCalledWith('cv-1', { parseStatus: 'failed' });
     });
 
     it('marks a builder CV (no r2ObjectKey) as done immediately without parsing', async () => {

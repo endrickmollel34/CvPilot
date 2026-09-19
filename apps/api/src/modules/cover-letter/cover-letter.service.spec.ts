@@ -13,6 +13,14 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
+// Mocked for the whole file so these tests never depend on a real Sentry
+// client/DSN — only whether captureException was called on the failure
+// path (RABBIT_NOTEBOOK.md).
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/nestjs', () => ({
+  captureException: (...args: unknown[]) => mockCaptureException(...args),
+}));
+
 import type { CoverLetterJobData } from './cover-letter.service';
 import { CoverLetterService } from './cover-letter.service';
 import { CoverLetterAiService } from './cover-letter-ai.service';
@@ -604,6 +612,32 @@ describe('CoverLetterService', () => {
       } as unknown as Job<CoverLetterJobData>),
     ).resolves.toBeUndefined(); // no re-throw
 
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+  });
+
+  it('reports a failed cover letter job to Sentry (monitoring), without changing its swallow-and-mark-failed behavior', async () => {
+    mockAiService.generateCoverLetter.mockRejectedValue(new Error('All AI providers exhausted'));
+    mockCvService.findById.mockResolvedValue(MOCK_CV);
+
+    await service.process({
+      data: {
+        coverLetterId: 'letter-1',
+        userId: 'user-1',
+        cvId: 'cv-1',
+        jobTitle: 'Senior Engineer',
+        companyName: 'Acme Corp',
+        jobDescription: 'Lead backend development.',
+        tone: 'professional',
+      },
+    } as unknown as Job<CoverLetterJobData>);
+
+    expect(mockCaptureException).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { queue: 'cover-letter' },
+        extra: { coverLetterId: 'letter-1', cvId: 'cv-1' },
+      }),
+    );
     expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
   });
 

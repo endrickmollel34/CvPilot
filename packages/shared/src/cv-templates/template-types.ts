@@ -26,7 +26,8 @@ export type TemplateId =
   | 'minimal'
   | 'professional'
   | 'compact'
-  | 'signature';
+  | 'signature'
+  | 'profile';
 
 /**
  * Guidance only, never a guarantee — real-world ATS parser behavior varies
@@ -88,7 +89,14 @@ export type TemplateLayout = 'single-column' | 'sidebar-main';
  *  continuation-page header, so the tick reads as the template's one
  *  consistent signature mark rather than a one-off. Deliberately keeps
  *  the accent OFF the label text itself — see SIGNATURE_TEMPLATE's doc
- *  comment on controlled accent usage. */
+ *  comment on controlled accent usage.
+ *  'thin-blue-rule' (Profile) — a seventh, genuinely distinct mechanic:
+ *  heading text in normal/title case (never uppercase, unlike Classic/
+ *  Professional/Compact-adjacent conventions) set in the muted blue
+ *  accent at a light/regular weight, with a thin GRAY (not blue) rule
+ *  below it — the only treatment that pairs a colored label with an
+ *  explicitly neutral-colored rule, distinguishing it from Modern's
+ *  colored-underline and Professional's colored-caps-plus-colored-rule. */
 export type HeadingTreatment =
   | 'rule-underline'
   | 'accent-underline'
@@ -97,7 +105,8 @@ export type HeadingTreatment =
   | 'editorial-label'
   | 'navy-caps-rule'
   | 'copper-marker-inline-rule'
-  | 'wine-tick-label';
+  | 'wine-tick-label'
+  | 'thin-blue-rule';
 
 export interface TemplateTypography {
   /** CSS font-family stack (browser) / registered PDFKit font family name —
@@ -191,6 +200,14 @@ export interface TemplateDefinition {
    *  needing a bold full-height solid panel. Only meaningful when
    *  layout === 'sidebar-main'. */
   sidebarBackground?: string;
+  /** True only for Profile — the one template with an optional profile
+   *  photograph. Every other template omits this (undefined, treated as
+   *  false); lets the web editor/API gate photo-upload UI and behavior on
+   *  the template definition rather than a hardcoded `id === 'profile'`
+   *  string check spread across call sites. The photo itself is never
+   *  stored in `CvContent`/this definition — see CvEntity.photoObjectKey's
+   *  doc comment for why it lives on its own DB column. */
+  supportsPhoto?: boolean;
 }
 
 export const CLASSIC_TEMPLATE: TemplateDefinition = {
@@ -620,6 +637,87 @@ export const SIGNATURE_TEMPLATE: TemplateDefinition = {
   sidebarSections: ['skills', 'languages', 'certifications'],
 };
 
+/**
+ * Profile (Phase 7, V1) — the seventh and newest design: an asymmetric
+ * two-column personal template with an OPTIONAL circular profile photo.
+ * A pale-grey sidebar (~33% of the page) carries a muted-blue "cap" at its
+ * top — the candidate name in centered bold white, with a curved lower
+ * edge — a small circular portrait with a white ring may overlap the
+ * cap/sidebar boundary when the user has uploaded one; without a photo the
+ * cap simply doesn't reserve that space, closing up elegantly rather than
+ * showing an empty circle (see profile-document.tsx / the PDFKit
+ * renderer's own doc comment for exactly how). Below the cap, the sidebar
+ * holds Personal details (with small pictogram markers), Skills and
+ * Languages (each entry optionally shown with an explicit 1-5 proficiency
+ * dot rating — `CvSkillEntry.rating`/`CvLanguageEntry.rating` — never
+ * inferred from free-text `level`), and Qualities (`CvContent.qualities`,
+ * square bullet markers) when present. The wider white main column carries
+ * every other section (Summary, Work Experience as "Employment",
+ * Education, Certifications, References) in the user's own `sectionOrder`.
+ *
+ * `headingTreatment: 'thin-blue-rule'` — the seventh, genuinely distinct
+ * mechanic (see its own doc comment): light-weight blue heading text with
+ * a thin GRAY rule underneath, never uppercase.
+ *
+ * Unlike Modern/Professional's sidebar (always assumed to fit on page 1),
+ * Profile's sidebar can genuinely continue onto a later page if its own
+ * content overflows — see the PDFKit renderer's own doc comment for the
+ * page-sharing mechanism this requires. Nothing sidebar-worthy is ever
+ * silently dropped.
+ */
+export const PROFILE_TEMPLATE: TemplateDefinition = {
+  id: 'profile',
+  name: 'Profile',
+  description: 'Two-column personal design with an optional profile photo and a soft pale sidebar.',
+  atsTier: 'visual-professional',
+  layout: 'sidebar-main',
+  headingTreatment: 'thin-blue-rule',
+  typography: {
+    fontFamily: 'Liberation Sans, Arial, Helvetica, sans-serif',
+    // Base size for the cap's centered name — a narrow ~33%-width column,
+    // so this is deliberately smaller than most other templates' base name
+    // size; the adaptive floor (see useProfileNameFontSize/
+    // profileNameFontSize) steps it down further only for a name that
+    // would otherwise wrap past 2 lines inside the cap.
+    nameSize: 21,
+    jobTitleSize: 10,
+    headingSize: 10.5,
+    bodySize: 10,
+    metaSize: 8.5,
+  },
+  colors: {
+    text: '#23272B',
+    // Blue, light/regular-weight heading text — see headingTreatment's
+    // doc comment for why the rule underneath is deliberately gray, not
+    // this same blue.
+    heading: '#2C5C8A',
+    muted: '#6B7280',
+    rule: '#D9DEE2',
+    accent: '#2C5C8A',
+    // The cap's fill — a slightly deeper blue than `heading` so white cap
+    // text stays confidently legible against it.
+    headerBackground: '#3B6FA0',
+    headerText: '#FFFFFF',
+    headerMutedText: '#D9E4EE',
+  },
+  spacing: {
+    sectionGap: 15,
+    entryGap: 11,
+    bulletGap: 3.5,
+    lineGap: 2.2,
+  },
+  margins: {
+    top: 40,
+    bottom: 44,
+    left: 40,
+    right: 40,
+  },
+  sidebarSections: ['skills', 'languages'],
+  sidebarWidthRatio: 0.33,
+  sidebarBackground: '#F4F5F6',
+  supportsPhoto: true,
+};
+
 export const TEMPLATE_REGISTRY: Record<TemplateId, TemplateDefinition> = {
   classic: CLASSIC_TEMPLATE,
   modern: MODERN_TEMPLATE,
@@ -627,6 +725,7 @@ export const TEMPLATE_REGISTRY: Record<TemplateId, TemplateDefinition> = {
   professional: PROFESSIONAL_TEMPLATE,
   compact: COMPACT_TEMPLATE,
   signature: SIGNATURE_TEMPLATE,
+  profile: PROFILE_TEMPLATE,
 };
 
 export const DEFAULT_TEMPLATE_ID: TemplateId = 'classic';

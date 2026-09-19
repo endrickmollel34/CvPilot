@@ -5,6 +5,7 @@ import type {
   CvWorkEntry,
   CvEducationEntry,
   CvCertificationEntry,
+  CvReferenceEntry,
 } from '../types/cv.types';
 import { COMPACT_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -13,7 +14,7 @@ import {
   normalizeParagraph,
   shortenUrlLabel,
 } from './format';
-import { DEFAULT_SECTION_ORDER } from './classic-document';
+import { resolveSectionOrder } from './classic-document';
 
 /**
  * CV Template Foundation, Phase 5 — Compact, browser side. For candidates
@@ -160,6 +161,47 @@ function EducationEntries({ entries }: { entries: CvEducationEntry[] }) {
   );
 }
 
+// Main flow, never COMPACT_TEMPLATE.sidebarSections (the horizontal
+// footer band) — each entry carries far more text than a skill/language/
+// certification line, so it stays in the full-width flow rather than a
+// narrow band column. Reuses the existing entry/summary classes.
+function ReferencesSection({
+  entries,
+  availableUponRequest,
+}: {
+  entries: CvReferenceEntry[];
+  availableUponRequest?: boolean;
+}) {
+  if (!entries.length && !availableUponRequest) return null;
+  return (
+    <>
+      <SectionHeading title="References" />
+      {availableUponRequest ? (
+        <p className="cvc-summary">References available upon request.</p>
+      ) : (
+        entries.map((r) => (
+          <div key={r.id} className="cvc-entry">
+            <div className="cvc-entry-row">
+              <span className="cvc-entry-title">{r.fullName}</span>
+            </div>
+            {(r.jobTitle || r.company) && (
+              <div className="cvc-entry-org">
+                {[r.jobTitle, r.company].filter(Boolean).join(', ')}
+              </div>
+            )}
+            {r.relationship && <div className="cvc-entry-meta">{r.relationship}</div>}
+            {(r.email || r.phone) && (
+              <div className="cvc-entry-meta">
+                {[r.email, r.phone].filter(Boolean).join('  ·  ')}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
 function renderMainSection(content: CvContent, section: CvSection) {
   switch (section) {
     case 'summary':
@@ -174,6 +216,14 @@ function renderMainSection(content: CvContent, section: CvSection) {
       return <WorkEntries key="work" entries={content.workExperience} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
+    case 'references':
+      return (
+        <ReferencesSection
+          key="references"
+          entries={content.references ?? []}
+          availableUponRequest={content.referencesAvailableUponRequest ?? false}
+        />
+      );
     default:
       return null;
   }
@@ -239,7 +289,7 @@ function renderSecondaryBand(content: CvContent) {
 
 export function CompactCvDocument({ content }: { content: CvContent }) {
   const { personalDetails: pd, sectionOrder } = content;
-  const order = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  const order = resolveSectionOrder(sectionOrder);
   const secondarySet = new Set(COMPACT_TEMPLATE.sidebarSections ?? []);
   const mainSections = order.filter((s) => !secondarySet.has(s));
   const [nameFontSize, nameRef] = useCompactNameFontSize(pd.fullName || 'Your Name');

@@ -9,6 +9,7 @@ const VALID_SECTIONS = [
   'skills',
   'languages',
   'certifications',
+  'references',
 ] as const;
 
 export class ReorderCvSectionsDto {

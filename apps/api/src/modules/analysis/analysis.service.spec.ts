@@ -10,6 +10,14 @@ import {
 } from '@nestjs/common';
 import type { Job } from 'bullmq';
 
+// Mocked for the whole file so these tests never depend on a real Sentry
+// client/DSN — only whether captureException was called on the failure
+// path (RABBIT_NOTEBOOK.md).
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/nestjs', () => ({
+  captureException: (...args: unknown[]) => mockCaptureException(...args),
+}));
+
 import { AnalysisService } from './analysis.service';
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { AtsReportEntity } from '../../entities/ats-report.entity';
@@ -634,6 +642,23 @@ describe('AnalysisService — submit() / process()', () => {
     await runProcess();
 
     expect(mockAiService.runAnalysis).not.toHaveBeenCalled();
+    expect(mockAnalysisRepo.update).toHaveBeenCalledWith('analysis-1', { status: 'failed' });
+  });
+
+  it('reports a failed analysis job to Sentry (monitoring), without changing its swallow-and-mark-failed behavior', async () => {
+    mockCvService.findById.mockResolvedValue({ ...MOCK_CV, parsedContent: undefined });
+
+    await runProcess();
+
+    expect(mockCaptureException).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: { queue: 'cv-analysis' },
+        extra: { analysisId: 'analysis-1', cvId: 'cv-1' },
+      }),
+    );
+    // Still never rethrows — BullMQ still sees this job as completed, not
+    // failed; adding Sentry reporting must never change that.
     expect(mockAnalysisRepo.update).toHaveBeenCalledWith('analysis-1', { status: 'failed' });
   });
 

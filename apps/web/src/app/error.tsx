@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import Link from 'next/link';
+import * as Sentry from '@sentry/nextjs';
 
 export default function Error({
   error,
@@ -12,6 +13,10 @@ export default function Error({
 }) {
   useEffect(() => {
     console.error(error);
+    // Monitoring only (RABBIT_NOTEBOOK.md) — a safe no-op when
+    // NEXT_PUBLIC_SENTRY_DSN isn't configured; never changes this
+    // boundary's own retry/navigation UI below.
+    Sentry.captureException(error);
   }, [error]);
 
   return (

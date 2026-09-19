@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
 
 import {
+  BadRequestException,
+  ConflictException,
   Injectable,
   ForbiddenException,
   Logger,
@@ -28,7 +30,9 @@ import { isDevQuotaBypassActive } from '../../common/utils/dev-quota-bypass.util
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { PrefillExtractionService } from './prefill-extraction.service';
+import { PrefillLockService } from './prefill-lock.service';
 import { PdfGenerationService } from './pdf-generation.service';
+import { CvPhotoService } from './cv-photo.service';
 import { R2StorageService } from '../../common/services/r2-storage.service';
 import type { GenerateUploadUrlDto } from './dto/generate-upload-url.dto';
 import { MAX_FILE_SIZE_BYTES } from './dto/generate-upload-url.dto';
@@ -40,6 +44,49 @@ import type { ReorderCvSectionsDto } from './dto/reorder-cv-sections.dto';
 import type { UpdateCvTemplateDto } from './dto/update-cv-template.dto';
 
 const PRESIGNED_URL_TTL_SECONDS = 900; // 15 minutes
+
+// Pre-launch gap closed here (RABBIT_NOTEBOOK.md §27): the "Idempotency:
+// return existing prefill CV for this upload" check below reused results
+// correctly for SEQUENTIAL calls, but two REQUESTS RACING for the same
+// uploadCvId (a double-click, a retried request after a slow response,
+// two browser tabs) could both read "no existing row" before either had
+// saved one — both then call the real, paid OpenAI extraction and both
+// create a CV row, silently doubling AI cost and double-counting against
+// PLAN_LIMITS.builderCvsTotal for one logical prefill. Guarded with a
+// per-uploadCvId PrefillLockService lock (SET NX to acquire) — generous
+// relative to a realistic OpenAI call so it's never the cause of a false
+// rejection, but bounded so a crashed request can't wedge this
+// uploadCvId forever.
+const PREFILL_LOCK_TTL_MS = 60_000;
+// §28: a fixed TTL alone isn't enough — PrefillExtractionService retries
+// up to 3 times with no explicit per-call timeout (the OpenAI SDK's own
+// default is several minutes), so a slow/degraded OpenAI response can
+// legitimately make one prefillFromUpload call run longer than 60s.
+// Verified directly (prefill-lock.service.spec.ts's "DEMONSTRATED GAP"
+// test) that a fixed-TTL lock with no renewal silently expires out from
+// under a still-running operation, letting a second caller acquire the
+// "same" lock. This heartbeat re-extends the lock well before its TTL
+// would elapse, for as long as the AI call is genuinely still in flight —
+// see prefill-lock.service.spec.ts's "FIX VERIFIED" test for direct proof
+// this keeps the lock held past what the fixed TTL alone would allow, and
+// PrefillLockService's own doc comment for why a crashed process is still
+// safe (the heartbeat just stops, the TTL still expires on its own).
+const PREFILL_LOCK_RENEW_INTERVAL_MS = 20_000;
+
+// §28: the OTHER concurrency gap this session's investigation found — two
+// DIFFERENT builder-CV-creating operations for the SAME user (two
+// different uploads both being prefilled, or a manual createBuilder()
+// racing a prefillFromUpload()) could both read the SAME (under-limit)
+// PLAN_LIMITS.builderCvsTotal count before either had inserted its row,
+// since checkBuilderCvLimit()'s count-then-allow was never itself atomic
+// across callers. This lock is per-userId (not per-upload — §27's lock
+// above doesn't cover cross-upload/cross-path races at all) and only ever
+// protects a fast count+insert (no AI call inside it), so a short, fixed
+// TTL with no renewal is sufficient here — verified via
+// cv.service.spec.ts's own concurrency tests.
+const BUILDER_CV_QUOTA_LOCK_TTL_MS = 10_000;
+const BUILDER_CV_QUOTA_LOCK_ACQUIRE_RETRIES = 10;
+const BUILDER_CV_QUOTA_LOCK_ACQUIRE_RETRY_DELAY_MS = 75;
 
 @Injectable()
 export class CvService {
@@ -57,7 +104,9 @@ export class CvService {
     private readonly userService: UserService,
     private readonly billingService: BillingService,
     private readonly prefillService: PrefillExtractionService,
+    private readonly prefillLockService: PrefillLockService,
     private readonly pdfService: PdfGenerationService,
+    private readonly cvPhotoService: CvPhotoService,
     private readonly r2Storage: R2StorageService,
     @InjectDataSource()
     private readonly dataSource: DataSource,
@@ -244,16 +293,21 @@ export class CvService {
 
   async createBuilder(clerkId: string, dto: CreateCvDto): Promise<CvEntity> {
     const user = await this.userService.findByClerkId(clerkId);
-    await this.checkBuilderCvLimit(user.id);
 
-    const cv = this.cvRepo.create({
-      userId: user.id,
-      title: dto.title,
-      source: dto.source ?? 'builder',
-      parseStatus: 'done',
-      isActive: true,
+    // §28: check-then-insert under a per-user lock — see
+    // withBuilderCvQuotaLock's own doc comment for why the plain
+    // checkBuilderCvLimit() this used to call directly isn't race-safe
+    // across two concurrent builder-CV-creating calls for the same user.
+    return this.withBuilderCvQuotaLock(user.id, async () => {
+      const cv = this.cvRepo.create({
+        userId: user.id,
+        title: dto.title,
+        source: dto.source ?? 'builder',
+        parseStatus: 'done',
+        isActive: true,
+      });
+      return this.cvRepo.save(cv);
     });
-    return this.cvRepo.save(cv);
   }
 
   async updateContent(clerkId: string, cvId: string, dto: UpdateCvContentDto): Promise<CvEntity> {
@@ -261,8 +315,130 @@ export class CvService {
     if (cv.source === 'upload') {
       throw new ForbiddenException('Uploaded CVs cannot be edited in the builder.');
     }
+    this.validateReferencesContent(dto.content);
+    this.validateProfileFields(dto.content);
     await this.cvRepo.update(cvId, { content: dto.content });
     return this.cvRepo.findOneByOrFail({ id: cvId });
+  }
+
+  /**
+   * Same targeted, defense-in-depth approach as validateReferencesContent
+   * (see its own doc comment) — this only validates the fields the Profile
+   * template feature actually adds (`qualities`, `personalDetails.
+   * nationality`, `skills[].rating`/`languages[].rating`), read as
+   * `unknown` rather than trusting the compile-time `CvContent` type.
+   * Every other CV field remains exactly as unvalidated as before.
+   */
+  private validateProfileFields(content: CvContent): void {
+    const raw = content as unknown as Record<string, unknown>;
+    const MAX_FIELD_LENGTH = 255;
+    const MAX_QUALITIES = 40;
+
+    const qualities = raw['qualities'];
+    if (qualities !== undefined) {
+      if (!Array.isArray(qualities)) {
+        throw new BadRequestException('qualities must be an array.');
+      }
+      if (qualities.length > MAX_QUALITIES) {
+        throw new BadRequestException('Too many qualities.');
+      }
+      qualities.forEach((q: unknown, i: number) => {
+        if (typeof q !== 'string' || !q.trim() || q.length > MAX_FIELD_LENGTH) {
+          throw new BadRequestException(`qualities[${i}] must be a non-empty string.`);
+        }
+      });
+    }
+
+    const pd = raw['personalDetails'] as Record<string, unknown> | undefined;
+    const nationality = pd?.['nationality'];
+    if (
+      nationality !== undefined &&
+      (typeof nationality !== 'string' || nationality.length > MAX_FIELD_LENGTH)
+    ) {
+      throw new BadRequestException('personalDetails.nationality is invalid.');
+    }
+
+    for (const field of ['skills', 'languages'] as const) {
+      const entries = raw[field];
+      if (!Array.isArray(entries)) continue;
+      entries.forEach((entry: unknown, i: number) => {
+        if (!entry || typeof entry !== 'object') return;
+        const rating = (entry as Record<string, unknown>)['rating'];
+        if (rating === undefined) return;
+        if (typeof rating !== 'number' || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+          throw new BadRequestException(`${field}[${i}].rating must be an integer from 1 to 5.`);
+        }
+      });
+    }
+  }
+
+  /**
+   * UpdateCvContentDto only validates that `content` is an object (see its
+   * own file) — the whole-CV autosave payload has never been deeply
+   * validated server-side, and doing that generally for every existing
+   * field is out of scope here (see the References feature report). This
+   * targets only the two fields this feature actually adds, so malformed
+   * reference data specifically can never reach persistence even though
+   * the rest of `content` still isn't deeply validated: `references` must
+   * be an array of objects each carrying a non-empty `fullName` (the one
+   * required field per the product spec) and, when present, a
+   * syntactically valid `email`; every other field is optional free text
+   * with a generous length cap against abuse.
+   */
+  private validateReferencesContent(content: CvContent): void {
+    // Nominally typed as CvContent, but nothing upstream actually verifies
+    // that shape at runtime (see UpdateCvContentDto) — read defensively as
+    // unknown rather than trusting the compile-time type, so a malformed
+    // payload is genuinely rejected rather than silently persisted.
+    const raw = content as unknown as Record<string, unknown>;
+    const referencesAvailableUponRequest = raw['referencesAvailableUponRequest'];
+    if (
+      referencesAvailableUponRequest !== undefined &&
+      typeof referencesAvailableUponRequest !== 'boolean'
+    ) {
+      throw new BadRequestException('referencesAvailableUponRequest must be a boolean.');
+    }
+
+    const references = raw['references'];
+    if (references === undefined) return;
+    if (!Array.isArray(references)) {
+      throw new BadRequestException('references must be an array.');
+    }
+
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const MAX_FIELD_LENGTH = 255;
+    const OPTIONAL_STRING_FIELDS = ['jobTitle', 'company', 'phone', 'relationship'] as const;
+
+    references.forEach((entry: unknown, i: number) => {
+      if (!entry || typeof entry !== 'object') {
+        throw new BadRequestException(`references[${i}] must be an object.`);
+      }
+      const r = entry as Record<string, unknown>;
+
+      if (typeof r['id'] !== 'string' || !r['id']) {
+        throw new BadRequestException(`references[${i}].id is required.`);
+      }
+      if (typeof r['fullName'] !== 'string' || !(r['fullName'] as string).trim()) {
+        throw new BadRequestException(`references[${i}].fullName is required.`);
+      }
+      if ((r['fullName'] as string).length > MAX_FIELD_LENGTH) {
+        throw new BadRequestException(`references[${i}].fullName is too long.`);
+      }
+
+      for (const field of OPTIONAL_STRING_FIELDS) {
+        const v = r[field];
+        if (v !== undefined && (typeof v !== 'string' || v.length > MAX_FIELD_LENGTH)) {
+          throw new BadRequestException(`references[${i}].${field} is invalid.`);
+        }
+      }
+
+      if (r['email'] !== undefined) {
+        const email = r['email'];
+        if (typeof email !== 'string' || email.length > MAX_FIELD_LENGTH || !EMAIL_RE.test(email)) {
+          throw new BadRequestException(`references[${i}].email is not a valid email address.`);
+        }
+      }
+    });
   }
 
   async rename(clerkId: string, cvId: string, dto: RenameCvDto): Promise<CvEntity> {
@@ -347,12 +523,25 @@ export class CvService {
       }
     }
 
+    // Same privacy-scrub requirement as the CV file itself — a Profile
+    // template photo is personal data too, so a soft-deleted CV must not
+    // leave it behind in R2 either.
+    if (cv.photoObjectKey) {
+      const deleted = await this.r2Storage.deleteObject(cv.photoObjectKey);
+      if (!deleted) {
+        throw new ServiceUnavailableException(
+          "We couldn't delete this CV's stored photo right now. Please try again in a moment.",
+        );
+      }
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const clearedPersonalData: any = {
       content: null,
       parsedContent: null,
       fileName: null,
       r2ObjectKey: null,
+      photoObjectKey: null,
     };
     // softDelete() + the content-scrub update happen atomically: a failure
     // partway through must not leave the row marked "deleted" while still
@@ -412,38 +601,88 @@ export class CvService {
       );
     }
 
-    // Idempotency: return existing prefill CV for this upload (non-deleted)
+    // Idempotency: return existing prefill CV for this upload (non-deleted).
+    // Cheap, lock-free check first — covers the common case (a page reload,
+    // or the frontend simply calling this again after it already
+    // succeeded) without any Redis round trip.
     const existing = await this.cvRepo.findOne({
       where: { sourceUploadCvId: uploadCvId, userId: user.id },
     });
     if (existing) return existing;
 
-    await this.checkBuilderCvLimit(user.id);
-
-    // Diagnostic only — length, never content, so this is safe to log
-    // (no PII). A very short length here is a strong signal that
-    // parsedContent is placeholder/garbage text rather than a real CV body.
-    this.logger.log(
-      `Prefilling CV ${uploadCvId} from ${uploadCv.parsedContent.length} chars of parsed text`,
+    // Everything from here on — the re-check, the plan-limit check, and
+    // the paid AI call itself — runs under a per-uploadCvId lock, so two
+    // requests racing for the SAME upload can never both fall through the
+    // check above and both trigger AI/create a CV. The loser gets a fast,
+    // clear 409 rather than silently doubling cost.
+    const lockKey = `prefill-lock:${uploadCvId}`;
+    const lockToken = await this.prefillLockService.acquire(lockKey, PREFILL_LOCK_TTL_MS);
+    if (!lockToken) {
+      throw new ConflictException(
+        'This CV is already being prefilled. Please wait a moment and try again.',
+      );
+    }
+    // §28: keeps the lock alive for as long as this operation genuinely
+    // stays in progress — see this heartbeat's own constant doc comment
+    // for why a fixed TTL alone isn't safe here (a slow OpenAI retry
+    // sequence can legitimately outlast it).
+    const stopHeartbeat = this.prefillLockService.startHeartbeat(
+      lockKey,
+      lockToken,
+      PREFILL_LOCK_TTL_MS,
+      PREFILL_LOCK_RENEW_INTERVAL_MS,
     );
 
-    const extraction = await this.prefillService.extract(uploadCv.parsedContent);
+    try {
+      // Re-check now that we hold the lock: the request that WON an
+      // earlier race for this same uploadCvId may have already finished
+      // and released the lock between the cheap check above and this
+      // point — reuse its result instead of calling AI a second time.
+      const existingAfterLock = await this.cvRepo.findOne({
+        where: { sourceUploadCvId: uploadCvId, userId: user.id },
+      });
+      if (existingAfterLock) return existingAfterLock;
 
-    const cv = this.cvRepo.create({
-      userId: user.id,
-      title: uploadCv.title ?? uploadCv.fileName ?? 'Prefilled CV',
-      source: 'prefill',
-      parseStatus: 'done',
-      isActive: true,
-      content: extraction.content,
-      sourceUploadCvId: uploadCvId,
-      prefillExtractedAt: new Date(),
-      prefillModel: extraction.modelUsed,
-      prefillTokensUsed: extraction.tokensUsed,
-      prefillVersion: extraction.version,
-    });
+      // Early, optimistic check — avoids wasting a paid AI call for the
+      // common (non-racing) case of a user who's already visibly over
+      // their plan's builder-CV limit. Not itself race-safe against a
+      // DIFFERENT upload/creation path (see withBuilderCvQuotaLock below,
+      // which re-checks authoritatively right before the actual insert).
+      await this.checkBuilderCvLimit(user.id);
 
-    return this.cvRepo.save(cv);
+      // Diagnostic only — length, never content, so this is safe to log
+      // (no PII). A very short length here is a strong signal that
+      // parsedContent is placeholder/garbage text rather than a real CV body.
+      this.logger.log(
+        `Prefilling CV ${uploadCvId} from ${uploadCv.parsedContent.length} chars of parsed text`,
+      );
+
+      const extraction = await this.prefillService.extract(uploadCv.parsedContent);
+
+      // §28: the AUTHORITATIVE quota check + insert, under a per-user
+      // lock — closes the cross-upload/cross-path race the early check
+      // above can't. See withBuilderCvQuotaLock's own doc comment.
+      return await this.withBuilderCvQuotaLock(user.id, async () => {
+        const cv = this.cvRepo.create({
+          userId: user.id,
+          title: uploadCv.title ?? uploadCv.fileName ?? 'Prefilled CV',
+          source: 'prefill',
+          parseStatus: 'done',
+          isActive: true,
+          content: extraction.content,
+          sourceUploadCvId: uploadCvId,
+          prefillExtractedAt: new Date(),
+          prefillModel: extraction.modelUsed,
+          prefillTokensUsed: extraction.tokensUsed,
+          prefillVersion: extraction.version,
+        });
+
+        return this.cvRepo.save(cv);
+      });
+    } finally {
+      stopHeartbeat();
+      await this.prefillLockService.release(lockKey, lockToken);
+    }
   }
 
   async generatePdfStream(
@@ -454,7 +693,23 @@ export class CvService {
     if (!cv.content) {
       throw new UnprocessableEntityException('This CV has no builder content to export.');
     }
-    const stream = this.pdfService.generateStream(cv.content, cv.title ?? 'CV', cv.templateId);
+
+    // Photo bytes are only ever loaded server-side, for Profile CVs that
+    // actually have one — see CvPhotoService.getPhotoBytes's doc comment
+    // for why a load failure here silently falls back to the no-photo
+    // header rather than failing the whole PDF or touching the stored
+    // photo association.
+    const photo =
+      cv.templateId === 'profile' && cv.photoObjectKey
+        ? await this.cvPhotoService.getPhotoBytes(cv.photoObjectKey)
+        : null;
+
+    const stream = this.pdfService.generateStream(
+      cv.content,
+      cv.title ?? 'CV',
+      cv.templateId,
+      photo ?? undefined,
+    );
     const safe = (cv.title ?? 'cv').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
     return { stream, filename: `${safe}.pdf` };
   }
@@ -489,6 +744,76 @@ export class CvService {
       throw new ForbiddenException(
         'Builder CV limit reached. Upgrade your plan to create more CVs.',
       );
+    }
+  }
+
+  /**
+   * §28: checkBuilderCvLimit() above answers "is this user under quota
+   * right now" but is just a plain read — nothing stops TWO callers from
+   * both reading "yes, under quota" before either has inserted its row.
+   * That's exactly what could happen across createBuilder() and
+   * prefillFromUpload() (or two prefillFromUpload() calls for two
+   * DIFFERENT uploads — §27's per-uploadCvId lock doesn't cover this,
+   * since it's keyed by upload, not by user): a Free-plan user
+   * (builderCvsTotal: 1) at 0 CVs could fire two such calls close enough
+   * together to end up with 2, silently bypassing the plan limit itself
+   * (not a rare edge case for the FREE tier specifically — see
+   * cv.service.spec.ts's "case 2" tests for real, demonstrated proof of
+   * both the gap and the fix, not just the reasoning here).
+   *
+   * Fixes it by making the COUNT-CHECK-THEN-INSERT atomic per user, via a
+   * short-lived, retried (not heartbeat-renewed — this only ever guards a
+   * fast DB count+insert, never an AI call) PrefillLockService lock. Both
+   * createBuilder() and prefillFromUpload() run their actual row creation
+   * through `fn` here rather than inserting directly, so this is the ONE
+   * place `PLAN_LIMITS.builderCvsTotal` is authoritatively enforced across
+   * every builder-CV-creating path — checkBuilderCvLimit() itself is left
+   * completely unchanged and keeps its existing callers/behavior for the
+   * cheap, non-authoritative early checks (e.g. prefillFromUpload's own
+   * pre-AI-call check, to avoid paying for extraction a user is already
+   * over quota for).
+   *
+   * Skips the lock entirely for an Infinity (unlimited) plan — there is no
+   * finite count to race against, so no Redis round trip is spent on
+   * every Pro-plan CV creation.
+   */
+  private async withBuilderCvQuotaLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+    if (isDevQuotaBypassActive()) return fn();
+
+    const plan = await this.billingService.getUserPlan(userId);
+    const limit = PLAN_LIMITS[plan].builderCvsTotal;
+    if (limit === Infinity) return fn();
+
+    const lockKey = `builder-cv-quota-lock:${userId}`;
+    let token: string | null = null;
+    for (let attempt = 0; attempt < BUILDER_CV_QUOTA_LOCK_ACQUIRE_RETRIES; attempt++) {
+      token = await this.prefillLockService.acquire(lockKey, BUILDER_CV_QUOTA_LOCK_TTL_MS);
+      if (token) break;
+      // The lock only ever guards a fast count+insert (typically single-
+      // digit milliseconds), so a short, fixed retry delay — not a 409 —
+      // is the right response to brief contention here, unlike §27's
+      // per-upload AI-call lock, where the holder could legitimately be
+      // busy for many seconds.
+      await new Promise((resolve) =>
+        setTimeout(resolve, BUILDER_CV_QUOTA_LOCK_ACQUIRE_RETRY_DELAY_MS),
+      );
+    }
+    if (!token) {
+      throw new ConflictException('Please try again in a moment.');
+    }
+
+    try {
+      const count = await this.cvRepo.count({
+        where: { userId, source: In(['builder', 'prefill']) },
+      });
+      if (count >= limit) {
+        throw new ForbiddenException(
+          'Builder CV limit reached. Upgrade your plan to create more CVs.',
+        );
+      }
+      return await fn();
+    } finally {
+      await this.prefillLockService.release(lockKey, token);
     }
   }
 }

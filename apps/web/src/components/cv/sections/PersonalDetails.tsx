@@ -19,6 +19,12 @@ const FIELDS: {
   { key: 'jobTitle', label: 'Job title / headline' },
   { key: 'linkedIn', label: 'LinkedIn URL', type: 'url' },
   { key: 'website', label: 'Website', type: 'url' },
+  // Rendered only by the Profile template's sidebar — harmless, unused
+  // metadata for every other template (see CvPersonalDetails.nationality's
+  // doc comment). Kept visible for all templates rather than a
+  // Profile-only field so switching templates never hides already-entered
+  // data.
+  { key: 'nationality', label: 'Nationality' },
 ];
 
 export function PersonalDetails({ value, onChange }: Props) {

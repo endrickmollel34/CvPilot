@@ -1,3 +1,6 @@
+// Must be the very first import — see instrument.ts's own doc comment.
+import './instrument';
+
 import 'reflect-metadata';
 
 import { NestFactory } from '@nestjs/core';

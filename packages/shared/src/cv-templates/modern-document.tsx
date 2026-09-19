@@ -4,6 +4,7 @@ import type {
   CvWorkEntry,
   CvEducationEntry,
   CvCertificationEntry,
+  CvReferenceEntry,
 } from '../types/cv.types';
 import { MODERN_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -12,7 +13,7 @@ import {
   normalizeParagraph,
   shortenUrlLabel,
 } from './format';
-import { DEFAULT_SECTION_ORDER } from './classic-document';
+import { resolveSectionOrder } from './classic-document';
 
 /**
  * CV Template Foundation, Phase 2 — Modern, browser side. An original
@@ -136,6 +137,49 @@ function CertificationsSection({ certs }: { certs: CvCertificationEntry[] }) {
   );
 }
 
+// References sits in the main column, never MODERN_TEMPLATE.sidebarSections
+// — each entry (name, title/company, relationship, contact) carries far
+// more text than a skill chip or one-line certification, so it stays
+// readable in the wider column rather than the narrow tinted sidebar. Reuses
+// the same generic entry/summary classes as the other main-section
+// components, no new CSS needed.
+function ReferencesSection({
+  entries,
+  availableUponRequest,
+}: {
+  entries: CvReferenceEntry[];
+  availableUponRequest?: boolean;
+}) {
+  if (!entries.length && !availableUponRequest) return null;
+  return (
+    <>
+      <SectionHeading title="References" />
+      {availableUponRequest ? (
+        <p className="cvm-summary">References available upon request.</p>
+      ) : (
+        entries.map((r) => (
+          <div key={r.id} className="cvm-entry">
+            <div className="cvm-entry-row">
+              <span className="cvm-entry-title">{r.fullName}</span>
+            </div>
+            {(r.jobTitle || r.company) && (
+              <div className="cvm-entry-org">
+                {[r.jobTitle, r.company].filter(Boolean).join(', ')}
+              </div>
+            )}
+            {r.relationship && <div className="cvm-entry-meta">{r.relationship}</div>}
+            {(r.email || r.phone) && (
+              <div className="cvm-entry-meta">
+                {[r.email, r.phone].filter(Boolean).join('  ·  ')}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
 function renderMainSection(content: CvContent, section: CvSection) {
   switch (section) {
     case 'summary':
@@ -150,6 +194,14 @@ function renderMainSection(content: CvContent, section: CvSection) {
       return <WorkEntries key="work" entries={content.workExperience} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
+    case 'references':
+      return (
+        <ReferencesSection
+          key="references"
+          entries={content.references ?? []}
+          availableUponRequest={content.referencesAvailableUponRequest ?? false}
+        />
+      );
     default:
       return null;
   }
@@ -196,7 +248,7 @@ function renderSidebarSection(content: CvContent, section: CvSection) {
 
 export function ModernCvDocument({ content }: { content: CvContent }) {
   const { personalDetails: pd, sectionOrder } = content;
-  const order = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  const order = resolveSectionOrder(sectionOrder);
   const { sidebar, main } = partitionSections(order, MODERN_TEMPLATE.sidebarSections ?? []);
 
   return (

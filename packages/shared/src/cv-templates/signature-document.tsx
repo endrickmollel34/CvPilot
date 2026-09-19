@@ -5,6 +5,7 @@ import type {
   CvWorkEntry,
   CvEducationEntry,
   CvCertificationEntry,
+  CvReferenceEntry,
 } from '../types/cv.types';
 import { SIGNATURE_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -13,7 +14,7 @@ import {
   normalizeParagraph,
   shortenUrlLabel,
 } from './format';
-import { DEFAULT_SECTION_ORDER } from './classic-document';
+import { resolveSectionOrder } from './classic-document';
 
 /**
  * CV Template Foundation, Phase 6 — Signature, browser side. See
@@ -221,6 +222,49 @@ function EducationEntries({ entries }: { entries: CvEducationEntry[] }) {
   );
 }
 
+// Main flow, never SIGNATURE_TEMPLATE.sidebarSections (the label:value
+// detail panel) — each entry carries far more text than a skill/language/
+// certification row, so it stays in the main narrative flow rather than a
+// panel row. Reuses the existing entry/summary classes; `.cvs-entry-role`
+// (not `-title`) is Signature's own naming for this element, matching
+// WorkEntries/EducationEntries above.
+function ReferencesSection({
+  entries,
+  availableUponRequest,
+}: {
+  entries: CvReferenceEntry[];
+  availableUponRequest?: boolean;
+}) {
+  if (!entries.length && !availableUponRequest) return null;
+  return (
+    <>
+      <SectionHeading title="References" />
+      {availableUponRequest ? (
+        <p className="cvs-summary">References available upon request.</p>
+      ) : (
+        entries.map((r) => (
+          <div key={r.id} className="cvs-entry">
+            <div className="cvs-entry-row">
+              <span className="cvs-entry-role">{r.fullName}</span>
+            </div>
+            {(r.jobTitle || r.company) && (
+              <div className="cvs-entry-org">
+                {[r.jobTitle, r.company].filter(Boolean).join(', ')}
+              </div>
+            )}
+            {r.relationship && <div className="cvs-entry-meta">{r.relationship}</div>}
+            {(r.email || r.phone) && (
+              <div className="cvs-entry-meta">
+                {[r.email, r.phone].filter(Boolean).join('  ·  ')}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
 function renderMainSection(content: CvContent, section: CvSection) {
   switch (section) {
     case 'summary':
@@ -235,6 +279,14 @@ function renderMainSection(content: CvContent, section: CvSection) {
       return <WorkEntries key="work" entries={content.workExperience} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
+    case 'references':
+      return (
+        <ReferencesSection
+          key="references"
+          entries={content.references ?? []}
+          availableUponRequest={content.referencesAvailableUponRequest ?? false}
+        />
+      );
     default:
       return null;
   }
@@ -304,7 +356,7 @@ function DetailPanel({ content }: { content: CvContent }) {
 
 export function SignatureCvDocument({ content }: { content: CvContent }) {
   const { sectionOrder } = content;
-  const order = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  const order = resolveSectionOrder(sectionOrder);
   const secondarySet = new Set(SIGNATURE_TEMPLATE.sidebarSections ?? []);
   const mainSections = order.filter((s) => !secondarySet.has(s));
 

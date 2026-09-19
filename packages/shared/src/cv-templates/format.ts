@@ -63,3 +63,38 @@ export function shortenUrlLabel(raw: string, maxLen = 34): string {
   }
   return label;
 }
+
+/**
+ * Inserts an invisible break opportunity (U+200B, zero-width space) so an
+ * email/URL with no spaces at all — which otherwise gives the browser's
+ * CSS wrapping no legal break point, and it falls back to an arbitrary
+ * character position instead (observed: "alex.johnson@university.ac.uk"
+ * wrapping as "alex.johnson@university.ac.u" / "k", stranding a single
+ * character alone on its own line) — has somewhere sensible to wrap.
+ *
+ * For an email specifically (anything containing "@"), only ONE hint is
+ * added, right after the "@" — this prefers keeping the whole domain
+ * ("university.ac.uk") together on one line rather than also offering
+ * break points inside it, matching profile-pdf-renderer.ts's
+ * wrapContactText preference exactly (same outcome, via the renderer-
+ * appropriate mechanism each side actually needs — see that function's own
+ * doc comment for why the PDF side can't use this same U+200B approach).
+ * If the domain itself still doesn't fit on one line at this width,
+ * `.cvpf-pd-list li`'s own `overflow-wrap: anywhere` (buildProfileCss) is
+ * the existing fallback — this never leaves text unable to wrap at all.
+ *
+ * For non-email text (a website/location with "."s but no "@"), a hint is
+ * added after every "." instead, same as before.
+ *
+ * Display-only, same convention as shortenUrlLabel: never applied to the
+ * actual href/mailto target, only to what's shown on the page. A copy-
+ * pasted result may carry the invisible character; the visible/printed
+ * text is identical either way.
+ */
+export function insertWrapHints(text: string): string {
+  const atIndex = text.indexOf('@');
+  if (atIndex !== -1) {
+    return `${text.slice(0, atIndex + 1)}\u200B${text.slice(atIndex + 1)}`;
+  }
+  return text.replace(/\./g, '.\u200B');
+}

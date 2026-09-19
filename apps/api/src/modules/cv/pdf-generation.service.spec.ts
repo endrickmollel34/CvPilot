@@ -1,3 +1,4 @@
+import * as zlib from 'zlib';
 import { PDFParse } from 'pdf-parse';
 import type { CvContent } from '@cvpilot/shared';
 import { PdfGenerationService } from './pdf-generation.service';
@@ -1794,5 +1795,405 @@ describe('PdfGenerationService — template switching', () => {
       expect(compactText).toContain(fact);
       expect(signatureText).toContain(fact);
     }
+  });
+});
+
+// ─── References ──────────────────────────────────────────────────────────
+describe('PdfGenerationService — References', () => {
+  let service: PdfGenerationService;
+
+  beforeEach(() => {
+    service = new PdfGenerationService();
+  });
+
+  it('does not render a References heading when there are no references and availableUponRequest is false', async () => {
+    const content: CvContent = { ...FULL_FIXTURE, references: [] };
+    const pdf = await streamToBuffer(service.generateStream(content));
+    const text = await extractText(pdf);
+    expect(text).not.toContain('REFERENCES');
+  });
+
+  it('treats a CV with no references key at all (an existing pre-feature CV) exactly like an empty list', async () => {
+    // No `references`/`referencesAvailableUponRequest` key, and a
+    // sectionOrder that predates the feature entirely — the real shape of
+    // a CV saved before this feature existed. Must render without
+    // throwing and without a stray heading.
+    const content = { ...FULL_FIXTURE } as CvContent;
+    delete (content as { references?: unknown }).references;
+    delete (content as { referencesAvailableUponRequest?: unknown }).referencesAvailableUponRequest;
+    const pdf = await streamToBuffer(service.generateStream(content));
+    const text = await extractText(pdf);
+    expect(text).not.toContain('REFERENCES');
+    // Sanity: the rest of the document still rendered correctly.
+    expect(text).toContain('François Müller-Øst');
+  });
+
+  it('renders a single reference with every field populated', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      references: [
+        {
+          id: 'ref-1',
+          fullName: 'John Smith',
+          jobTitle: 'Senior Software Engineer',
+          company: 'Example Ltd',
+          relationship: 'Former Supervisor',
+          email: 'john@example.com',
+          phone: '+32 123 456 789',
+        },
+      ],
+    };
+    const pdf = await streamToBuffer(service.generateStream(content));
+    const text = await extractText(pdf);
+
+    expect(text).toContain('REFERENCES');
+    expect(text).toContain('John Smith');
+    expect(text).toContain('Senior Software Engineer');
+    expect(text).toContain('Example Ltd');
+    expect(text).toContain('Former Supervisor');
+    expect(text).toContain('john@example.com');
+    expect(text).toContain('+32 123 456 789');
+  });
+
+  it('renders several references, each with only some optional fields filled in', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      references: [
+        {
+          id: 'ref-1',
+          fullName: 'John Smith',
+          jobTitle: 'Senior Software Engineer',
+          company: 'Example Ltd',
+          email: 'john@example.com',
+        },
+        {
+          id: 'ref-2',
+          fullName: 'Jane Doe',
+          jobTitle: 'Lecturer',
+          company: 'Example University',
+          relationship: 'Academic Reference',
+          email: 'jane@example.com',
+        },
+        { id: 'ref-3', fullName: 'Minimal Reference' },
+      ],
+    };
+    const pdf = await streamToBuffer(service.generateStream(content));
+    const text = await extractText(pdf);
+
+    expect(text).toContain('John Smith');
+    expect(text).toContain('Example Ltd');
+    expect(text).toContain('Jane Doe');
+    expect(text).toContain('Example University');
+    expect(text).toContain('Academic Reference');
+    expect(text).toContain('Minimal Reference');
+  });
+
+  it('shows "References available upon request." and hides individual reference details when the flag is on — without the underlying data being lost from the document model', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      references: [{ id: 'ref-1', fullName: 'John Smith', email: 'john@example.com' }],
+      referencesAvailableUponRequest: true,
+    };
+    const pdf = await streamToBuffer(service.generateStream(content));
+    const text = await extractText(pdf);
+
+    expect(text).toContain('References available upon request.');
+    expect(text).not.toContain('John Smith');
+    expect(text).not.toContain('john@example.com');
+    // The toggle is a rendering choice only — the source CvContent object
+    // itself must still carry the full reference (this is what lets the
+    // user turn the toggle back off without losing anything).
+    expect(content.references).toHaveLength(1);
+    expect(content.references?.[0]?.fullName).toBe('John Smith');
+  });
+
+  it('appends References for a CV whose sectionOrder predates the feature, once references are added (backward compatibility)', async () => {
+    // sectionOrder here is a real pre-feature shape: six sections, no
+    // 'references' entry at all — resolveSectionOrder (@cvpilot/shared)
+    // must still surface it rather than silently dropping the data.
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      sectionOrder: [
+        'summary',
+        'workExperience',
+        'education',
+        'skills',
+        'languages',
+        'certifications',
+      ],
+      references: [{ id: 'ref-1', fullName: 'Legacy Reference' }],
+    };
+    const pdf = await streamToBuffer(service.generateStream(content));
+    const text = await extractText(pdf);
+    expect(text).toContain('Legacy Reference');
+  });
+
+  it('renders references correctly on the Modern and Signature templates too, not only Classic', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      references: [
+        { id: 'ref-1', fullName: 'John Smith', company: 'Example Ltd', email: 'john@example.com' },
+      ],
+    };
+
+    const modernPdf = await streamToBuffer(service.generateStream(content, undefined, 'modern'));
+    const modernText = await extractText(modernPdf);
+    expect(modernText).toContain('John Smith');
+    expect(modernText).toContain('Example Ltd');
+    expect(modernText).toContain('john@example.com');
+
+    const signaturePdf = await streamToBuffer(
+      service.generateStream(content, undefined, 'signature'),
+    );
+    const signatureText = await extractText(signaturePdf);
+    expect(signatureText).toContain('John Smith');
+    expect(signatureText).toContain('Example Ltd');
+    expect(signatureText).toContain('john@example.com');
+  });
+
+  it('does not overflow or throw for an unusually long email, company name, and phone number', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      references: [
+        {
+          id: 'ref-1',
+          fullName: 'A Reference With An Unusually Long Name For Testing Purposes',
+          company:
+            'A Very Long Multinational Conglomerate Holding Company Name That Keeps Going For A While Ltd',
+          email: 'a.very.long.email.address.for.testing.purposes@example-subdomain.example.com',
+          phone: '+1 (800) 555-0100 extension 123456789',
+        },
+      ],
+    };
+    const pdf = await streamToBuffer(service.generateStream(content));
+    expect(pdf.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+    const text = await extractText(pdf);
+    const normalized = text.replace(/\s+/g, ' ');
+    expect(normalized).toContain(
+      'a.very.long.email.address.for.testing.purposes@example-subdomain.example.com',
+    );
+  });
+});
+
+// ─── CV Template Foundation, Phase 7 — Profile ─────────────────────────────
+// See profile-pdf-renderer.ts's own doc comment for the two structural
+// things genuinely new here: an optional circular photo, and genuine
+// multi-page sidebar pagination (every other sidebar template assumes its
+// sidebar fits on page 1).
+// A genuinely valid, decodable PNG (not just a well-formed header) — real
+// deflate-compressed pixel data via Node's own zlib, so PDFKit's bundled
+// png-js decoder (which never verifies chunk CRCs, but DOES need a real
+// zlib stream) can actually embed it. Solid-color truecolor (colorType 2,
+// 8-bit, no alpha, no interlacing) — PDFKit's PNGImage.finalize() embeds
+// this kind of PNG's raw IDAT bytes directly via FlateDecode without ever
+// calling decodePixels(), so this stays fully synchronous.
+function makeSyntheticPng(width: number, height: number): Buffer {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  function chunk(type: string, data: Buffer): Buffer {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length, 0);
+    const typeBuf = Buffer.from(type, 'ascii');
+    const crc = Buffer.alloc(4); // never verified by png-js — see its own source
+    return Buffer.concat([length, typeBuf, data, crc]);
+  }
+
+  const ihdrData = Buffer.alloc(13);
+  ihdrData.writeUInt32BE(width, 0);
+  ihdrData.writeUInt32BE(height, 4);
+  ihdrData[8] = 8; // bit depth
+  ihdrData[9] = 2; // color type: truecolor RGB (compression/filter/interlace default to 0)
+
+  const bytesPerPixel = 3;
+  const row = Buffer.alloc(1 + width * bytesPerPixel); // filter-type byte (0) + RGB pixels
+  const raw = Buffer.concat(Array.from({ length: height }, () => row));
+  const idatData = zlib.deflateSync(raw);
+
+  return Buffer.concat([
+    signature,
+    chunk('IHDR', ihdrData),
+    chunk('IDAT', idatData),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+describe('PdfGenerationService — Profile template', () => {
+  let service: PdfGenerationService;
+
+  beforeEach(() => {
+    service = new PdfGenerationService();
+  });
+
+  // The cap is a narrow ~33%-width column, so a long/hyphenated candidate
+  // name can legitimately wrap across lines there even at full size —
+  // verified visually (rendered PDF inspected directly): no clipping, no
+  // missing characters, no shrink to an unreadable size, just a normal
+  // line break at the name's hyphen, same as any other wrapped text in
+  // this document. pdf-parse inserts a literal newline at each such wrap
+  // point (see the "long bullet"/"long job title" tests above, which
+  // already establish this exact normalization for the same reason), so
+  // assertions here check that every character survived, not that the
+  // name never wraps.
+  function normalizeWhitespace(text: string): string {
+    // A wrap right after a hyphen (e.g. "Müller-" / "Øst") must reconstruct
+    // as "Müller-Øst" — a plain space there would still not match the
+    // original unbroken, hyphen-joined text. Every other wrap point
+    // collapses to a single space, same as the file's existing convention.
+    // Also collapses a genuine, real line break renderPersonalDetails now
+    // inserts at an "@"/"." boundary for an otherwise-unbroken contact
+    // value (wrapContactText, profile-pdf-renderer.ts) — same normalized-
+    // whitespace convention as any other legitimate wrap point above.
+    return text.replace(/-\s+/g, '-').replace(/\s+/g, ' ');
+  }
+
+  it('produces a valid PDF whose extracted text contains every factual field (no photo)', async () => {
+    const pdf = await streamToBuffer(service.generateStream(FULL_FIXTURE, undefined, 'profile'));
+    expect(pdf.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+    const text = normalizeWhitespace(await extractText(pdf));
+
+    expect(text).toContain('François Müller-Øst');
+    expect(text).toContain('Senior Backend Engineer');
+    expect(text).toContain('francois@example.com');
+    expect(text).toContain('Acme Technologies GmbH');
+    expect(text).toContain('ETH Zürich');
+    expect(text).toContain('PostgreSQL');
+    expect(text).toContain('English');
+    expect(text).toContain('AWS Certified Solutions Architect');
+  });
+
+  it('renders qualities and nationality when present', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      personalDetails: { ...FULL_FIXTURE.personalDetails, nationality: 'Swiss' },
+      qualities: ['Team player', 'Detail-oriented'],
+    };
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const text = await extractText(pdf);
+
+    expect(text).toContain('Swiss');
+    expect(text).toContain('Team player');
+    expect(text).toContain('Detail-oriented');
+  });
+
+  it('renders explicit skill/language ratings without throwing and without altering the visible name/level text', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      skills: [{ id: 'sk-1', name: 'PostgreSQL', level: 'Expert', rating: 5 }],
+      languages: [{ id: 'lang-1', name: 'English', rating: 5 }],
+    };
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const text = await extractText(pdf);
+
+    expect(text).toContain('PostgreSQL');
+    expect(text).toContain('English');
+  });
+
+  it('renders a legacy CV with none of qualities/rating/nationality (a real pre-feature CV) without throwing', async () => {
+    const content = { ...FULL_FIXTURE } as CvContent;
+    delete (content as { qualities?: unknown }).qualities;
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    expect(pdf.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+    const text = normalizeWhitespace(await extractText(pdf));
+    expect(text).toContain('François Müller-Øst');
+  });
+
+  it('renders with an optional photo without throwing, and without losing any factual text', async () => {
+    const photo = {
+      buffer: makeSyntheticPng(200, 200),
+      dimensions: { format: 'image/png' as const, width: 200, height: 200 },
+    };
+    const pdf = await streamToBuffer(
+      service.generateStream(FULL_FIXTURE, undefined, 'profile', photo),
+    );
+    expect(pdf.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+    const text = normalizeWhitespace(await extractText(pdf));
+    expect(text).toContain('François Müller-Øst');
+    expect(text).toContain('Acme Technologies GmbH');
+  });
+
+  it('renders identically to the no-photo case when photo is omitted (optional means optional)', async () => {
+    const withoutPhoto = await streamToBuffer(
+      service.generateStream(FULL_FIXTURE, undefined, 'profile'),
+    );
+    const text = normalizeWhitespace(await extractText(withoutPhoto));
+    expect(text).toContain('François Müller-Øst');
+  });
+
+  it('generates a valid multi-page PDF when the sidebar itself overflows page 1 — every skill/language survives, none repeated', async () => {
+    const manySkills = Array.from({ length: 60 }, (_, i) => ({
+      id: `sk-${i}`,
+      name: `Skill Number ${i} With A Reasonably Long Name`,
+    }));
+    const content: CvContent = { ...FULL_FIXTURE, skills: manySkills };
+
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const parser = new PDFParse({ data: pdf });
+    let pageCount: number;
+    let text: string;
+    try {
+      const result = await parser.getText();
+      pageCount = result.pages.length;
+      text = result.text;
+    } finally {
+      await parser.destroy();
+    }
+
+    expect(pageCount).toBeGreaterThan(1);
+    // Each skill's own name is long enough to wrap across two lines within
+    // the narrow sidebar column — pdf-parse inserts a real newline at that
+    // wrap point (same normalization already established above and by the
+    // "long bullet"/"long job title" tests elsewhere in this file), so
+    // this checks "every skill's full text survived exactly once", not
+    // "no skill ever wraps".
+    const normalizedText = normalizeWhitespace(text);
+    for (let i = 0; i < manySkills.length; i++) {
+      const occurrences =
+        normalizedText.split(`Skill Number ${i} With A Reasonably Long Name`).length - 1;
+      expect(occurrences).toBe(1);
+    }
+    // The main column's own content must still be present and correct.
+    expect(normalizedText).toContain('Acme Technologies GmbH');
+  });
+
+  it('generates a valid multi-page PDF for a long work history in the main column, with the sidebar not repeated', async () => {
+    // 20 entries with 2 bullets each — deliberately generous. Profile's
+    // automatic spacing (profile-density.ts) tightens this template's own
+    // spacing for long content, which is intended to reduce (not eliminate)
+    // how often a borderline-length CV needs a second page — so this
+    // fixture must stay unambiguously too long for a single page even after
+    // that tightening, not just barely over the old, untightened threshold.
+    const manyEntries = Array.from({ length: 20 }, (_, i) => ({
+      id: `we-${i}`,
+      company: `Company ${i} Technologies AG`,
+      title: `Backend Engineer ${i}`,
+      location: 'Remote',
+      startDate: '2013-01',
+      endDate: '2014-06',
+      current: false,
+      bullets: [
+        `Delivered project ${i} improving system reliability`,
+        `Mentored engineers and led cross-team planning for initiative ${i}`,
+      ],
+    }));
+    const content: CvContent = { ...FULL_FIXTURE, workExperience: manyEntries };
+
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const parser = new PDFParse({ data: pdf });
+    let pageCount: number;
+    let text: string;
+    try {
+      const result = await parser.getText();
+      pageCount = result.pages.length;
+      text = result.text;
+    } finally {
+      await parser.destroy();
+    }
+
+    expect(pageCount).toBeGreaterThan(1);
+    for (let i = 0; i < manyEntries.length; i++) {
+      expect(text).toContain(`Company ${i} Technologies AG`);
+    }
+    const skillOccurrences = text.split('PostgreSQL').length - 1;
+    expect(skillOccurrences).toBe(1);
   });
 });

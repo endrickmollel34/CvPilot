@@ -12,6 +12,7 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { type Repository, type DataSource } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
+import * as Sentry from '@sentry/nestjs';
 
 import { PLAN_LIMITS } from '@cvpilot/shared';
 import type { CvContent, TailoringSuggestion, TailoringDecision } from '@cvpilot/shared';
@@ -162,6 +163,9 @@ export class TailoringService {
       });
     } catch (err) {
       this.logger.error(`Tailoring ${tailoringId} failed`, err);
+      // Monitoring only — never changes retry/status behavior below.
+      // scrubSentryEvent (instrument.ts) truncates/redacts before send.
+      Sentry.captureException(err, { tags: { queue: 'cv-tailoring' }, extra: { tailoringId } });
       await this.tailoringRepo.update(tailoringId, { status: 'failed' });
     }
   }

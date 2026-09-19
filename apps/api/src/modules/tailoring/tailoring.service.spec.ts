@@ -9,6 +9,14 @@ import {
   ConflictException,
 } from '@nestjs/common';
 
+// Mocked for the whole file so these tests never depend on a real Sentry
+// client/DSN — only whether captureException was called on the failure
+// path (RABBIT_NOTEBOOK.md).
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/nestjs', () => ({
+  captureException: (...args: unknown[]) => mockCaptureException(...args),
+}));
+
 import { TailoringService } from './tailoring.service';
 import { TailoringAiService } from './tailoring-ai.service';
 import { TailoringEntity } from '../../entities/tailoring.entity';
@@ -788,6 +796,21 @@ describe('TailoringService', () => {
 
       await service.runTailoring('tailor-1');
 
+      expect(mockRepo.update).toHaveBeenLastCalledWith('tailor-1', { status: 'failed' });
+    });
+
+    it('reports a failed tailoring job to Sentry (monitoring), without changing its swallow-and-mark-failed behavior', async () => {
+      mockTailoringAiService.runTailoring.mockRejectedValue(new Error('AI provider error'));
+
+      await service.runTailoring('tailor-1');
+
+      expect(mockCaptureException).toHaveBeenCalledWith(
+        expect.any(Error),
+        expect.objectContaining({
+          tags: { queue: 'cv-tailoring' },
+          extra: { tailoringId: 'tailor-1' },
+        }),
+      );
       expect(mockRepo.update).toHaveBeenLastCalledWith('tailor-1', { status: 'failed' });
     });
 

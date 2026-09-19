@@ -5,6 +5,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { SentryModule } from '@sentry/nestjs/setup';
 
 import { AuthModule } from './modules/auth/auth.module';
 import { UserModule } from './modules/user/user.module';
@@ -22,6 +23,15 @@ import { ContactModule } from './modules/contact/contact.module';
 
 @Module({
   imports: [
+    // First, per @sentry/nestjs's own setup docs — request-context
+    // enrichment for whatever this app's own explicit Sentry.captureException
+    // calls report (see instrument.ts, http-exception.filter.ts, and each
+    // BullMQ job processor's catch block). Harmless when SENTRY_DSN is
+    // unset (instrument.ts never calls Sentry.init, so the underlying
+    // client stays inert) and sends no performance data regardless
+    // (tracesSampleRate: 0 in instrument.ts).
+    SentryModule.forRoot(),
+
     ConfigModule.forRoot({ isGlobal: true }),
 
     TypeOrmModule.forRootAsync({

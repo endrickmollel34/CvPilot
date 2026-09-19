@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import * as Sentry from '@sentry/nextjs';
 
 import './globals.css';
 
@@ -17,6 +18,10 @@ export default function GlobalError({
 }) {
   useEffect(() => {
     console.error(error);
+    // Monitoring only (RABBIT_NOTEBOOK.md) — a safe no-op when
+    // NEXT_PUBLIC_SENTRY_DSN isn't configured; never changes this
+    // boundary's own retry UI below.
+    Sentry.captureException(error);
   }, [error]);
 
   return (

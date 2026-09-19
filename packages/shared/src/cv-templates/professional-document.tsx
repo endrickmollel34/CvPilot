@@ -5,6 +5,7 @@ import type {
   CvWorkEntry,
   CvEducationEntry,
   CvCertificationEntry,
+  CvReferenceEntry,
 } from '../types/cv.types';
 import { PROFESSIONAL_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -13,7 +14,7 @@ import {
   normalizeParagraph,
   shortenUrlLabel,
 } from './format';
-import { DEFAULT_SECTION_ORDER } from './classic-document';
+import { resolveSectionOrder } from './classic-document';
 
 /**
  * CV Template Foundation, Phase 4 — Professional, browser side. Premium
@@ -169,6 +170,46 @@ function EducationEntries({ entries }: { entries: CvEducationEntry[] }) {
   );
 }
 
+// Main column, never PROFESSIONAL_TEMPLATE.sidebarSections — same
+// reasoning as Modern: each entry is too text-dense for the narrow
+// secondary column. Reuses the existing entry/summary classes.
+function ReferencesSection({
+  entries,
+  availableUponRequest,
+}: {
+  entries: CvReferenceEntry[];
+  availableUponRequest?: boolean;
+}) {
+  if (!entries.length && !availableUponRequest) return null;
+  return (
+    <>
+      <SectionHeading title="References" />
+      {availableUponRequest ? (
+        <p className="cvp-summary">References available upon request.</p>
+      ) : (
+        entries.map((r) => (
+          <div key={r.id} className="cvp-entry">
+            <div className="cvp-entry-row">
+              <span className="cvp-entry-title">{r.fullName}</span>
+            </div>
+            {(r.jobTitle || r.company) && (
+              <div className="cvp-entry-org">
+                {[r.jobTitle, r.company].filter(Boolean).join(', ')}
+              </div>
+            )}
+            {r.relationship && <div className="cvp-entry-meta">{r.relationship}</div>}
+            {(r.email || r.phone) && (
+              <div className="cvp-entry-meta">
+                {[r.email, r.phone].filter(Boolean).join('  ·  ')}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
 function renderMainSection(content: CvContent, section: CvSection) {
   switch (section) {
     case 'summary':
@@ -183,6 +224,14 @@ function renderMainSection(content: CvContent, section: CvSection) {
       return <WorkEntries key="work" entries={content.workExperience} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
+    case 'references':
+      return (
+        <ReferencesSection
+          key="references"
+          entries={content.references ?? []}
+          availableUponRequest={content.referencesAvailableUponRequest ?? false}
+        />
+      );
     default:
       return null;
   }
@@ -260,7 +309,7 @@ function partitionSections(
 
 export function ProfessionalCvDocument({ content }: { content: CvContent }) {
   const { personalDetails: pd, sectionOrder } = content;
-  const order = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  const order = resolveSectionOrder(sectionOrder);
   const { main, secondary } = partitionSections(order, PROFESSIONAL_TEMPLATE.sidebarSections ?? []);
   const [nameFontSize, nameRef] = useProfessionalNameFontSize(pd.fullName || 'Your Name');
 
@@ -344,7 +393,7 @@ export function buildProfessionalCss(template: TemplateDefinition): string {
      dependency; this is the same disclosed, minor preview/PDF
      divergence already accepted for Modern's sidebar tint. */
   background: ${headerBg};
-  padding: 28pt 0 24pt;
+  padding: 28pt 24pt 24pt;
 }
 .cv-professional-doc .cvp-header h1 {
   margin: 0;
@@ -392,7 +441,7 @@ export function buildProfessionalCss(template: TemplateDefinition): string {
   margin-top: ${s.sectionGap}pt;
 }
 .cv-professional-doc .cvp-main .cvp-heading:first-child,
-.cv-professional-doc .cvp-secondary .cvp-heading:first-child {
+.cv-professional-doc .cvp-secondary > :first-child > .cvp-heading {
   margin-top: 0;
 }
 .cv-professional-doc .cvp-heading h2 {

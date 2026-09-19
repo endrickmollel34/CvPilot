@@ -99,8 +99,16 @@ jobs:
           sleep 15
           curl --fail "${{ vars.PRODUCTION_API_URL }}/api/health" || exit 1
 
-      # Sentry is not yet integrated (see CLAUDE.md "Monitoring") — the
-      # release-notification step was removed rather than left pointing at
-      # secrets/a project that don't exist, since a step that can fail for
-      # reasons unrelated to the deploy itself is worse than no step.
-      # Re-add once Sentry is actually wired into the codebase.
+      # Sentry IS wired into the codebase now (apps/api/src/instrument.ts,
+      # apps/web/src/instrumentation*.ts — see CLAUDE.md "Monitoring" and
+      # RABBIT_NOTEBOOK.md §29-§33; real capture/alerting verified against
+      # the actual cvpilot-api/cvpilot-web projects). The release-
+      # notification step is still deliberately absent here, for a
+      # narrower reason than before: Railway's production `SENTRY_DSN`
+      # variable is not set yet (confirmed via `railway variable list`
+      # key names, not by inspecting this pipeline), so a release-
+      # notification step would call an API with no DSN to authenticate
+      # against. Add it once `SENTRY_DSN` (Railway) and
+      # `NEXT_PUBLIC_SENTRY_DSN` (Vercel) are both actually configured in
+      # production — a step that can fail for reasons unrelated to the
+      # deploy itself is worse than no step.

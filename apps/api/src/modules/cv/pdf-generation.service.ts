@@ -8,17 +8,20 @@ import type {
   CvWorkEntry,
   CvEducationEntry,
   CvCertificationEntry,
+  CvReferenceEntry,
   TemplateId,
 } from '@cvpilot/shared';
 import {
-  DEFAULT_SECTION_ORDER,
   formatDateRange,
   getTemplate,
   normalizeExternalUrl,
   normalizeParagraph,
+  resolveSectionOrder,
   shortenUrlLabel,
   type TemplateDefinition,
 } from '@cvpilot/shared';
+import type { ImageDimensions } from './utils/image-validation.util';
+import { renderProfileTemplate } from './profile-pdf-renderer';
 
 /**
  * CV Template Foundation, Phase 1 — Classic, PDFKit side.
@@ -88,12 +91,23 @@ export class PdfGenerationService {
   // Returns a PassThrough stream that emits the PDF as it is generated.
   // StreamableFile accepts a Readable, so this pipes directly to the HTTP
   // response without buffering the full document in memory.
-  generateStream(content: CvContent, docTitle?: string, templateId?: TemplateId): PassThrough {
+  generateStream(
+    content: CvContent,
+    docTitle?: string,
+    templateId?: TemplateId,
+    photo?: { buffer: Buffer; dimensions: ImageDimensions },
+  ): PassThrough {
     const template = getTemplate(templateId);
     const doc = new PDFDocument({
       size: 'A4',
       margins: template.margins,
       info: { Title: docTitle ?? content.personalDetails.fullName ?? 'CV' },
+      // Required for Profile's sidebar/main independent pagination passes,
+      // which resume writing to an earlier page via doc.switchToPage()
+      // (see profile-pdf-renderer.ts's own doc comment) — harmless for
+      // every other template, which never calls switchToPage. doc.end()
+      // still flushes every buffered page automatically.
+      bufferPages: true,
     });
     doc.registerFont('Body', FONT_REGULAR);
     doc.registerFont('Heading', FONT_BOLD);
@@ -111,6 +125,8 @@ export class PdfGenerationService {
         this.compactRender(doc, content, template);
       } else if (template.id === 'signature') {
         this.signatureRender(doc, content, template);
+      } else if (template.id === 'profile') {
+        renderProfileTemplate(doc, content, template, photo);
       } else {
         this.classicRender(doc, content, template);
       }
@@ -150,7 +166,7 @@ export class PdfGenerationService {
     doc.moveDown(0.9);
 
     // ── Body sections ────────────────────────────────────────────────────
-    const order = content.sectionOrder.length > 0 ? content.sectionOrder : DEFAULT_SECTION_ORDER;
+    const order = resolveSectionOrder(content.sectionOrder);
     for (const section of order) {
       this.renderSection(doc, content, section, lm, pageW, t);
     }
@@ -299,7 +315,85 @@ export class PdfGenerationService {
         }
         doc.moveDown(0.3);
         break;
+
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return;
+        this.heading(doc, 'References', lm, pageW, t);
+        if (availableUponRequest) {
+          doc
+            .font('Body')
+            .fontSize(t.typography.bodySize)
+            .fillColor(t.colors.text)
+            .text('References available upon request.', lm, doc.y, {
+              width: pageW,
+              lineGap: t.spacing.lineGap,
+            });
+          doc.moveDown(0.8);
+        } else {
+          for (const r of refs) this.referenceEntry(doc, r, lm, pageW, t);
+          doc.moveDown(0.2);
+        }
+        break;
+      }
     }
+  }
+
+  private referenceEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvReferenceEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+  ): void {
+    const orgLine = [entry.jobTitle, entry.company].filter(Boolean).join(', ');
+    const contactLine = [entry.email, entry.phone].filter(Boolean).join('  ·  ');
+
+    this.ensureSpace(
+      doc,
+      t,
+      this.measureReferenceEntryHeight(
+        doc,
+        pageW,
+        entry.fullName,
+        orgLine || undefined,
+        entry.relationship,
+        contactLine || undefined,
+        t,
+      ),
+    );
+
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.fullName, lm, doc.y, { width: pageW });
+
+    if (orgLine) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.bodySize - 1)
+        .fillColor(t.colors.muted)
+        .text(orgLine, lm, doc.y, { width: pageW });
+    }
+    if (entry.relationship) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(entry.relationship, lm, doc.y, { width: pageW });
+    }
+    if (contactLine) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(contactLine, lm, doc.y, { width: pageW });
+    }
+
+    doc.moveDown(0.65);
+    doc.fillColor(t.colors.text);
   }
 
   private heading(
@@ -372,6 +466,34 @@ export class PdfGenerationService {
         height += doc.heightOfString(b, { width: pageW - 14 }) + t.spacing.bulletGap;
       }
     }
+    return height + t.spacing.entryGap;
+  }
+
+  /** Same measurement approach as measureEntryHeight above, shaped for a
+   *  reference entry's up-to-three optional lines below the bold name (an
+   *  org/title line, a relationship line, and an email/phone line) — reused
+   *  by every template's own reference-entry renderer so References'
+   *  page-break decisions stay consistent with how every other repeating
+   *  entry (work/education) measures itself before deciding whether to
+   *  start a new page. */
+  private measureReferenceEntryHeight(
+    doc: PDFKit.PDFDocument,
+    width: number,
+    fullName: string,
+    orgLine: string | undefined,
+    relationship: string | undefined,
+    contactLine: string | undefined,
+    t: TemplateDefinition,
+  ): number {
+    doc.font('Heading').fontSize(t.typography.bodySize);
+    let height = doc.heightOfString(fullName, { width });
+    if (orgLine) {
+      doc.font('Body').fontSize(t.typography.bodySize - 1);
+      height += doc.heightOfString(orgLine, { width }) + 1;
+    }
+    doc.font('Body').fontSize(t.typography.metaSize);
+    if (relationship) height += doc.heightOfString(relationship, { width }) + 1;
+    if (contactLine) height += doc.heightOfString(contactLine, { width }) + 1;
     return height + t.spacing.entryGap;
   }
 
@@ -587,7 +709,7 @@ export class PdfGenerationService {
         .fill();
     }
 
-    const order = content.sectionOrder.length > 0 ? content.sectionOrder : DEFAULT_SECTION_ORDER;
+    const order = resolveSectionOrder(content.sectionOrder);
     const sidebarSet = new Set(t.sidebarSections ?? []);
     const sidebarSections = order.filter((s) => sidebarSet.has(s));
     const mainSections = order.filter((s) => !sidebarSet.has(s));
@@ -999,9 +1121,94 @@ export class PdfGenerationService {
         for (const e of content.education) this.modernEducationEntry(doc, e, column, lm, pageW, t);
         break;
 
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return;
+        this.modernEnsureSpace(doc, t, HEADING_MIN_SPACE, column, lm, pageW);
+        this.modernHeading(doc, 'References', column.x, column.width, t);
+        if (availableUponRequest) {
+          doc
+            .font('Body')
+            .fontSize(t.typography.bodySize)
+            .fillColor(t.colors.text)
+            .text('References available upon request.', column.x, doc.y, {
+              width: column.width,
+              lineGap: t.spacing.lineGap,
+            });
+          doc.moveDown(1.1);
+        } else {
+          for (const r of refs) this.modernReferenceEntry(doc, r, column, lm, pageW, t);
+        }
+        break;
+      }
+
       default:
         break;
     }
+  }
+
+  private modernReferenceEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvReferenceEntry,
+    column: ModernColumn,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+  ): void {
+    const orgLine = [entry.jobTitle, entry.company].filter(Boolean).join(', ');
+    const contactLine = [entry.email, entry.phone].filter(Boolean).join('  ·  ');
+
+    this.modernEnsureSpace(
+      doc,
+      t,
+      this.measureReferenceEntryHeight(
+        doc,
+        column.width,
+        entry.fullName,
+        orgLine || undefined,
+        entry.relationship,
+        contactLine || undefined,
+        t,
+      ),
+      column,
+      lm,
+      pageW,
+    );
+
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.fullName, column.x, doc.y, { width: column.width });
+
+    if (orgLine) {
+      doc.moveDown(0.08);
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.7)
+        .fillColor(t.colors.accent)
+        .text(orgLine, column.x, doc.y, { width: column.width, characterSpacing: 0.1 });
+    }
+    if (entry.relationship) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(entry.relationship, column.x, doc.y, { width: column.width });
+    }
+    if (contactLine) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(contactLine, column.x, doc.y, { width: column.width });
+    }
+
+    doc.moveDown(0.8);
+    doc.fillColor(t.colors.text);
   }
 
   /**
@@ -1309,7 +1516,7 @@ export class PdfGenerationService {
     t: TemplateDefinition,
     candidateName: string,
   ): void {
-    const order = content.sectionOrder.length > 0 ? content.sectionOrder : DEFAULT_SECTION_ORDER;
+    const order = resolveSectionOrder(content.sectionOrder);
     const sections = order.filter((s) => this.minimalHasContent(content, s));
     if (!sections.length) return;
 
@@ -1349,6 +1556,10 @@ export class PdfGenerationService {
         return content.languages.length > 0;
       case 'certifications':
         return content.certifications.length > 0;
+      case 'references':
+        return (
+          (content.references?.length ?? 0) > 0 || (content.referencesAvailableUponRequest ?? false)
+        );
       default:
         return false;
     }
@@ -1503,6 +1714,34 @@ export class PdfGenerationService {
           doc.font('Body').fontSize(t.typography.metaSize);
           const metaH = meta ? doc.heightOfString(meta, { width: pageW }) : 0;
           h += nameH + metaH + doc.currentLineHeight() * 0.75;
+        }
+        return h;
+      }
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return 0;
+        if (availableUponRequest) {
+          doc.font('Body').fontSize(t.typography.bodySize);
+          const bodyH = doc.heightOfString('References available upon request.', {
+            width: pageW,
+            lineGap: t.spacing.lineGap,
+          });
+          return headingOverhead + bodyH + bodyLineHeight * 1.2;
+        }
+        let h = headingOverhead;
+        for (const r of refs) {
+          const orgLine = [r.jobTitle, r.company].filter(Boolean).join(', ');
+          const contactLine = [r.email, r.phone].filter(Boolean).join('  ·  ');
+          h += this.measureReferenceEntryHeight(
+            doc,
+            pageW,
+            r.fullName,
+            orgLine || undefined,
+            r.relationship,
+            contactLine || undefined,
+            t,
+          );
         }
         return h;
       }
@@ -1761,9 +2000,94 @@ export class PdfGenerationService {
         }
         break;
 
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return;
+        this.minimalEnsureSpace(doc, t, MINIMAL_HEADING_MIN_SPACE, lm, pageW, candidateName);
+        this.minimalHeading(doc, 'References', lm, pageW, t);
+        if (availableUponRequest) {
+          doc
+            .font('Body')
+            .fontSize(t.typography.bodySize)
+            .fillColor(t.colors.text)
+            .text('References available upon request.', lm, doc.y, {
+              width: pageW,
+              lineGap: t.spacing.lineGap,
+            });
+          doc.moveDown(1.2);
+        } else {
+          for (const r of refs) this.minimalReferenceEntry(doc, r, lm, pageW, t, candidateName);
+        }
+        break;
+      }
+
       default:
         break;
     }
+  }
+
+  private minimalReferenceEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvReferenceEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+    candidateName: string,
+  ): void {
+    const orgLine = [entry.jobTitle, entry.company].filter(Boolean).join(', ');
+    const contactLine = [entry.email, entry.phone].filter(Boolean).join('  ·  ');
+
+    this.minimalEnsureSpace(
+      doc,
+      t,
+      this.measureReferenceEntryHeight(
+        doc,
+        pageW,
+        entry.fullName,
+        orgLine || undefined,
+        entry.relationship,
+        contactLine || undefined,
+        t,
+      ),
+      lm,
+      pageW,
+      candidateName,
+    );
+
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.fullName, lm, doc.y, { width: pageW });
+
+    if (orgLine) {
+      doc.moveDown(0.05);
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.5)
+        .fillColor(t.colors.accent)
+        .text(orgLine, lm, doc.y, { width: pageW });
+    }
+    if (entry.relationship) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(entry.relationship, lm, doc.y, { width: pageW });
+    }
+    if (contactLine) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(contactLine, lm, doc.y, { width: pageW });
+    }
+
+    doc.moveDown(0.75);
+    doc.fillColor(t.colors.text);
   }
 
   private minimalCertification(
@@ -2060,7 +2384,7 @@ export class PdfGenerationService {
     const mainX = lm;
     const secondaryX = lm + mainW + gap;
 
-    const order = content.sectionOrder.length > 0 ? content.sectionOrder : DEFAULT_SECTION_ORDER;
+    const order = resolveSectionOrder(content.sectionOrder);
     const secondarySet = new Set(t.sidebarSections ?? []);
     const secondarySections = order.filter((s) => secondarySet.has(s));
 
@@ -2281,7 +2605,7 @@ export class PdfGenerationService {
     pageW: number,
     t: TemplateDefinition,
   ): void {
-    const order = content.sectionOrder.length > 0 ? content.sectionOrder : DEFAULT_SECTION_ORDER;
+    const order = resolveSectionOrder(content.sectionOrder);
     const secondarySet = new Set(t.sidebarSections ?? []);
     const sections = order.filter(
       (s) => !secondarySet.has(s) && this.professionalHasContent(content, s),
@@ -2323,6 +2647,10 @@ export class PdfGenerationService {
         return content.workExperience.length > 0;
       case 'education':
         return content.education.length > 0;
+      case 'references':
+        return (
+          (content.references?.length ?? 0) > 0 || (content.referencesAvailableUponRequest ?? false)
+        );
       default:
         return false;
     }
@@ -2383,6 +2711,34 @@ export class PdfGenerationService {
           const degreeText = e.field ? `${e.degree} — ${e.field}` : e.degree;
           const instLine = e.institution + (e.location ? ` · ${e.location}` : '');
           h += this.measureEntryHeight(doc, degColW, pageW, degreeText, instLine, e.grade, [], t);
+        }
+        return h;
+      }
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return 0;
+        if (availableUponRequest) {
+          doc.font('Body').fontSize(t.typography.bodySize);
+          const bodyH = doc.heightOfString('References available upon request.', {
+            width: pageW,
+            lineGap: t.spacing.lineGap,
+          });
+          return headingOverhead + bodyH + bodyLineHeight * 1.1;
+        }
+        let h = headingOverhead;
+        for (const r of refs) {
+          const orgLine = [r.jobTitle, r.company].filter(Boolean).join(', ');
+          const contactLine = [r.email, r.phone].filter(Boolean).join('  ·  ');
+          h += this.measureReferenceEntryHeight(
+            doc,
+            pageW,
+            r.fullName,
+            orgLine || undefined,
+            r.relationship,
+            contactLine || undefined,
+            t,
+          );
         }
         return h;
       }
@@ -2460,9 +2816,94 @@ export class PdfGenerationService {
         }
         break;
 
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return;
+        this.professionalMainEnsureSpace(doc, t, PROFESSIONAL_HEADING_MIN_SPACE, column, lm, pageW);
+        this.professionalHeading(doc, 'References', column.x, column.width, t);
+        if (availableUponRequest) {
+          doc
+            .font('Body')
+            .fontSize(t.typography.bodySize)
+            .fillColor(t.colors.text)
+            .text('References available upon request.', column.x, doc.y, {
+              width: column.width,
+              lineGap: t.spacing.lineGap,
+            });
+          doc.moveDown(1.1);
+        } else {
+          for (const r of refs) this.professionalReferenceEntry(doc, r, column, lm, pageW, t);
+        }
+        break;
+      }
+
       default:
         break;
     }
+  }
+
+  private professionalReferenceEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvReferenceEntry,
+    column: ProfessionalColumn,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+  ): void {
+    const orgLine = [entry.jobTitle, entry.company].filter(Boolean).join(', ');
+    const contactLine = [entry.email, entry.phone].filter(Boolean).join('  ·  ');
+
+    this.professionalMainEnsureSpace(
+      doc,
+      t,
+      this.measureReferenceEntryHeight(
+        doc,
+        column.width,
+        entry.fullName,
+        orgLine || undefined,
+        entry.relationship,
+        contactLine || undefined,
+        t,
+      ),
+      column,
+      lm,
+      pageW,
+    );
+
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.fullName, column.x, doc.y, { width: column.width });
+
+    if (orgLine) {
+      doc.moveDown(0.1);
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.3)
+        .fillColor(t.colors.accent)
+        .text(orgLine, column.x, doc.y, { width: column.width });
+    }
+    if (entry.relationship) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(entry.relationship, column.x, doc.y, { width: column.width });
+    }
+    if (contactLine) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(contactLine, column.x, doc.y, { width: column.width });
+    }
+
+    doc.moveDown(0.75);
+    doc.fillColor(t.colors.text);
   }
 
   private professionalWorkEntry(
@@ -2527,16 +2968,24 @@ export class PdfGenerationService {
     const bullets = entry.bullets.filter((b) => b.trim());
     if (bullets.length) {
       doc.moveDown(0.35);
+      doc.font('Body').fontSize(t.typography.bodySize);
+      const bulletIndent = doc.widthOfString('•  ');
       bullets.forEach((b, i) => {
         if (i > 0) doc.y += t.spacing.bulletGap;
+        const bulletY = doc.y;
+        // Marker drawn separately from the body text so wrapped
+        // continuation lines hang under the text (start at
+        // column.x + 4 + bulletIndent) instead of under the marker.
         doc
           .font('Body')
           .fontSize(t.typography.bodySize)
           .fillColor(t.colors.text)
-          .text(`•  ${b}`, column.x + 4, doc.y, {
-            width: column.width - 4,
-            lineGap: t.spacing.lineGap - 1,
-          });
+          .text('•', column.x + 4, bulletY, { lineBreak: false });
+        doc.y = bulletY;
+        doc.text(b, column.x + 4 + bulletIndent, bulletY, {
+          width: column.width - 4 - bulletIndent,
+          lineGap: t.spacing.lineGap - 1,
+        });
       });
     }
 
@@ -2980,7 +3429,7 @@ export class PdfGenerationService {
     t: TemplateDefinition,
     candidateName: string,
   ): void {
-    const order = content.sectionOrder.length > 0 ? content.sectionOrder : DEFAULT_SECTION_ORDER;
+    const order = resolveSectionOrder(content.sectionOrder);
     const secondarySet = new Set(t.sidebarSections ?? []);
     const mainSections = order.filter(
       (s) => !secondarySet.has(s) && this.compactHasMainContent(content, s),
@@ -3048,6 +3497,10 @@ export class PdfGenerationService {
         return content.workExperience.length > 0;
       case 'education':
         return content.education.length > 0;
+      case 'references':
+        return (
+          (content.references?.length ?? 0) > 0 || (content.referencesAvailableUponRequest ?? false)
+        );
       default:
         return false;
     }
@@ -3147,6 +3600,34 @@ export class PdfGenerationService {
           const degreeText = e.field ? `${e.degree} — ${e.field}` : e.degree;
           const instLine = e.institution + (e.location ? ` · ${e.location}` : '');
           h += this.measureEntryHeight(doc, degColW, pageW, degreeText, instLine, e.grade, [], t);
+        }
+        return h;
+      }
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return 0;
+        if (availableUponRequest) {
+          doc.font('Body').fontSize(t.typography.bodySize);
+          const bodyH = doc.heightOfString('References available upon request.', {
+            width: pageW,
+            lineGap: t.spacing.lineGap,
+          });
+          return headingOverhead + bodyH + bodyLineHeight * 0.9;
+        }
+        let h = headingOverhead;
+        for (const r of refs) {
+          const orgLine = [r.jobTitle, r.company].filter(Boolean).join(', ');
+          const contactLine = [r.email, r.phone].filter(Boolean).join('  ·  ');
+          h += this.measureReferenceEntryHeight(
+            doc,
+            pageW,
+            r.fullName,
+            orgLine || undefined,
+            r.relationship,
+            contactLine || undefined,
+            t,
+          );
         }
         return h;
       }
@@ -3366,9 +3847,98 @@ export class PdfGenerationService {
         }
         break;
 
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return;
+        this.compactMainEnsureSpace(doc, t, COMPACT_HEADING_MIN_SPACE, lm, pageW, candidateName);
+        this.compactHeading(doc, 'References', lm, pageW, t);
+        if (availableUponRequest) {
+          doc
+            .font('Body')
+            .fontSize(t.typography.bodySize)
+            .fillColor(t.colors.text)
+            .text('References available upon request.', lm, doc.y, {
+              width: pageW,
+              lineGap: t.spacing.lineGap,
+            });
+          doc.moveDown(0.9);
+        } else {
+          for (const r of refs) this.compactReferenceEntry(doc, r, lm, pageW, t, candidateName);
+        }
+        break;
+      }
+
       default:
         break;
     }
+  }
+
+  private compactReferenceEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvReferenceEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+    candidateName: string,
+  ): void {
+    const orgLine = [entry.jobTitle, entry.company].filter(Boolean).join(', ');
+    const contactLine = [entry.email, entry.phone].filter(Boolean).join('  ·  ');
+
+    this.compactMainEnsureSpace(
+      doc,
+      t,
+      this.measureReferenceEntryHeight(
+        doc,
+        pageW,
+        entry.fullName,
+        orgLine || undefined,
+        entry.relationship,
+        contactLine || undefined,
+        t,
+      ),
+      lm,
+      pageW,
+      candidateName,
+    );
+
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.fullName, lm, doc.y, { width: pageW });
+
+    if (orgLine) {
+      doc.moveDown(0.06);
+      // Bold charcoal, not accent-colored — same restraint as
+      // compactWorkEntry's org line (see its own comment): Compact keeps
+      // its copper accent restricted to the header rule and heading
+      // markers.
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.2)
+        .fillColor(t.colors.text)
+        .text(orgLine, lm, doc.y, { width: pageW });
+    }
+    if (entry.relationship) {
+      doc.moveDown(0.04);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(entry.relationship, lm, doc.y, { width: pageW });
+    }
+    if (contactLine) {
+      doc.moveDown(0.04);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(contactLine, lm, doc.y, { width: pageW });
+    }
+
+    doc.moveDown(0.5);
+    doc.fillColor(t.colors.text);
   }
 
   private compactWorkEntry(
@@ -3833,7 +4403,7 @@ export class PdfGenerationService {
     t: TemplateDefinition,
     candidateName: string,
   ): void {
-    const order = content.sectionOrder.length > 0 ? content.sectionOrder : DEFAULT_SECTION_ORDER;
+    const order = resolveSectionOrder(content.sectionOrder);
     const secondarySet = new Set(t.sidebarSections ?? []);
     const mainSections = order.filter(
       (s) => !secondarySet.has(s) && this.signatureHasMainContent(content, s),
@@ -3904,6 +4474,10 @@ export class PdfGenerationService {
         return content.workExperience.length > 0;
       case 'education':
         return content.education.length > 0;
+      case 'references':
+        return (
+          (content.references?.length ?? 0) > 0 || (content.referencesAvailableUponRequest ?? false)
+        );
       default:
         return false;
     }
@@ -4003,6 +4577,34 @@ export class PdfGenerationService {
           const degreeText = e.field ? `${e.degree} — ${e.field}` : e.degree;
           const instLine = e.institution + (e.location ? ` · ${e.location}` : '');
           h += this.measureEntryHeight(doc, degColW, pageW, degreeText, instLine, e.grade, [], t);
+        }
+        return h;
+      }
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return 0;
+        if (availableUponRequest) {
+          doc.font('Body').fontSize(t.typography.bodySize);
+          const bodyH = doc.heightOfString('References available upon request.', {
+            width: pageW,
+            lineGap: t.spacing.lineGap,
+          });
+          return headingOverhead + bodyH + bodyLineHeight;
+        }
+        let h = headingOverhead;
+        for (const r of refs) {
+          const orgLine = [r.jobTitle, r.company].filter(Boolean).join(', ');
+          const contactLine = [r.email, r.phone].filter(Boolean).join('  ·  ');
+          h += this.measureReferenceEntryHeight(
+            doc,
+            pageW,
+            r.fullName,
+            orgLine || undefined,
+            r.relationship,
+            contactLine || undefined,
+            t,
+          );
         }
         return h;
       }
@@ -4300,9 +4902,104 @@ export class PdfGenerationService {
         }
         break;
 
+      case 'references': {
+        const refs = content.references ?? [];
+        const availableUponRequest = content.referencesAvailableUponRequest ?? false;
+        if (!refs.length && !availableUponRequest) return;
+        this.signatureMainEnsureSpace(
+          doc,
+          t,
+          SIGNATURE_HEADING_MIN_SPACE,
+          lm,
+          pageW,
+          candidateName,
+        );
+        this.signatureHeading(doc, 'References', lm, pageW, t);
+        if (availableUponRequest) {
+          doc
+            .font('Body')
+            .fontSize(t.typography.bodySize)
+            .fillColor(t.colors.text)
+            .text('References available upon request.', lm, doc.y, {
+              width: pageW,
+              lineGap: t.spacing.lineGap,
+            });
+          doc.moveDown(1);
+        } else {
+          for (const r of refs) this.signatureReferenceEntry(doc, r, lm, pageW, t, candidateName);
+        }
+        break;
+      }
+
       default:
         break;
     }
+  }
+
+  private signatureReferenceEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvReferenceEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+    candidateName: string,
+  ): void {
+    const orgLine = [entry.jobTitle, entry.company].filter(Boolean).join(', ');
+    const contactLine = [entry.email, entry.phone].filter(Boolean).join('  ·  ');
+
+    this.signatureMainEnsureSpace(
+      doc,
+      t,
+      this.measureReferenceEntryHeight(
+        doc,
+        pageW,
+        entry.fullName,
+        orgLine || undefined,
+        entry.relationship,
+        contactLine || undefined,
+        t,
+      ),
+      lm,
+      pageW,
+      candidateName,
+    );
+
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.heading)
+      .text(entry.fullName, lm, doc.y, { width: pageW });
+
+    if (orgLine) {
+      doc.moveDown(0.1);
+      // Wine accent on the org/title line — same cross-template convention
+      // signatureWorkEntry follows (see its own comment); labels, dates,
+      // and body copy stay off-accent.
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.3)
+        .fillColor(t.colors.accent)
+        .text(orgLine, lm, doc.y, { width: pageW });
+    }
+    if (entry.relationship) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(entry.relationship, lm, doc.y, { width: pageW });
+    }
+    if (contactLine) {
+      doc.moveDown(0.05);
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(contactLine, lm, doc.y, { width: pageW });
+    }
+
+    doc.moveDown(0.75);
+    doc.fillColor(t.colors.text);
   }
 
   private signatureWorkEntry(

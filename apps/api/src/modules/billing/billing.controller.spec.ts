@@ -81,6 +81,25 @@ describe('BillingController', () => {
     expect(mockBillingService.getSubscription).toHaveBeenCalledWith('clerk-1');
   });
 
+  // Regression coverage: the controller does no DTO mapping of its own — it
+  // returns BillingService's result verbatim — so cancelAtPeriodEnd (and
+  // every other field) must reach the HTTP response exactly as the service
+  // returned it. Guards against a future refactor accidentally introducing a
+  // mapping layer (or a ClassSerializerInterceptor) that silently strips it.
+  it('getSubscription returns cancelAtPeriodEnd unmodified in the response body', async () => {
+    const sub = {
+      plan: 'pro',
+      status: 'active',
+      cancelAtPeriodEnd: true,
+      currentPeriodEnd: new Date('2026-10-03T00:00:00.000Z'),
+    };
+    mockBillingService.getSubscription.mockResolvedValue(sub);
+
+    const result = await controller.getSubscription({ clerkId: 'clerk-1' });
+
+    expect(result).toEqual(sub);
+  });
+
   it('getUsage forwards the authenticated clerkId and returns the usage summary', async () => {
     const summary = {
       plan: 'free',

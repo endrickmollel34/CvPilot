@@ -7,6 +7,16 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 
+// Mocked so these tests never depend on a real Sentry client/DSN — only
+// verifies WHETHER captureException is called for each case, mirroring
+// this file's own existing status>=500 logging-discipline tests below
+// (same condition, same cases) rather than adding a parallel set of
+// assertions with different coverage.
+const mockCaptureException = jest.fn();
+jest.mock('@sentry/nestjs', () => ({
+  captureException: (...args: unknown[]) => mockCaptureException(...args),
+}));
+
 import { GlobalExceptionFilter } from './http-exception.filter';
 
 function mockHost() {
@@ -28,6 +38,7 @@ describe('GlobalExceptionFilter', () => {
   beforeEach(() => {
     filter = new GlobalExceptionFilter();
     loggerErrorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    mockCaptureException.mockClear();
   });
 
   afterEach(() => {
@@ -138,5 +149,44 @@ describe('GlobalExceptionFilter', () => {
     filter.catch(exception, host);
 
     expect(loggerErrorSpy).not.toHaveBeenCalled();
+  });
+
+  // ─── Monitoring (RABBIT_NOTEBOOK.md) — same status>=500 condition as the
+  // logging-discipline tests above, not a separate/different rule ─────────
+
+  it('reports a 5xx HttpException to Sentry, with the response body still unchanged', () => {
+    const { host, res } = mockHost();
+    const exception = new ServiceUnavailableException(
+      'AI features are temporarily unavailable. Please try again in a moment.',
+    );
+
+    filter.catch(exception, host);
+
+    expect(mockCaptureException).toHaveBeenCalledWith(exception);
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith(exception.getResponse());
+  });
+
+  it('does not report an ordinary 4xx HttpException to Sentry', () => {
+    const { host } = mockHost();
+    const exception = new ForbiddenException(
+      'Monthly analysis limit reached. Upgrade your plan to continue.',
+    );
+
+    filter.catch(exception, host);
+
+    expect(mockCaptureException).not.toHaveBeenCalled();
+  });
+
+  it('reports an unexpected (non-HttpException) error to Sentry, with the generic response body still unchanged', () => {
+    const { host, res } = mockHost();
+    const exception = new Error('password authentication failed for user "cvpilot"');
+
+    filter.catch(exception, host);
+
+    expect(mockCaptureException).toHaveBeenCalledWith(exception);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [body] = res.json.mock.calls[0] as [{ message: string }];
+    expect(body.message).toBe('Internal server error');
   });
 });

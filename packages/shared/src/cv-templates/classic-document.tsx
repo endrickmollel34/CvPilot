@@ -5,6 +5,7 @@ import type {
   CvEducationEntry,
   CvSkillEntry,
   CvCertificationEntry,
+  CvReferenceEntry,
 } from '../types/cv.types';
 import { CLASSIC_TEMPLATE } from './template-types';
 import type { TemplateDefinition } from './template-types';
@@ -139,6 +140,50 @@ function CertificationsSection({ certs }: { certs: CvCertificationEntry[] }) {
   );
 }
 
+// Modelled on EducationEntries' title/subtitle/meta shape — the closest
+// existing precedent for a compact, mostly-optional repeating record.
+// `availableUponRequest` is checked here (not just at the call site) so
+// this component alone decides the mode: real entries never render
+// alongside the "available upon request" sentence, and saved entries are
+// never lost from `entries` when that flag flips — see cv.types.ts's
+// CvContent doc comment.
+function ReferencesSection({
+  entries,
+  availableUponRequest,
+}: {
+  entries: CvReferenceEntry[];
+  availableUponRequest?: boolean;
+}) {
+  if (!entries.length && !availableUponRequest) return null;
+  return (
+    <>
+      <SectionHeading title="References" />
+      {availableUponRequest ? (
+        <p className="cv-summary">References available upon request.</p>
+      ) : (
+        entries.map((r) => (
+          <div key={r.id} className="cv-entry">
+            <div className="cv-entry-row">
+              <span className="cv-entry-title">{r.fullName}</span>
+            </div>
+            {(r.jobTitle || r.company) && (
+              <div className="cv-entry-subtitle">
+                {[r.jobTitle, r.company].filter(Boolean).join(', ')}
+              </div>
+            )}
+            {r.relationship && <div className="cv-entry-meta">{r.relationship}</div>}
+            {(r.email || r.phone) && (
+              <div className="cv-entry-meta">
+                {[r.email, r.phone].filter(Boolean).join('  ·  ')}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
 function renderSection(content: CvContent, section: CvSection) {
   switch (section) {
     case 'summary':
@@ -172,6 +217,14 @@ function renderSection(content: CvContent, section: CvSection) {
       );
     case 'certifications':
       return <CertificationsSection key="certs" certs={content.certifications} />;
+    case 'references':
+      return (
+        <ReferencesSection
+          key="references"
+          entries={content.references ?? []}
+          availableUponRequest={content.referencesAvailableUponRequest ?? false}
+        />
+      );
     default:
       return null;
   }
@@ -179,7 +232,7 @@ function renderSection(content: CvContent, section: CvSection) {
 
 export function ClassicCvDocument({ content }: { content: CvContent }) {
   const { personalDetails: pd, sectionOrder } = content;
-  const order = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  const order = resolveSectionOrder(sectionOrder);
 
   return (
     <div className="cv-classic-doc">
@@ -217,7 +270,34 @@ export const DEFAULT_SECTION_ORDER: CvSection[] = [
   'skills',
   'languages',
   'certifications',
+  'references',
 ];
+
+/**
+ * The single place every renderer (all six React documents below and
+ * apps/api's PDFKit renderer) turns a CV's stored `sectionOrder` into the
+ * list it actually iterates — so a fallback/backfill decision made here
+ * can never be duplicated (and drift) across call sites.
+ *
+ * Two cases:
+ *  1. `sectionOrder` is empty (never-saved/new content) — use
+ *     DEFAULT_SECTION_ORDER outright, same as before this helper existed.
+ *  2. `sectionOrder` is non-empty but predates References — a real CV
+ *     saved before this feature has a complete, deliberately-ordered list
+ *     of the OTHER sections with no 'references' entry at all (there is no
+ *     migration that backfills it). Falling back to DEFAULT_SECTION_ORDER
+ *     in this case would silently discard the user's own section order;
+ *     instead 'references' is appended once at the end, exactly like a
+ *     brand-new CV's DEFAULT_SECTION_ORDER already places it. This is what
+ *     makes References actually appear in the preview/PDF for existing
+ *     CVs the moment a user adds one — CvBuilderWorkspace.tsx's own
+ *     `sections` list does the equivalent for the *editor UI*, but only
+ *     this function governs what's actually rendered.
+ */
+export function resolveSectionOrder(sectionOrder: CvSection[]): CvSection[] {
+  const base = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  return base.includes('references') ? base : [...base, 'references'];
+}
 
 /**
  * Builds the plain-CSS stylesheet for ClassicCvDocument from a

@@ -20,6 +20,7 @@ async function fetchCv(token: string, cvId: string) {
     source: string;
     content?: unknown;
     templateId: string;
+    photoObjectKey?: string | null;
   }>;
 }
 
@@ -59,6 +60,7 @@ export default async function CvBuilderPage({ params }: Props) {
         initialTemplateId={
           cv.templateId as Parameters<typeof CvBuilderWorkspace>[0]['initialTemplateId']
         }
+        initialHasPhoto={Boolean(cv.photoObjectKey)}
       />
     </div>
   );

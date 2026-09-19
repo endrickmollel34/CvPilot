@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useDeferredValue, useRef } from 'react';
+import { useState, useCallback, useDeferredValue, useMemo, useRef, useEffect } from 'react';
 import { useAuth } from '@clerk/nextjs';
 
 import type { CvContent, CvSection, TemplateId } from '@cvpilot/shared';
@@ -19,9 +19,12 @@ import {
   SIGNATURE_CSS,
   TEMPLATE_REGISTRY,
   DEFAULT_TEMPLATE_ID,
+  resolveSectionOrder,
+  estimateProfileDensity,
+  PROFILE_TEMPLATE,
 } from '@cvpilot/shared';
-import { useAutosave, type SaveState } from '@/hooks/useAutosave';
-import { updateCvContent, updateCvTemplate, downloadCvPdf } from '@/lib/cvApi';
+import { useAutosaveControls, type SaveState } from '@/hooks/useAutosave';
+import { updateCvContent, updateCvTemplate, downloadCvPdf, getPhotoPreviewUrl } from '@/lib/cvApi';
 import { PersonalDetails } from './sections/PersonalDetails';
 import { Summary } from './sections/Summary';
 import { WorkExperience } from './sections/WorkExperience';
@@ -29,6 +32,10 @@ import { Education } from './sections/Education';
 import { Skills } from './sections/Skills';
 import { Languages } from './sections/Languages';
 import { Certifications } from './sections/Certifications';
+import { References } from './sections/References';
+import { Qualities } from './sections/Qualities';
+import { PhotoUpload } from './PhotoUpload';
+import { ProfileA4Preview } from './ProfileA4Preview';
 
 // ─── Uncertainty stripping ────────────────────────────────────────────────────
 // The AI prefill may inject "[?] " prefixes into extracted values.
@@ -48,6 +55,7 @@ function stripUncertaintyPrefixes(content: CvContent): CvContent {
   return {
     ...content,
     personalDetails: {
+      ...pd,
       fullName: strip(pd.fullName),
       email: strip(pd.email),
       phone: stripOpt(pd.phone),
@@ -55,6 +63,7 @@ function stripUncertaintyPrefixes(content: CvContent): CvContent {
       linkedIn: stripOpt(pd.linkedIn),
       website: stripOpt(pd.website),
       jobTitle: stripOpt(pd.jobTitle),
+      nationality: stripOpt(pd.nationality),
     },
     summary: stripOpt(content.summary),
     workExperience: content.workExperience.map((e) => ({
@@ -105,6 +114,7 @@ const SECTION_LABELS: Record<CvSection, string> = {
   skills: 'Skills',
   languages: 'Languages',
   certifications: 'Certifications',
+  references: 'References',
 };
 
 const ALL_SECTIONS: CvSection[] = [
@@ -114,6 +124,7 @@ const ALL_SECTIONS: CvSection[] = [
   'skills',
   'languages',
   'certifications',
+  'references',
 ];
 
 // Short selector taglines — presentation copy only, not a structural design
@@ -127,6 +138,7 @@ const TEMPLATE_TAGLINES: Record<TemplateId, string> = {
   professional: 'Premium · Corporate',
   compact: 'Efficient · Content-rich',
   signature: 'Editorial · Sophisticated',
+  profile: 'Personal · Two-column',
 };
 
 const EMPTY_CONTENT: CvContent = {
@@ -137,6 +149,8 @@ const EMPTY_CONTENT: CvContent = {
   skills: [],
   languages: [],
   certifications: [],
+  references: [],
+  referencesAvailableUponRequest: false,
   sectionOrder: ALL_SECTIONS,
 };
 
@@ -171,12 +185,14 @@ function SectionPanel({
   expanded,
   onToggle,
   onContentChange,
+  showRating,
 }: {
   section: CvSection;
   content: CvContent;
   expanded: boolean;
   onToggle: () => void;
   onContentChange: (c: CvContent) => void;
+  showRating: boolean;
 }) {
   const panelId = `section-panel-${section}`;
   const headerId = `section-header-${section}`;
@@ -220,18 +236,30 @@ function SectionPanel({
             <Skills
               entries={content.skills}
               onChange={(entries) => onContentChange({ ...content, skills: entries })}
+              showRating={showRating}
             />
           )}
           {section === 'languages' && (
             <Languages
               entries={content.languages}
               onChange={(entries) => onContentChange({ ...content, languages: entries })}
+              showRating={showRating}
             />
           )}
           {section === 'certifications' && (
             <Certifications
               entries={content.certifications}
               onChange={(entries) => onContentChange({ ...content, certifications: entries })}
+            />
+          )}
+          {section === 'references' && (
+            <References
+              entries={content.references ?? []}
+              availableUponRequest={content.referencesAvailableUponRequest ?? false}
+              onChange={(entries) => onContentChange({ ...content, references: entries })}
+              onAvailableUponRequestChange={(value) =>
+                onContentChange({ ...content, referencesAvailableUponRequest: value })
+              }
             />
           )}
         </div>
@@ -247,6 +275,10 @@ interface Props {
   initialContent: CvContent | null;
   isPrefilled?: boolean;
   initialTemplateId?: TemplateId;
+  /** Whether this CV already has a Profile-template photo (see
+   *  CvEntity.photoObjectKey) — only its presence, never the key/URL
+   *  itself, which is fetched separately via a short-lived signed URL. */
+  initialHasPhoto?: boolean;
 }
 
 export function CvBuilderWorkspace({
@@ -254,6 +286,7 @@ export function CvBuilderWorkspace({
   initialContent,
   isPrefilled = false,
   initialTemplateId = DEFAULT_TEMPLATE_ID,
+  initialHasPhoto = false,
 }: Props) {
   const { getToken } = useAuth();
 
@@ -286,6 +319,48 @@ export function CvBuilderWorkspace({
   // requestId still matches the latest dispatched request is applied.
   const templateRequestRef = useRef(0);
 
+  // Profile template's optional photo — only its presence lives in this
+  // component's own state; the actual displayable image is always a
+  // short-lived signed URL fetched fresh (see cv-photo.service.ts's own
+  // doc comment on why a permanent public URL is never used).
+  const [hasPhoto, setHasPhoto] = useState(initialHasPhoto);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
+
+  // Brief, optional template guidance for a short CV on Profile — the same
+  // density tier decision that drives Profile's own automatic spacing
+  // (profile-density.ts), reused here purely to decide whether to SHOW a
+  // suggestion, never to act on it: this never changes templateId itself,
+  // switching (or not) is entirely the user's own call via the template
+  // picker below (handleTemplateChange), which already only ever PATCHes
+  // templateId — content and hasPhoto are untouched by a template switch,
+  // so nothing here needs to preserve anything extra on top of that.
+  // Dismissal is per-CV, not persisted — it's a light nudge, not a
+  // decision the app needs to remember forever.
+  const [shortCvHintDismissed, setShortCvHintDismissed] = useState(false);
+  const profileDensityTier = useMemo(
+    () => estimateProfileDensity(content, PROFILE_TEMPLATE, hasPhoto).tier,
+    [content, hasPhoto],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!hasPhoto || templateId !== 'profile') {
+      setPhotoPreviewUrl(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const { previewUrl } = await getPhotoPreviewUrl(getToken, cvId);
+        if (!cancelled) setPhotoPreviewUrl(previewUrl);
+      } catch {
+        if (!cancelled) setPhotoPreviewUrl(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasPhoto, templateId, cvId, getToken]);
+
   async function handleTemplateChange(next: TemplateId) {
     const requestId = ++templateRequestRef.current;
     const previous = templateId;
@@ -311,11 +386,12 @@ export function CvBuilderWorkspace({
     [getToken, cvId],
   );
 
-  const saveState = useAutosave(content, saveFn, true);
+  const { state: saveState, flush: flushAutosave } = useAutosaveControls(content, saveFn, true);
 
   async function handleDownload() {
     setDlState('downloading');
     try {
+      await flushAutosave();
       const name = (content.personalDetails.fullName || 'cv').replace(/\s+/g, '_');
       await downloadCvPdf(getToken, cvId, `${name}.pdf`);
       setDlState('idle');
@@ -324,7 +400,15 @@ export function CvBuilderWorkspace({
     }
   }
 
-  const sections = content.sectionOrder.length > 0 ? content.sectionOrder : ALL_SECTIONS;
+  // Same resolution the preview/PDF renderers use (resolveSectionOrder,
+  // @cvpilot/shared) — a CV saved before References existed has a
+  // `sectionOrder` that simply doesn't mention it, so this appends it
+  // rather than leaving it unreachable, without silently rewriting the
+  // user's own chosen order for every other section. Using the identical
+  // shared function (not a locally re-derived equivalent) is what
+  // guarantees the editor's section list, the live preview, and the
+  // downloaded PDF can never disagree about which sections exist.
+  const sections = resolveSectionOrder(content.sectionOrder);
 
   const tabCls = (tab: 'edit' | 'preview') =>
     `flex-1 py-2 text-sm font-medium focus:outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-500 ${
@@ -345,7 +429,7 @@ export function CvBuilderWorkspace({
           <button
             type="button"
             onClick={() => void handleDownload()}
-            disabled={dlState === 'downloading'}
+            disabled={dlState === 'downloading' || templateSaveState === 'saving'}
             aria-label="Download CV as PDF"
             className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 disabled:opacity-50"
           >
@@ -486,6 +570,27 @@ export function CvBuilderWorkspace({
                 <p className="mt-2 text-xs text-gray-400">
                   {TEMPLATE_REGISTRY[templateId]?.description}
                 </p>
+                {templateId === 'profile' &&
+                  profileDensityTier === 'sparse' &&
+                  !shortCvHintDismissed && (
+                    <div className="mt-2 flex items-start gap-2 rounded border border-indigo-100 bg-indigo-50 px-2.5 py-2 text-xs text-indigo-800">
+                      <span className="flex-1">
+                        This CV is on the shorter side — <strong>Classic</strong> or{' '}
+                        <strong>Minimal</strong> (single-column, no sidebar to fill) can look great
+                        with less content too, if you&apos;d like to try one. Profile works fine
+                        as-is — this is just a suggestion, nothing changes unless you pick a
+                        different template above.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShortCvHintDismissed(true)}
+                        aria-label="Dismiss suggestion"
+                        className="shrink-0 text-indigo-400 hover:text-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
                 {templateSaveState === 'saving' && (
                   <p className="mt-1 text-xs text-gray-400">Saving…</p>
                 )}
@@ -496,6 +601,74 @@ export function CvBuilderWorkspace({
             )}
           </div>
 
+          {/* Photo + Qualities — Profile-template-specific panels, shown
+              only while Profile is selected (see PhotoUpload.tsx/
+              Qualities.tsx's own doc comments). Neither is a CvSection, so
+              they don't participate in `sections`/reordering. */}
+          {templateId === 'profile' && (
+            <div className="border-b border-gray-200">
+              <button
+                type="button"
+                id="section-header-photo"
+                aria-expanded={activePanel === 'photo'}
+                aria-controls="section-panel-photo"
+                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-500"
+                onClick={() => setActivePanel((p) => (p === 'photo' ? '' : 'photo'))}
+              >
+                <span className="text-sm font-medium text-gray-800">Photo</span>
+                <span className="text-xs text-gray-400" aria-hidden="true">
+                  {activePanel === 'photo' ? '▲' : '▼'}
+                </span>
+              </button>
+              {activePanel === 'photo' && (
+                <div
+                  id="section-panel-photo"
+                  role="region"
+                  aria-labelledby="section-header-photo"
+                  className="px-4 pb-4 pt-1"
+                >
+                  <PhotoUpload
+                    cvId={cvId}
+                    getToken={getToken}
+                    hasPhoto={hasPhoto}
+                    onChange={setHasPhoto}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {templateId === 'profile' && (
+            <div className="border-b border-gray-200">
+              <button
+                type="button"
+                id="section-header-qualities"
+                aria-expanded={activePanel === 'qualities'}
+                aria-controls="section-panel-qualities"
+                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-indigo-500"
+                onClick={() => setActivePanel((p) => (p === 'qualities' ? '' : 'qualities'))}
+              >
+                <span className="text-sm font-medium text-gray-800">Qualities</span>
+                <span className="text-xs text-gray-400" aria-hidden="true">
+                  {activePanel === 'qualities' ? '▲' : '▼'}
+                </span>
+              </button>
+              {activePanel === 'qualities' && (
+                <div
+                  id="section-panel-qualities"
+                  role="region"
+                  aria-labelledby="section-header-qualities"
+                  className="px-4 pb-4 pt-1"
+                >
+                  <Qualities
+                    qualities={content.qualities ?? []}
+                    onChange={(qualities) => setContent((c) => ({ ...c, qualities }))}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Remaining sections */}
           {sections.map((section) => (
             <SectionPanel
@@ -505,6 +678,7 @@ export function CvBuilderWorkspace({
               expanded={activePanel === section}
               onToggle={() => setActivePanel((p) => (p === section ? '' : section))}
               onContentChange={setContent}
+              showRating={templateId === 'profile'}
             />
           ))}
         </div>
@@ -515,48 +689,57 @@ export function CvBuilderWorkspace({
           aria-label="CV preview"
           className={`flex-1 overflow-y-auto bg-gray-50 p-6 lg:flex ${mobileTab === 'preview' ? 'flex' : 'hidden'}`}
         >
-          <div className="mx-auto w-full max-w-[210mm] rounded bg-white p-8 shadow-sm">
-            {/* CV Template Foundation: each template's React component +
-                CSS (@cvpilot/shared) reads the SAME typography/color/
-                spacing tokens (e.g. CLASSIC_TEMPLATE/MODERN_TEMPLATE) that
-                drive apps/api's matching PDFKit renderer — see
-                pdf-generation.service.ts. The two are separate rendering
-                implementations (PDFKit has no CSS/flexbox engine to
-                share), but can no longer silently drift on font/color/
-                spacing the way the pre-Phase-1 AtsClassic.tsx (Tailwind)
-                and pdf-generation.service.ts (hardcoded constants) did. */}
-            {templateId === 'modern' ? (
-              <>
-                <style dangerouslySetInnerHTML={{ __html: MODERN_CSS }} />
-                <ModernCvDocument content={deferredContent} />
-              </>
-            ) : templateId === 'minimal' ? (
-              <>
-                <style dangerouslySetInnerHTML={{ __html: MINIMAL_CSS }} />
-                <MinimalCvDocument content={deferredContent} />
-              </>
-            ) : templateId === 'professional' ? (
-              <>
-                <style dangerouslySetInnerHTML={{ __html: PROFESSIONAL_CSS }} />
-                <ProfessionalCvDocument content={deferredContent} />
-              </>
-            ) : templateId === 'compact' ? (
-              <>
-                <style dangerouslySetInnerHTML={{ __html: COMPACT_CSS }} />
-                <CompactCvDocument content={deferredContent} />
-              </>
-            ) : templateId === 'signature' ? (
-              <>
-                <style dangerouslySetInnerHTML={{ __html: SIGNATURE_CSS }} />
-                <SignatureCvDocument content={deferredContent} />
-              </>
-            ) : (
-              <>
-                <style dangerouslySetInnerHTML={{ __html: CLASSIC_CSS }} />
-                <ClassicCvDocument content={deferredContent} />
-              </>
-            )}
-          </div>
+          {templateId === 'profile' ? (
+            // Profile gets its own dedicated A4-accurate preview chrome
+            // (real 210x297mm proportions, uniform scale-to-fit, page-break
+            // markers) instead of the generic card below — see
+            // ProfileA4Preview.tsx's own doc comment. Scoped to this one
+            // template; every other template keeps the original wrapper.
+            <ProfileA4Preview content={deferredContent} photoUrl={photoPreviewUrl} />
+          ) : (
+            <div className="mx-auto w-full max-w-[210mm] self-start rounded bg-white p-8 shadow-sm">
+              {/* CV Template Foundation: each template's React component +
+                  CSS (@cvpilot/shared) reads the SAME typography/color/
+                  spacing tokens (e.g. CLASSIC_TEMPLATE/MODERN_TEMPLATE) that
+                  drive apps/api's matching PDFKit renderer — see
+                  pdf-generation.service.ts. The two are separate rendering
+                  implementations (PDFKit has no CSS/flexbox engine to
+                  share), but can no longer silently drift on font/color/
+                  spacing the way the pre-Phase-1 AtsClassic.tsx (Tailwind)
+                  and pdf-generation.service.ts (hardcoded constants) did. */}
+              {templateId === 'modern' ? (
+                <>
+                  <style dangerouslySetInnerHTML={{ __html: MODERN_CSS }} />
+                  <ModernCvDocument content={deferredContent} />
+                </>
+              ) : templateId === 'minimal' ? (
+                <>
+                  <style dangerouslySetInnerHTML={{ __html: MINIMAL_CSS }} />
+                  <MinimalCvDocument content={deferredContent} />
+                </>
+              ) : templateId === 'professional' ? (
+                <>
+                  <style dangerouslySetInnerHTML={{ __html: PROFESSIONAL_CSS }} />
+                  <ProfessionalCvDocument content={deferredContent} />
+                </>
+              ) : templateId === 'compact' ? (
+                <>
+                  <style dangerouslySetInnerHTML={{ __html: COMPACT_CSS }} />
+                  <CompactCvDocument content={deferredContent} />
+                </>
+              ) : templateId === 'signature' ? (
+                <>
+                  <style dangerouslySetInnerHTML={{ __html: SIGNATURE_CSS }} />
+                  <SignatureCvDocument content={deferredContent} />
+                </>
+              ) : (
+                <>
+                  <style dangerouslySetInnerHTML={{ __html: CLASSIC_CSS }} />
+                  <ClassicCvDocument content={deferredContent} />
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

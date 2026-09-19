@@ -10,5 +10,7 @@ export * from './cv-templates/minimal-document';
 export * from './cv-templates/professional-document';
 export * from './cv-templates/compact-document';
 export * from './cv-templates/signature-document';
+export * from './cv-templates/profile-document';
+export * from './cv-templates/profile-density';
 export * from './cv-templates/template-types';
 export * from './cv-templates/format';

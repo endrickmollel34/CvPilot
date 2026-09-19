@@ -19,6 +19,7 @@ import { fromEvent } from 'rxjs';
 import { filter, map } from 'rxjs/operators';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import * as Sentry from '@sentry/nestjs';
 
 import { CoverLetterEntity } from '../../entities/cover-letter.entity';
 import { UserService } from '../user/user.service';
@@ -223,6 +224,12 @@ export class CoverLetterService extends WorkerHost {
       const message = err instanceof Error ? err.message : String(err);
       const stack = err instanceof Error ? err.stack : undefined;
       this.logger.error(`Cover letter ${coverLetterId} generation failed: ${message}`, stack);
+      // Monitoring only — never changes retry/status behavior below.
+      // scrubSentryEvent (instrument.ts) truncates/redacts before send.
+      Sentry.captureException(err, {
+        tags: { queue: 'cover-letter' },
+        extra: { coverLetterId, cvId },
+      });
       await this.repo.update(coverLetterId, { status: 'failed' });
       this.eventEmitter.emit('cover-letter.failed', { coverLetterId });
     }

@@ -288,6 +288,46 @@ describe('BillingService', () => {
     });
   });
 
+  // ─── getSubscription() — the exact row GET /billing/subscription returns ──
+  // Regression coverage for the "still says Renews after cancel-at-period-end"
+  // production report: proves the raw entity — cancelAtPeriodEnd included —
+  // reaches the caller completely unmodified. getSubscription() does no
+  // mapping/DTO projection of its own (unlike getUserPlan(), which derives an
+  // effective plan), so BillingController's `return
+  // this.billingService.getSubscription(...)` — itself un-intercepted by any
+  // ClassSerializerInterceptor (none is registered anywhere in this app) —
+  // is what actually reaches the frontend as JSON.
+
+  describe('getSubscription()', () => {
+    it('returns the raw row with cancelAtPeriodEnd: true untouched, not stripped or coerced', async () => {
+      const row = mockSub('pro', 'active', {
+        cancelAtPeriodEnd: true,
+        currentPeriodEnd: new Date('2026-10-03T00:00:00.000Z'),
+      });
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(row);
+
+      const result = await service.getSubscription('clerk-1');
+
+      expect(result).toEqual(row);
+      expect(result?.cancelAtPeriodEnd).toBe(true);
+    });
+
+    it('returns the raw row with cancelAtPeriodEnd: false untouched for a subscription not scheduled to cancel', async () => {
+      const row = mockSub('pro', 'active', { cancelAtPeriodEnd: false });
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(row);
+
+      const result = await service.getSubscription('clerk-1');
+
+      expect(result?.cancelAtPeriodEnd).toBe(false);
+    });
+
+    it('returns null when the user has no subscription row', async () => {
+      mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
+
+      await expect(service.getSubscription('clerk-1')).resolves.toBeNull();
+    });
+  });
+
   // ─── getUserPlan() — effective plan resolution (entitlement bug fix) ───────
   // This is the real BillingService logic, not a mock — every case here
   // mirrors the rules from the investigation report.

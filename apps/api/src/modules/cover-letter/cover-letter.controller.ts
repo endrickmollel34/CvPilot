@@ -15,6 +15,7 @@ import {
 import type { Observable } from 'rxjs';
 
 import { ClerkGuard } from '../auth/guards/clerk.guard';
+import { AiRateLimitGuard } from '../../common/rate-limit/ai-rate-limit.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CoverLetterService } from './cover-letter.service';
 import { CreateCoverLetterDto } from './dto/create-cover-letter.dto';
@@ -26,7 +27,9 @@ import { ListCoverLettersDto } from './dto/list-cover-letters.dto';
 export class CoverLetterController {
   constructor(private readonly coverLetterService: CoverLetterService) {}
 
+  // Paid AI entry point — see AnalysisController's own comment.
   @Post()
+  @UseGuards(AiRateLimitGuard)
   submit(@CurrentUser() user: { clerkId: string }, @Body() dto: CreateCoverLetterDto) {
     return this.coverLetterService.submit(user.clerkId, dto);
   }
@@ -71,7 +74,10 @@ export class CoverLetterController {
     return this.coverLetterService.getDownloadUrl(user.clerkId, id);
   }
 
+  // Paid AI entry point — regenerating makes a fresh AI call just like
+  // submit() does, so it's rate-limited the same way.
   @Post(':id/regenerate')
+  @UseGuards(AiRateLimitGuard)
   regenerate(@CurrentUser() user: { clerkId: string }, @Param('id') id: string) {
     return this.coverLetterService.regenerate(user.clerkId, id);
   }

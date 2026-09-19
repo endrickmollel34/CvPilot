@@ -8,6 +8,7 @@ import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import type { Readable } from 'stream';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
+import * as Sentry from '@sentry/nestjs';
 
 import { CvEntity } from '../../entities/cv.entity';
 
@@ -71,6 +72,10 @@ export class ParsingService extends WorkerHost {
       this.logger.log(`CV ${cvId} parsed successfully (${parsedContent.length} chars extracted)`);
     } catch (err) {
       this.logger.error(`CV ${cvId} parsing failed`, err);
+      // Monitoring only — never changes retry/status behavior below.
+      // scrubSentryEvent (instrument.ts) truncates/redacts before send;
+      // the uploaded file's own extracted text is never attached here.
+      Sentry.captureException(err, { tags: { queue: 'cv-parsing' }, extra: { cvId } });
       await this.cvRepo.update(cvId, { parseStatus: 'failed' });
     }
   }

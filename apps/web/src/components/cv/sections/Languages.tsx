@@ -6,9 +6,42 @@ import type { CvLanguageEntry } from '@cvpilot/shared';
 interface Props {
   entries: CvLanguageEntry[];
   onChange: (entries: CvLanguageEntry[]) => void;
+  /** Same explicit 1-5 rating selector as Skills.tsx — see its own doc
+   *  comment. */
+  showRating?: boolean;
 }
 
-export function Languages({ entries, onChange }: Props) {
+function RatingSelector({
+  value,
+  onChange,
+  label,
+}: {
+  value: number | undefined;
+  onChange: (v: number | undefined) => void;
+  label: string;
+}) {
+  return (
+    <span className="inline-flex items-center gap-0.5" role="radiogroup" aria-label={label}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button
+          key={n}
+          type="button"
+          role="radio"
+          aria-checked={value === n}
+          onClick={() => onChange(value === n ? undefined : n)}
+          aria-label={`${n} out of 5`}
+          className={`h-3.5 w-3.5 rounded-full border focus:outline-none focus:ring-1 focus:ring-indigo-500 ${
+            value !== undefined && n <= value
+              ? 'border-gray-600 bg-gray-600'
+              : 'border-gray-300 bg-white'
+          }`}
+        />
+      ))}
+    </span>
+  );
+}
+
+export function Languages({ entries, onChange, showRating = false }: Props) {
   const [draftName, setDraftName] = useState('');
   const [draftLevel, setDraftLevel] = useState('');
 
@@ -34,18 +67,31 @@ export function Languages({ entries, onChange }: Props) {
     onChange(entries.filter((e) => e.id !== id));
   }
 
+  function setRating(id: string, rating: number | undefined) {
+    onChange(entries.map((e) => (e.id === id ? { ...e, rating } : e)));
+  }
+
   return (
     <div className="flex flex-col gap-3">
       {entries.length > 0 && (
-        <div className="flex flex-wrap gap-2" role="list" aria-label="Languages">
+        <div className="flex flex-col gap-2" role="list" aria-label="Languages">
           {entries.map((e) => (
             <span
               key={e.id}
               role="listitem"
-              className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1 text-sm text-gray-700"
+              className="inline-flex w-fit items-center gap-2 rounded-full bg-gray-100 px-3 py-1 text-sm text-gray-700"
             >
-              {e.name}
-              {e.level && <span className="text-gray-500"> · {e.level}</span>}
+              <span>
+                {e.name}
+                {e.level && <span className="text-gray-500"> · {e.level}</span>}
+              </span>
+              {showRating && (
+                <RatingSelector
+                  value={e.rating}
+                  onChange={(v) => setRating(e.id, v)}
+                  label={`Rate ${e.name}`}
+                />
+              )}
               <button
                 type="button"
                 onClick={() => remove(e.id)}

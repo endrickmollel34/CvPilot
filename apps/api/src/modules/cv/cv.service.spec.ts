@@ -4,6 +4,7 @@ import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import {
+  BadRequestException,
   ForbiddenException,
   NotFoundException,
   ServiceUnavailableException,
@@ -17,7 +18,9 @@ import { CvEntity } from '../../entities/cv.entity';
 import { UserService } from '../user/user.service';
 import { BillingService } from '../billing/billing.service';
 import { PrefillExtractionService } from './prefill-extraction.service';
+import { PrefillLockService } from './prefill-lock.service';
 import { PdfGenerationService } from './pdf-generation.service';
+import { CvPhotoService } from './cv-photo.service';
 import { R2StorageService } from '../../common/services/r2-storage.service';
 
 // S3Client is constructed unconditionally in CvService's constructor —
@@ -69,7 +72,18 @@ describe('CvService — confirmUpload() verified-size pending upload flow', () =
   const mockUserService = { findByClerkId: jest.fn() };
   const mockBillingService = { canPerformAction: jest.fn() };
   const mockPrefillService = {};
+  // Not exercised by this describe block (createBuilder/prefillFromUpload
+  // aren't under test here) — provided only so CvService's constructor
+  // resolves; see cv.service.spec.ts's own "case 2" concurrency block and
+  // cv-prefill.service.spec.ts for the tests that actually configure this.
+  const mockPrefillLockService = {
+    acquire: jest.fn().mockResolvedValue('token'),
+    renew: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
+    startHeartbeat: jest.fn().mockReturnValue(() => {}),
+  };
   const mockPdfService = {};
+  const mockPhotoService = { getPhotoBytes: jest.fn() };
   const mockR2Storage = { deleteObject: jest.fn() };
 
   const PENDING_KEY = `pending-cvs/${MOCK_USER.id}/some-uuid-resume.pdf`;
@@ -121,7 +135,9 @@ describe('CvService — confirmUpload() verified-size pending upload flow', () =
         { provide: UserService, useValue: mockUserService },
         { provide: BillingService, useValue: mockBillingService },
         { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PrefillLockService, useValue: mockPrefillLockService },
         { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: CvPhotoService, useValue: mockPhotoService },
         { provide: R2StorageService, useValue: mockR2Storage },
         { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
       ],
@@ -422,7 +438,18 @@ describe('CvService — template persistence', () => {
   const mockUserService = { findByClerkId: jest.fn() };
   const mockBillingService = { canPerformAction: jest.fn() };
   const mockPrefillService = {};
+  // Not exercised by this describe block (createBuilder/prefillFromUpload
+  // aren't under test here) — provided only so CvService's constructor
+  // resolves; see cv.service.spec.ts's own "case 2" concurrency block and
+  // cv-prefill.service.spec.ts for the tests that actually configure this.
+  const mockPrefillLockService = {
+    acquire: jest.fn().mockResolvedValue('token'),
+    renew: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
+    startHeartbeat: jest.fn().mockReturnValue(() => {}),
+  };
   const mockPdfService = {};
+  const mockPhotoService = { getPhotoBytes: jest.fn() };
 
   const EXISTING_CONTENT: CvContent = {
     version: 1,
@@ -455,7 +482,9 @@ describe('CvService — template persistence', () => {
         { provide: UserService, useValue: mockUserService },
         { provide: BillingService, useValue: mockBillingService },
         { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PrefillLockService, useValue: mockPrefillLockService },
         { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: CvPhotoService, useValue: mockPhotoService },
         { provide: R2StorageService, useValue: { deleteObject: jest.fn() } },
         { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
       ],
@@ -518,6 +547,345 @@ describe('CvService — template persistence', () => {
   });
 });
 
+// ─── References feature — updateContent() server-side validation ──────────
+// UpdateCvContentDto only validates that `content` is an object (see its own
+// file) — CvService.validateReferencesContent() is the one place References
+// data specifically is deeply checked before it can reach persistence, so
+// malformed data (missing fullName, a bad email, a non-array `references`)
+// can never be saved even though the rest of `content` still isn't deeply
+// validated server-side. See the References feature report.
+describe('CvService — References validation (updateContent)', () => {
+  let service: CvService;
+
+  const mockCvRepo = {
+    findOne: jest.fn(),
+    update: jest.fn(),
+    findOneByOrFail: jest.fn(),
+  };
+  const mockQueue = { add: jest.fn() };
+  const mockUserService = { findByClerkId: jest.fn() };
+  const mockBillingService = { canPerformAction: jest.fn() };
+  const mockPrefillService = {};
+  // Not exercised by this describe block (createBuilder/prefillFromUpload
+  // aren't under test here) — provided only so CvService's constructor
+  // resolves; see cv.service.spec.ts's own "case 2" concurrency block and
+  // cv-prefill.service.spec.ts for the tests that actually configure this.
+  const mockPrefillLockService = {
+    acquire: jest.fn().mockResolvedValue('token'),
+    renew: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
+    startHeartbeat: jest.fn().mockReturnValue(() => {}),
+  };
+  const mockPdfService = {};
+  const mockPhotoService = { getPhotoBytes: jest.fn() };
+
+  const BASE_CONTENT: CvContent = {
+    version: 1,
+    personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+    workExperience: [],
+    education: [],
+    skills: [],
+    languages: [],
+    certifications: [],
+    sectionOrder: [
+      'summary',
+      'workExperience',
+      'education',
+      'skills',
+      'languages',
+      'certifications',
+      'references',
+    ],
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CvService,
+        { provide: getRepositoryToken(CvEntity), useValue: mockCvRepo },
+        { provide: getQueueToken('cv-parsing'), useValue: mockQueue },
+        { provide: ConfigService, useValue: makeConfig() },
+        { provide: UserService, useValue: mockUserService },
+        { provide: BillingService, useValue: mockBillingService },
+        { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PrefillLockService, useValue: mockPrefillLockService },
+        { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: CvPhotoService, useValue: mockPhotoService },
+        { provide: R2StorageService, useValue: { deleteObject: jest.fn() } },
+        { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
+      ],
+    }).compile();
+
+    service = module.get<CvService>(CvService);
+    mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      source: 'builder',
+      content: BASE_CONTENT,
+    });
+    mockCvRepo.findOneByOrFail.mockImplementation(() =>
+      Promise.resolve({ id: 'cv-1', content: mockCvRepo.update.mock.calls.at(-1)?.[1]?.content }),
+    );
+  });
+
+  it('accepts a CV with no references at all (references key absent — an existing pre-feature CV)', async () => {
+    const content = { ...BASE_CONTENT };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('accepts a CV with one valid reference', async () => {
+    const content: CvContent = {
+      ...BASE_CONTENT,
+      references: [{ id: 'ref-1', fullName: 'John Smith', email: 'john@example.com' }],
+    };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('accepts a CV with several valid references, each with only some optional fields filled in', async () => {
+    const content: CvContent = {
+      ...BASE_CONTENT,
+      references: [
+        {
+          id: 'ref-1',
+          fullName: 'John Smith',
+          jobTitle: 'Senior Software Engineer',
+          company: 'Example Ltd',
+          relationship: 'Former Supervisor',
+          email: 'john@example.com',
+          phone: '+32 123 456 789',
+        },
+        { id: 'ref-2', fullName: 'Jane Lecturer', company: 'Example University' },
+        { id: 'ref-3', fullName: 'No Extra Fields' },
+      ],
+    };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('accepts referencesAvailableUponRequest: true while references still holds entries — the toggle never strips saved data', async () => {
+    const content: CvContent = {
+      ...BASE_CONTENT,
+      references: [{ id: 'ref-1', fullName: 'John Smith' }],
+      referencesAvailableUponRequest: true,
+    };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    const writePayload = mockCvRepo.update.mock.calls[0]?.[1] as { content: CvContent };
+    expect(writePayload.content.references).toHaveLength(1);
+    expect(writePayload.content.referencesAvailableUponRequest).toBe(true);
+  });
+
+  it('rejects a reference with a missing/empty fullName', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      references: [{ id: 'ref-1', fullName: '   ' }],
+    } as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a reference with a malformed email', async () => {
+    const content: CvContent = {
+      ...BASE_CONTENT,
+      references: [{ id: 'ref-1', fullName: 'John Smith', email: 'not-an-email' }],
+    };
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payload where references is not an array', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      references: { id: 'ref-1', fullName: 'John Smith' },
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payload where referencesAvailableUponRequest is not a boolean', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      referencesAvailableUponRequest: 'yes',
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a reference entry that is missing an id', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      references: [{ fullName: 'John Smith' }],
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Profile template (Phase 7) — updateContent() server-side validation ──
+// Same targeted, defense-in-depth approach as References validation above —
+// only the fields Profile actually adds (`qualities`, `personalDetails.
+// nationality`, `skills[].rating`/`languages[].rating`) are checked here.
+describe('CvService — Profile field validation (updateContent)', () => {
+  let service: CvService;
+
+  const mockCvRepo = {
+    findOne: jest.fn(),
+    update: jest.fn(),
+    findOneByOrFail: jest.fn(),
+  };
+  const mockQueue = { add: jest.fn() };
+  const mockUserService = { findByClerkId: jest.fn() };
+  const mockBillingService = { canPerformAction: jest.fn() };
+  const mockPrefillService = {};
+  // Not exercised by this describe block (createBuilder/prefillFromUpload
+  // aren't under test here) — provided only so CvService's constructor
+  // resolves; see cv.service.spec.ts's own "case 2" concurrency block and
+  // cv-prefill.service.spec.ts for the tests that actually configure this.
+  const mockPrefillLockService = {
+    acquire: jest.fn().mockResolvedValue('token'),
+    renew: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
+    startHeartbeat: jest.fn().mockReturnValue(() => {}),
+  };
+  const mockPdfService = {};
+  const mockPhotoService = { getPhotoBytes: jest.fn() };
+
+  const BASE_CONTENT: CvContent = {
+    version: 1,
+    personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+    workExperience: [],
+    education: [],
+    skills: [{ id: 's1', name: 'TypeScript' }],
+    languages: [{ id: 'l1', name: 'English' }],
+    certifications: [],
+    sectionOrder: [
+      'summary',
+      'workExperience',
+      'education',
+      'skills',
+      'languages',
+      'certifications',
+    ],
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CvService,
+        { provide: getRepositoryToken(CvEntity), useValue: mockCvRepo },
+        { provide: getQueueToken('cv-parsing'), useValue: mockQueue },
+        { provide: ConfigService, useValue: makeConfig() },
+        { provide: UserService, useValue: mockUserService },
+        { provide: BillingService, useValue: mockBillingService },
+        { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PrefillLockService, useValue: mockPrefillLockService },
+        { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: CvPhotoService, useValue: mockPhotoService },
+        { provide: R2StorageService, useValue: { deleteObject: jest.fn() } },
+        { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
+      ],
+    }).compile();
+
+    service = module.get<CvService>(CvService);
+    mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      source: 'builder',
+      content: BASE_CONTENT,
+    });
+    mockCvRepo.findOneByOrFail.mockImplementation(() =>
+      Promise.resolve({ id: 'cv-1', content: mockCvRepo.update.mock.calls.at(-1)?.[1]?.content }),
+    );
+  });
+
+  it('accepts a CV with no qualities/rating/nationality at all (an existing pre-feature CV)', async () => {
+    const content = { ...BASE_CONTENT };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('accepts qualities, nationality, and explicit 1-5 ratings together', async () => {
+    const content: CvContent = {
+      ...BASE_CONTENT,
+      qualities: ['Team player', 'Detail-oriented'],
+      personalDetails: { ...BASE_CONTENT.personalDetails, nationality: 'British' },
+      skills: [{ id: 's1', name: 'TypeScript', rating: 5 }],
+      languages: [{ id: 'l1', name: 'English', rating: 1 }],
+    };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('rejects a non-array qualities value', async () => {
+    const content = { ...BASE_CONTENT, qualities: 'Team player' } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty-string quality entry', async () => {
+    const content: CvContent = { ...BASE_CONTENT, qualities: ['  '] };
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-string nationality value', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      personalDetails: { ...BASE_CONTENT.personalDetails, nationality: 42 },
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 6, 2.5, -1])(
+    'rejects an out-of-range/non-integer skill rating (%s)',
+    async (rating) => {
+      const content = {
+        ...BASE_CONTENT,
+        skills: [{ id: 's1', name: 'TypeScript', rating }],
+      } as unknown as CvContent;
+      await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockCvRepo.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects an out-of-range language rating', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      languages: [{ id: 'l1', name: 'English', rating: 7 }],
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Privacy/retention fix — deleteCv() ─────────────────────────────────────
 // See the module report: individual CV deletion must genuinely scrub the
 // R2 source file and the extracted personal-data columns, not just hide the
@@ -534,7 +902,18 @@ describe('CvService — deleteCv()', () => {
   const mockUserService = { findByClerkId: jest.fn() };
   const mockBillingService = { canPerformAction: jest.fn() };
   const mockPrefillService = {};
+  // Not exercised by this describe block (createBuilder/prefillFromUpload
+  // aren't under test here) — provided only so CvService's constructor
+  // resolves; see cv.service.spec.ts's own "case 2" concurrency block and
+  // cv-prefill.service.spec.ts for the tests that actually configure this.
+  const mockPrefillLockService = {
+    acquire: jest.fn().mockResolvedValue('token'),
+    renew: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
+    startHeartbeat: jest.fn().mockReturnValue(() => {}),
+  };
   const mockPdfService = {};
+  const mockPhotoService = { getPhotoBytes: jest.fn() };
   const mockR2Storage = { deleteObject: jest.fn() };
 
   // DB scrub/soft-delete happens inside dataSource.transaction() (see the
@@ -569,7 +948,9 @@ describe('CvService — deleteCv()', () => {
         { provide: UserService, useValue: mockUserService },
         { provide: BillingService, useValue: mockBillingService },
         { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PrefillLockService, useValue: mockPrefillLockService },
         { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: CvPhotoService, useValue: mockPhotoService },
         { provide: R2StorageService, useValue: mockR2Storage },
         { provide: getDataSourceToken(), useValue: mockDataSource },
       ],
@@ -647,6 +1028,28 @@ describe('CvService — deleteCv()', () => {
       parsedContent: null,
       fileName: null,
       r2ObjectKey: null,
+      photoObjectKey: null,
+    });
+  });
+
+  it('also deletes a Profile-template photo object when one is present, and clears photoObjectKey in the scrub', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      ...OWNED_CV,
+      photoObjectKey: `cv-photos/${MOCK_USER.id}/cv-1-uuid.png`,
+    });
+
+    await service.deleteCv('clerk-1', 'cv-1');
+
+    expect(mockR2Storage.deleteObject).toHaveBeenCalledWith(OWNED_CV.r2ObjectKey);
+    expect(mockR2Storage.deleteObject).toHaveBeenCalledWith(
+      `cv-photos/${MOCK_USER.id}/cv-1-uuid.png`,
+    );
+    expect(mockManager.update).toHaveBeenCalledWith(CvEntity, 'cv-1', {
+      content: null,
+      parsedContent: null,
+      fileName: null,
+      r2ObjectKey: null,
+      photoObjectKey: null,
     });
   });
 
@@ -720,5 +1123,165 @@ describe('CvService — deleteCv()', () => {
 
     expect(mockManager.softDelete).toHaveBeenCalledTimes(1);
     expect(mockR2Storage.deleteObject).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── Profile template (Phase 7) — generatePdfStream() photo wiring ─────────
+// CvService is the one place that decides WHETHER to load photo bytes
+// before calling PdfGenerationService.generateStream — these tests prove
+// that decision, not CvPhotoService's own byte-loading logic (see
+// cv-photo.service.spec.ts) or PDFKit rendering itself (see
+// pdf-generation.service.spec.ts).
+describe('CvService — generatePdfStream() photo wiring', () => {
+  let service: CvService;
+
+  const mockCvRepo = { findOne: jest.fn() };
+  const mockQueue = { add: jest.fn() };
+  const mockUserService = { findByClerkId: jest.fn() };
+  const mockBillingService = { canPerformAction: jest.fn() };
+  const mockPrefillService = {};
+  // Not exercised by this describe block (createBuilder/prefillFromUpload
+  // aren't under test here) — provided only so CvService's constructor
+  // resolves; see cv.service.spec.ts's own "case 2" concurrency block and
+  // cv-prefill.service.spec.ts for the tests that actually configure this.
+  const mockPrefillLockService = {
+    acquire: jest.fn().mockResolvedValue('token'),
+    renew: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
+    startHeartbeat: jest.fn().mockReturnValue(() => {}),
+  };
+  const mockPdfService = { generateStream: jest.fn() };
+  const mockPhotoService = { getPhotoBytes: jest.fn() };
+
+  const BASE_CONTENT: CvContent = {
+    version: 1,
+    personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+    workExperience: [],
+    education: [],
+    skills: [],
+    languages: [],
+    certifications: [],
+    sectionOrder: [
+      'summary',
+      'workExperience',
+      'education',
+      'skills',
+      'languages',
+      'certifications',
+    ],
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CvService,
+        { provide: getRepositoryToken(CvEntity), useValue: mockCvRepo },
+        { provide: getQueueToken('cv-parsing'), useValue: mockQueue },
+        { provide: ConfigService, useValue: makeConfig() },
+        { provide: UserService, useValue: mockUserService },
+        { provide: BillingService, useValue: mockBillingService },
+        { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PrefillLockService, useValue: mockPrefillLockService },
+        { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: CvPhotoService, useValue: mockPhotoService },
+        { provide: R2StorageService, useValue: { deleteObject: jest.fn() } },
+        { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
+      ],
+    }).compile();
+
+    service = module.get<CvService>(CvService);
+    mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
+    mockPdfService.generateStream.mockReturnValue('fake-stream');
+  });
+
+  it('loads and forwards photo bytes for a Profile CV that has a photo', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      title: 'CV',
+      content: BASE_CONTENT,
+      templateId: 'profile',
+      photoObjectKey: 'cv-photos/user-1/cv-1-x.png',
+    });
+    const photo = {
+      buffer: Buffer.from('x'),
+      dimensions: { format: 'image/png', width: 100, height: 100 },
+    };
+    mockPhotoService.getPhotoBytes.mockResolvedValue(photo);
+
+    await service.generatePdfStream('clerk-1', 'cv-1');
+
+    expect(mockPhotoService.getPhotoBytes).toHaveBeenCalledWith('cv-photos/user-1/cv-1-x.png');
+    expect(mockPdfService.generateStream).toHaveBeenCalledWith(
+      BASE_CONTENT,
+      'CV',
+      'profile',
+      photo,
+    );
+  });
+
+  it('never attempts to load photo bytes for a non-Profile template, even if photoObjectKey is set', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      title: 'CV',
+      content: BASE_CONTENT,
+      templateId: 'classic',
+      photoObjectKey: 'cv-photos/user-1/cv-1-x.png',
+    });
+
+    await service.generatePdfStream('clerk-1', 'cv-1');
+
+    expect(mockPhotoService.getPhotoBytes).not.toHaveBeenCalled();
+    expect(mockPdfService.generateStream).toHaveBeenCalledWith(
+      BASE_CONTENT,
+      'CV',
+      'classic',
+      undefined,
+    );
+  });
+
+  it('renders with no photo (undefined) when a Profile CV simply has none', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      title: 'CV',
+      content: BASE_CONTENT,
+      templateId: 'profile',
+      photoObjectKey: undefined,
+    });
+
+    await service.generatePdfStream('clerk-1', 'cv-1');
+
+    expect(mockPhotoService.getPhotoBytes).not.toHaveBeenCalled();
+    expect(mockPdfService.generateStream).toHaveBeenCalledWith(
+      BASE_CONTENT,
+      'CV',
+      'profile',
+      undefined,
+    );
+  });
+
+  it('falls back to no photo when getPhotoBytes returns null (e.g. a transient load failure) — never throws, never touches the CV', async () => {
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      title: 'CV',
+      content: BASE_CONTENT,
+      templateId: 'profile',
+      photoObjectKey: 'cv-photos/user-1/cv-1-x.png',
+    });
+    mockPhotoService.getPhotoBytes.mockResolvedValue(null);
+
+    await service.generatePdfStream('clerk-1', 'cv-1');
+
+    expect(mockPdfService.generateStream).toHaveBeenCalledWith(
+      BASE_CONTENT,
+      'CV',
+      'profile',
+      undefined,
+    );
   });
 });

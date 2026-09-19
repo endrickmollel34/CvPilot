@@ -11,6 +11,7 @@ import { CvModule } from '../cv/cv.module';
 import { BillingModule } from '../billing/billing.module';
 import { UserModule } from '../user/user.module';
 import { AuditModule } from '../audit/audit.module';
+import { AiRateLimitModule } from '../../common/rate-limit/ai-rate-limit.module';
 import { QUEUE_JOB_RETENTION } from '../../common/constants/queue-retention';
 
 @Module({
@@ -21,6 +22,7 @@ import { QUEUE_JOB_RETENTION } from '../../common/constants/queue-retention';
     BillingModule,
     UserModule,
     AuditModule,
+    AiRateLimitModule,
   ],
   controllers: [TailoringController],
   providers: [TailoringService, TailoringProcessor, TailoringAiService],

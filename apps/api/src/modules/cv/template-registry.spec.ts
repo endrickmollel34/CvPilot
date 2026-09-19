@@ -9,6 +9,7 @@ import {
   PROFESSIONAL_TEMPLATE,
   COMPACT_TEMPLATE,
   SIGNATURE_TEMPLATE,
+  PROFILE_TEMPLATE,
   DEFAULT_TEMPLATE_ID,
   TEMPLATE_REGISTRY,
   getTemplate,
@@ -233,6 +234,51 @@ describe('shared template registry', () => {
     expect(SIGNATURE_TEMPLATE.typography.nameSize).toBeGreaterThan(
       COMPACT_TEMPLATE.typography.nameSize,
     );
+  });
+
+  // CV Template Foundation, Phase 7 — Profile
+  it('resolves "profile" to PROFILE_TEMPLATE', () => {
+    expect(getTemplate('profile')).toBe(PROFILE_TEMPLATE);
+    expect(isValidTemplateId('profile')).toBe(true);
+  });
+
+  it('Profile is the only template with supportsPhoto set', () => {
+    expect(PROFILE_TEMPLATE.supportsPhoto).toBe(true);
+    expect(CLASSIC_TEMPLATE.supportsPhoto).toBeUndefined();
+    expect(MODERN_TEMPLATE.supportsPhoto).toBeUndefined();
+    expect(MINIMAL_TEMPLATE.supportsPhoto).toBeUndefined();
+    expect(PROFESSIONAL_TEMPLATE.supportsPhoto).toBeUndefined();
+    expect(COMPACT_TEMPLATE.supportsPhoto).toBeUndefined();
+    expect(SIGNATURE_TEMPLATE.supportsPhoto).toBeUndefined();
+  });
+
+  it('Profile uses the sidebar-main layout shape but is dispatched by id, not layout', () => {
+    expect(PROFILE_TEMPLATE.layout).toBe('sidebar-main');
+    expect(PROFILE_TEMPLATE.id).not.toBe(MODERN_TEMPLATE.id);
+    expect(PROFILE_TEMPLATE.id).not.toBe(PROFESSIONAL_TEMPLATE.id);
+  });
+
+  it('Profile has its own seventh heading treatment, distinct from every other template', () => {
+    expect(PROFILE_TEMPLATE.headingTreatment).toBe('thin-blue-rule');
+    for (const other of [
+      CLASSIC_TEMPLATE,
+      MODERN_TEMPLATE,
+      MINIMAL_TEMPLATE,
+      PROFESSIONAL_TEMPLATE,
+      COMPACT_TEMPLATE,
+      SIGNATURE_TEMPLATE,
+    ]) {
+      expect(PROFILE_TEMPLATE.headingTreatment).not.toBe(other.headingTreatment);
+    }
+  });
+
+  it('Profile only puts skills/languages in its sidebar — certifications/references stay in the main column', () => {
+    expect(PROFILE_TEMPLATE.sidebarSections).toEqual(['skills', 'languages']);
+  });
+
+  it('Profile has a pale sidebar tint and a distinct blue header-band color', () => {
+    expect(PROFILE_TEMPLATE.sidebarBackground).toBeDefined();
+    expect(PROFILE_TEMPLATE.colors.headerBackground).toBeDefined();
   });
 
   it('DEFAULT_TEMPLATE_ID points at a real, registered template', () => {

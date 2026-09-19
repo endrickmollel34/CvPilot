@@ -13,6 +13,10 @@ export interface CvDto {
   content?: CvContent;
   templateId: TemplateId;
   sourceUploadCvId?: string;
+  // Present only once a Profile-template photo has been uploaded — never
+  // a usable URL itself (see getPhotoPreviewUrl for the actual short-lived
+  // signed URL used to display it).
+  photoObjectKey?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -145,6 +149,68 @@ export async function updateCvTemplate(
     throwApiError(body, `Failed to update CV template: ${res.status}`, res.status);
   }
   return res.json() as Promise<CvDto>;
+}
+
+// ─── Profile template photo ───────────────────────────────────────────────
+// Mirrors the CV-file direct-to-R2 upload flow (getUploadUrl → PUT to R2 →
+// confirm) — see NewCvUpload.tsx's handleFileSelected for the identical
+// three-step shape.
+
+export async function getPhotoUploadUrl(
+  token: TokenSource,
+  cvId: string,
+  mimeType: string,
+  fileSizeBytes: number,
+): Promise<{ uploadUrl: string; r2ObjectKey: string }> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}/photo/upload-url`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mimeType, fileSizeBytes }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to get photo upload URL: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<{ uploadUrl: string; r2ObjectKey: string }>;
+}
+
+export async function confirmPhotoUpload(
+  token: TokenSource,
+  cvId: string,
+  r2ObjectKey: string,
+  fileSizeBytes: number,
+  mimeType: string,
+): Promise<CvDto> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}/photo/confirm`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ r2ObjectKey, fileSizeBytes, mimeType }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to confirm photo upload: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<CvDto>;
+}
+
+export async function removeCvPhoto(token: TokenSource, cvId: string): Promise<CvDto> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}/photo`, token, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwApiError(body, `Failed to remove photo: ${res.status}`, res.status);
+  }
+  return res.json() as Promise<CvDto>;
+}
+
+export async function getPhotoPreviewUrl(
+  token: TokenSource,
+  cvId: string,
+): Promise<{ previewUrl: string | null }> {
+  const res = await authFetch(`${API_URL}/cvs/${cvId}/photo/preview-url`, token, {
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new Error(`Failed to get photo preview URL: ${res.status}`);
+  return res.json() as Promise<{ previewUrl: string | null }>;
 }
 
 export async function prefillCv(token: TokenSource, uploadCvId: string): Promise<CvDto> {

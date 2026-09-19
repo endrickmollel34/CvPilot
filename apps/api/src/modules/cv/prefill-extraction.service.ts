@@ -126,8 +126,13 @@ export class PrefillExtractionService {
       }
     }
 
+    // Deliberately does NOT embed String(lastError) — lastError is an
+    // arbitrary upstream OpenAI SDK error whose message shape this
+    // codebase doesn't control, so only its safe, bounded constructor name
+    // is surfaced (matching the pattern already used in analysis.service.ts's
+    // own catch block). See RABBIT_NOTEBOOK.md.
     throw new Error(
-      `Prefill extraction failed after ${MAX_ATTEMPTS} attempts: ${String(lastError)}`,
+      `Prefill extraction failed after ${MAX_ATTEMPTS} attempts (${lastError instanceof Error ? lastError.name : 'UnknownError'})`,
     );
   }
 

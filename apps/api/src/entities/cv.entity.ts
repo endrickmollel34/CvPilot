@@ -42,6 +42,22 @@ export class CvEntity {
   @Column({ name: 'template_id', length: 50, default: DEFAULT_TEMPLATE_ID })
   templateId!: TemplateId;
 
+  // Profile template's optional profile photo — deliberately a sibling
+  // column, never a field inside `content`. Same reasoning as templateId
+  // above, plus one more: autosave writes the WHOLE `content` blob on
+  // every debounced save (see UpdateCvContentDto/CvService.updateContent),
+  // so a photo reference living inside `content` could be silently
+  // clobbered by a stale autosave payload captured before the photo
+  // finished uploading. Keeping it on its own column means a text-only
+  // autosave can never affect photo state, and a photo upload/removal can
+  // never affect CV text. Nullable and additive — every CV row created
+  // before this feature existed simply has no photo (never a required
+  // reservation). Only ever set/cleared by CvPhotoService, after its own
+  // ownership check and R2 upload/removal — never accepted directly from
+  // client-supplied `content`.
+  @Column({ name: 'photo_object_key', length: 512, nullable: true })
+  photoObjectKey?: string;
+
   @Column({ name: 'file_name', length: 255, nullable: true })
   fileName?: string;
 

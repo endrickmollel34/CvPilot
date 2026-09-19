@@ -5,6 +5,7 @@ import type {
   CvWorkEntry,
   CvEducationEntry,
   CvCertificationEntry,
+  CvReferenceEntry,
 } from '../types/cv.types';
 import { MINIMAL_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -13,7 +14,7 @@ import {
   normalizeParagraph,
   shortenUrlLabel,
 } from './format';
-import { DEFAULT_SECTION_ORDER } from './classic-document';
+import { resolveSectionOrder } from './classic-document';
 
 // V1.1 adaptive name-size bounds — mirrors pdf-generation.service.ts's
 // minimalNameFontSize (same base/floor/step) so the browser preview picks
@@ -189,6 +190,43 @@ function CertificationsSection({ certs }: { certs: CvCertificationEntry[] }) {
   );
 }
 
+function ReferencesSection({
+  entries,
+  availableUponRequest,
+}: {
+  entries: CvReferenceEntry[];
+  availableUponRequest?: boolean;
+}) {
+  if (!entries.length && !availableUponRequest) return null;
+  return (
+    <>
+      <SectionHeading title="References" />
+      {availableUponRequest ? (
+        <p className="cvmin-summary">References available upon request.</p>
+      ) : (
+        entries.map((r) => (
+          <div key={r.id} className="cvmin-entry">
+            <div className="cvmin-entry-row">
+              <span className="cvmin-entry-title">{r.fullName}</span>
+            </div>
+            {(r.jobTitle || r.company) && (
+              <div className="cvmin-entry-org">
+                {[r.jobTitle, r.company].filter(Boolean).join(', ')}
+              </div>
+            )}
+            {r.relationship && <div className="cvmin-entry-meta">{r.relationship}</div>}
+            {(r.email || r.phone) && (
+              <div className="cvmin-entry-meta">
+                {[r.email, r.phone].filter(Boolean).join('  ·  ')}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+    </>
+  );
+}
+
 function renderSection(content: CvContent, section: CvSection) {
   switch (section) {
     case 'summary':
@@ -232,6 +270,14 @@ function renderSection(content: CvContent, section: CvSection) {
       );
     case 'certifications':
       return <CertificationsSection key="certs" certs={content.certifications} />;
+    case 'references':
+      return (
+        <ReferencesSection
+          key="references"
+          entries={content.references ?? []}
+          availableUponRequest={content.referencesAvailableUponRequest ?? false}
+        />
+      );
     default:
       return null;
   }
@@ -239,7 +285,7 @@ function renderSection(content: CvContent, section: CvSection) {
 
 export function MinimalCvDocument({ content }: { content: CvContent }) {
   const { personalDetails: pd, sectionOrder } = content;
-  const order = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  const order = resolveSectionOrder(sectionOrder);
   const [nameFontSize, nameRef] = useMinimalNameFontSize(pd.fullName || 'Your Name');
 
   // Contact info arranged as two deliberate groups — factual personal

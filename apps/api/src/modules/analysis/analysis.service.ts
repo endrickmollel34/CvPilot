@@ -15,6 +15,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import type { Observable } from 'rxjs';
 import { fromEvent } from 'rxjs';
 import { filter, map } from 'rxjs/operators';
+import * as Sentry from '@sentry/nestjs';
 
 import { AnalysisEntity } from '../../entities/analysis.entity';
 import { AtsReportEntity } from '../../entities/ats-report.entity';
@@ -208,6 +209,16 @@ export class AnalysisService extends WorkerHost {
       // convention already used for Stripe/R2 errors elsewhere in this app.
       const errorType = err instanceof Error ? err.name : 'UnknownError';
       this.logger.error(`Analysis ${analysisId} failed (${errorType})`);
+      // Monitoring only — never changes retry/status behavior below. See
+      // http-exception.filter.ts's own comment for why err.message is
+      // still safe here even though it isn't logged above: this job
+      // never throws past this catch (BullMQ sees it as completed either
+      // way), and scrubSentryEvent additionally truncates/redacts before
+      // send regardless.
+      Sentry.captureException(err, {
+        tags: { queue: 'cv-analysis' },
+        extra: { analysisId, cvId },
+      });
       await this.analysisRepo.update(analysisId, { status: 'failed' });
     }
   }

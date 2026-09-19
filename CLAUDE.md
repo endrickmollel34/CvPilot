@@ -169,18 +169,37 @@ Set these in `.env.local` (frontend) and `.env` (backend). See `.env.example` in
 
 ## Monitoring
 
-**Not yet implemented.** Deferred until immediately after initial deployment — none of the
-tools below are installed or wired into the codebase today; treat this as a roadmap, not a
-description of current behavior.
-
-- **Sentry** — error tracking (frontend + backend)
-- **Axiom** — structured application logs (NestJS)
-- **PostHog** — user analytics and funnels (IP anonymisation enabled, no PII in events)
-- **BetterUptime** — external uptime monitoring, would point at `GET /api/health`
+- **Sentry** — errors-only (no performance tracing, no Session Replay) error tracking for both
+  apps is **prepared in code but not yet live**: `@sentry/nestjs` (api) and `@sentry/nextjs`
+  (web) are installed and wired in (`apps/api/src/instrument.ts` + `GlobalExceptionFilter` +
+  all four BullMQ job processors; `apps/web/src/instrumentation.ts` +
+  `instrumentation-client.ts` + the two React error boundaries), with a shared `beforeSend`
+  redaction pass in each app (`apps/api/src/common/monitoring/sentry-scrub.util.ts`,
+  `apps/web/src/lib/sentry-scrub.ts`) that strips auth/cookie headers and request bodies and
+  unconditionally REPLACES (not truncates — truncation only limits length, not content) every
+  exception message/value, breadcrumb message/data, and non-allow-listed `extra` field with a
+  safe placeholder before anything is sent, while keeping the error type, tags, allow-listed
+  entity-id `extra`, and parsed (variable-free) stack frames. `SENTRY_DSN`
+  (api)/`NEXT_PUBLIC_SENTRY_DSN` (web) are already the correct env var names, already read by
+  this code, and already reserved (empty) in each `.env.example` — but **no Sentry account or
+  project exists yet**, so nothing has ever actually reached a real Sentry dashboard. Verified
+  only locally: a mocked-transport pipeline test in each app (including synthetic CV text and a
+  fake credential within the first 100 characters of an error, checked against the entire
+  serialized event), and a confirmed clean `next build`/`node dist/main.js` boot with no DSN set.
+  See RABBIT_NOTEBOOK.md §29–§30 for the exact remaining setup (create the account/projects,
+  set the real DSNs in Railway/Vercel, verify one real event reaches the dashboard, configure an
+  alert) before this can be considered live.
+- **Axiom** — structured application logs (NestJS) — not yet implemented.
+- **PostHog** — user analytics and funnels (IP anonymisation enabled, no PII in events) — not
+  yet implemented.
+- **BetterUptime** — external uptime monitoring, would point at `GET /api/health` — not yet
+  implemented.
 
 The Reliability Layer (Production Readiness Phase 1) added `GET /api/health` (checks
 PostgreSQL + Redis connectivity) and a wired-up `GlobalExceptionFilter` that logs every
-unexpected 5xx server-side — this is today's only production error visibility.
+unexpected 5xx server-side. Until Sentry is actually configured with real credentials (see
+above), that server-side log line remains the only production error visibility that's
+actually live.
 
 ## Security Constraints
 
@@ -190,4 +209,17 @@ unexpected 5xx server-side — this is today's only production error visibility.
 - Stripe and Clerk webhook signatures verified on every inbound request
 - No `.env` files in version control; secrets managed via Railway and Vercel environment settings
 - CORS restricted to the production frontend origin
-- Rate limiting: 5 AI requests per user per 10-minute window (Redis token bucket)
+- Global rate limiting: 100 requests/minute per IP (`ThrottlerModule`), all routes
+- AI rate limiting: 5 AI requests per authenticated user per rolling 10-minute
+  window, shared across every paid AI operation (CV analysis, cover letter
+  generation and regeneration, CV tailoring, CV-upload prefill) — not a
+  separate budget per feature. Implemented as a Redis sorted-set sliding-window
+  log (`AiRateLimitGuard`/`AiRateLimitService`, `apps/api/src/common/rate-limit`),
+  atomic via a single Lua script (safe across concurrent requests and multiple
+  API instances), keyed by the Clerk-verified user id from `ClerkGuard` —
+  never a client-suppliable identifier. Runs before the route handler, so a
+  rejected request never enqueues an AI job or reaches a plan-usage check.
+  Exceeding the limit returns `429` with a `Retry-After` header and a plain-text
+  message; if Redis itself is unreachable, these five endpoints return `503`
+  rather than silently admitting unlimited requests. See RABBIT_NOTEBOOK.md for
+  the endpoint-by-endpoint trace and verification.
