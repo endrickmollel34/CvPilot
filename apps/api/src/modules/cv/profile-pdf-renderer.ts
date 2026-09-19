@@ -56,7 +56,14 @@ import type { ImageDimensions } from './utils/image-validation.util';
  */
 
 const CURVE_DEPTH = 16;
-const CAP_PADDING_X = 16;
+// Fix (RABBIT_NOTEBOOK.md, sidebar width/padding rebalance): was 16 —
+// reduced in step with the browser preview's matching .cvpf-cap padding
+// (profile-document.tsx's buildProfileCss) and the sidebar's own narrower
+// width (PROFILE_TEMPLATE.sidebarWidthRatio 0.33 -> 0.3, template-types.ts)
+// — recovers some of that narrowing back for the name/job-title text
+// itself. CAP_PADDING_TOP/CAP_PADDING_BOTTOM (vertical, governing the
+// photo/curve geometry) are untouched.
+const CAP_PADDING_X = 12;
 const CAP_PADDING_TOP = 22;
 const CAP_PADDING_BOTTOM = 20;
 const GAP_AFTER_CAP = 16;
@@ -126,7 +133,7 @@ export function renderProfileTemplate(
   const { personalDetails: pd } = content;
   const candidateName = pd.fullName || 'CV';
 
-  const sidebarRatio = t.sidebarWidthRatio ?? 0.33;
+  const sidebarRatio = t.sidebarWidthRatio ?? 0.3;
   const gap = t.spacing.sectionGap;
   const sidebarW = pageW * sidebarRatio - gap / 2;
   const mainW = pageW - sidebarW - gap;

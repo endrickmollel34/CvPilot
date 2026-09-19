@@ -272,7 +272,7 @@ export function estimateProfileFill(
 ): ProfileFillEstimate {
   const pageW = A4_WIDTH_PT - template.margins.left - template.margins.right;
   const gap = template.spacing.sectionGap;
-  const sidebarRatio = template.sidebarWidthRatio ?? 0.33;
+  const sidebarRatio = template.sidebarWidthRatio ?? 0.3;
   const sidebarW = pageW * sidebarRatio - gap / 2;
   const mainW = pageW - sidebarW - gap;
   const columnH = A4_HEIGHT_PT - template.margins.top - template.margins.bottom;

@@ -713,7 +713,19 @@ export const PROFILE_TEMPLATE: TemplateDefinition = {
     right: 40,
   },
   sidebarSections: ['skills', 'languages'],
-  sidebarWidthRatio: 0.33,
+  // Fix (RABBIT_NOTEBOOK.md, sidebar width/padding rebalance): was 0.33 — at
+  // that ratio the sidebar visually read as ~35% of the page (the page-edge
+  // background bleed and internal padding both exaggerate a colored
+  // column's apparent width beyond its raw ratio), crowding
+  // Employment/Education/References in the main column. 0.3 matches the
+  // ~30%/70% split the sidebar's actual CONTENT (Personal Details, a
+  // handful of skills/languages, optional qualities) needs — this is the
+  // single source of truth both renderers compute sidebar/main width from
+  // (profile-document.tsx's buildProfileCss, profile-pdf-renderer.ts), so
+  // changing it here alone rebalances both. The main column absorbs the
+  // entire recovered width (mainW = pageW - sidebarW - gap in both
+  // renderers) — no text anywhere was shrunk to make room.
+  sidebarWidthRatio: 0.3,
   sidebarBackground: '#F4F5F6',
   supportsPhoto: true,
 };

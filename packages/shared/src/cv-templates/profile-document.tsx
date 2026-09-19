@@ -780,7 +780,7 @@ export function ProfileCvDocument({
  *  doc comment for the PDFKit-side equivalent (a quadratic Bézier curve). */
 export function buildProfileCss(template: TemplateDefinition): string {
   const { typography: t, colors: c, spacing: s } = template;
-  const sidebarPct = Math.round((template.sidebarWidthRatio ?? 0.33) * 100);
+  const sidebarPct = Math.round((template.sidebarWidthRatio ?? 0.3) * 100);
   const capBg = template.colors.headerBackground ?? c.accent;
   const capText = template.colors.headerText ?? '#FFFFFF';
   const capMuted = template.colors.headerMutedText ?? '#FFFFFF';
@@ -973,11 +973,19 @@ export function buildProfileCss(template: TemplateDefinition): string {
   z-index: 0;
   background: ${capBg};
   /* Fix: was 20pt/14pt/22pt, silently mismatched with the PDFKit renderer's
-     CAP_PADDING_TOP/CAP_PADDING_X/CAP_PADDING_BOTTOM (22/16/20) — top and
-     bottom were even swapped. Matching these exactly gives the name text
-     the same available width in both renderers, so it wraps the same way
-     (see profile-pdf-renderer.ts's own constants). */
-  padding: 22pt 16pt 20pt;
+     CAP_PADDING_TOP/CAP_PADDING_X/CAP_PADDING_BOTTOM (22/16/20 at the time).
+     Matching these exactly gives the name text the same available width in
+     both renderers, so it wraps the same way (see profile-pdf-renderer.ts's
+     own constants).
+     Fix (RABBIT_NOTEBOOK.md, sidebar width/padding rebalance): left/right
+     16pt -> 12pt, matching PDFKit's own CAP_PADDING_X reduction — the cap
+     is already narrower now that sidebarWidthRatio dropped to 0.3 (see
+     template-types.ts), so this recovers some of that width back for the
+     name/job-title text itself rather than compounding the narrowing. Top/
+     bottom (22pt/20pt) are untouched — they govern the photo/curve
+     geometry (capFlatHeight, PHOTO_TEXT_CLEARANCE/PHOTO_BOTTOM_GAP), which
+     this rebalance deliberately leaves alone. */
+  padding: 22pt 12pt 20pt;
   text-align: center;
   border-bottom-left-radius: 50% 18pt;
   border-bottom-right-radius: 50% 18pt;
@@ -1070,8 +1078,20 @@ export function buildProfileCss(template: TemplateDefinition): string {
   object-position: 50% 22%;
   display: block;
 }
+/* Fix (RABBIT_NOTEBOOK.md, sidebar width/padding rebalance): left/right
+   16pt -> 12pt (kept symmetric, not lopsided) — the PDF renderer's
+   equivalent sidebar-body content (Personal Details/Skills/Languages/
+   Qualities) never had this much horizontal inset to begin with (it uses
+   the column's near-full width, offset only by the icon+gap where an icon
+   is present — see profile-pdf-renderer.ts's renderPersonalDetails/
+   renderRatedList/renderQualities), so this also brings the browser
+   preview closer to the PDF's own usable text width, on top of the
+   sidebarWidthRatio reduction in template-types.ts. Top/bottom (18pt/20pt)
+   are untouched. ProfileA4Preview.tsx's hidden measurement pass has two
+   inline overrides of this same padding for measurement accuracy — kept
+   in sync there too (see its own comments). */
 .cv-profile-doc .cvpf-sidebar-body {
-  padding: 18pt 16pt 20pt;
+  padding: 18pt 12pt 20pt;
 }
 .cv-profile-doc .cvpf-sidebar-body-with-photo {
   padding-top: ${sidebarBodyPaddingTopWithPhoto}pt;

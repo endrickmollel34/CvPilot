@@ -424,7 +424,7 @@ export function ProfileA4Preview({
     // stays on one line here too, matching the PDF, instead of wrapping.
     //
     // Fix: this used to read `pdEl.clientWidth` — `pdEl` is
-    // `.cvpf-sidebar-body`, which has its own 16pt left/right padding.
+    // `.cvpf-sidebar-body`, which has its own 12pt left/right padding.
     // `clientWidth` INCLUDES an element's own padding (it's the padding-
     // box width, not the content-box width), so subtracting only the icon+
     // gap left the row's own ~43px of horizontal padding still counted as
@@ -541,7 +541,7 @@ export function ProfileA4Preview({
                 <ProfileCap pd={content.personalDetails} photoUrl={photoUrl} />
               </div>
               {pdRows.length > 0 && (
-                <div ref={pdMeasureRef} className="cvpf-sidebar-body" style={{ padding: '0 16pt' }}>
+                <div ref={pdMeasureRef} className="cvpf-sidebar-body" style={{ padding: '0 12pt' }}>
                   <SectionHeading title="Personal Details" />
                   <ul className="cvpf-pd-list" ref={pdListRef}>
                     {pdRows.map((r) => (
@@ -563,7 +563,7 @@ export function ProfileA4Preview({
               <div
                 ref={sidebarListMeasureRef}
                 className="cvpf-sidebar-body"
-                style={{ padding: '0 16pt' }}
+                style={{ padding: '0 12pt' }}
               >
                 {/* Reuses SidebarColumnItems — the exact component the
                   visible page renders below — fed the FULL, unpaginated
