@@ -51,11 +51,22 @@ import { AuditService } from '../src/modules/audit/audit.service';
  * under test), and AnalysisService (unused — no dto.analysisId in these
  * cases).
  *
- * Requires local Postgres reachable at the URL below (`docker compose up -d`
- * from the repo root) with migrations applied (`npm run migration:run`).
+ * Requires a real Postgres reachable via DATABASE_URL (`docker compose up -d`
+ * from the repo root for local dev; CI's own Postgres service container in
+ * .github/workflows/ci.yml for CI) with migrations applied
+ * (`npm run migration:run`).
  */
 
-const DB_URL = 'postgresql://cvpilot:cvpilot@localhost:5432/cvpilot';
+// Previously hardcoded to a local-only connection string
+// ('postgresql://cvpilot:cvpilot@localhost:5432/cvpilot'), silently
+// ignoring DATABASE_URL entirely — worked by coincidence in local dev
+// (this machine's own Postgres really does have a database literally
+// named "cvpilot") but pointed at a nonexistent database in CI (whose
+// service container only ever creates "cvpilot_test", per ci.yml),
+// producing "database \"cvpilot\" does not exist" once this suite got
+// far enough to run at all. Falls back to the old literal only when
+// DATABASE_URL isn't set, preserving that same local-dev convenience.
+const DB_URL = process.env.DATABASE_URL ?? 'postgresql://cvpilot:cvpilot@localhost:5432/cvpilot';
 
 const dummyConfig = {
   getOrThrow: jest.fn((key: string) => {
