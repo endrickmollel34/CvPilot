@@ -32,6 +32,10 @@ import { BillingService } from '../src/modules/billing/billing.service';
 import { AnalysisService } from '../src/modules/analysis/analysis.service';
 import { PrefillExtractionService } from '../src/modules/cv/prefill-extraction.service';
 import { PdfGenerationService } from '../src/modules/cv/pdf-generation.service';
+import { PrefillLockService } from '../src/modules/cv/prefill-lock.service';
+import { CvPhotoService } from '../src/modules/cv/cv-photo.service';
+import { R2StorageService } from '../src/common/services/r2-storage.service';
+import { AuditService } from '../src/modules/audit/audit.service';
 
 /**
  * Real-Postgres regression coverage for the "CV is still being parsed"
@@ -178,6 +182,26 @@ describe('Cover letter generation against real Postgres-backed CV rows (e2e)', (
         { provide: AnalysisService, useValue: { findOneForUser: jest.fn() } },
         { provide: PrefillExtractionService, useValue: {} },
         { provide: PdfGenerationService, useValue: {} },
+        // Added alongside CvService's own §27/§28 constructor changes
+        // (prefill lock heartbeat + builder quota lock) — this e2e spec
+        // manually lists CvService's dependencies rather than importing
+        // CvModule, so it never picked up the two new ones. Neither is
+        // called by the submit()/process() cover-letter flow under test
+        // here (they gate prefill/photo-upload/builder-creation paths
+        // only), so a bare mock is sufficient, matching the same pattern
+        // already used for PrefillExtractionService/PdfGenerationService
+        // above.
+        { provide: PrefillLockService, useValue: {} },
+        { provide: CvPhotoService, useValue: {} },
+        { provide: R2StorageService, useValue: {} },
+        // CoverLetterService's own AuditService dependency predates this
+        // session (git history: "add analysis and tailoring deletion with
+        // durable usage tracking") — this e2e spec was already stale
+        // before this session's changes; only now exposed since the
+        // Build step itself finally succeeds. append-only audit writes
+        // aren't under test here, so a bare mock matches every other
+        // constructor-only dependency above.
+        { provide: AuditService, useValue: { logTransactional: jest.fn() } },
         { provide: CoverLetterAiService, useValue: { generateCoverLetter: jest.fn() } },
       ],
     }).compile();

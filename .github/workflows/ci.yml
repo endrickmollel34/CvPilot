@@ -96,6 +96,32 @@ jobs:
     env:
       DATABASE_URL: postgresql://cvpilot:cvpilot@localhost:5432/cvpilot_test
       REDIS_URL: redis://localhost:6379
+      # Pre-existing gap, only just exposed now that the Build step itself
+      # succeeds (see the commit history around this line) -- AppModule's
+      # real boot (test/app.e2e-spec.ts) needs every getOrThrow()'d config
+      # key to exist, even though this job only ever makes real network
+      # calls to the Postgres/Redis services above and never a real
+      # third-party API. "placeholder" is this codebase's OWN established,
+      # deliberate convention for exactly this scenario -- it's checked
+      # explicitly (`.includes('placeholder')`) in ClerkGuard,
+      # StripeProvider, CvService (CLOUDFLARE_R2_*), ContactService, and
+      # optional-api-key.util.ts, each logging a clear warning and
+      # degrading gracefully rather than crashing. Confirmed by reading
+      # every one of those call sites, not assumed. These values are
+      # never valid credentials for any real provider.
+      CLERK_SECRET_KEY: sk_test_ci_placeholder_not_a_real_key
+      CLERK_WEBHOOK_SECRET: whsec_ci_placeholder_not_a_real_secret
+      OPENAI_API_KEY: sk-ci-placeholder-not-a-real-key
+      RESEND_FROM_EMAIL: ci-placeholder@example.com
+      STRIPE_SECRET_KEY: sk_test_ci_placeholder_not_a_real_key
+      STRIPE_WEBHOOK_SECRET: whsec_ci_placeholder_not_a_real_secret
+      STRIPE_PRICE_PRO_MONTHLY: price_ci_placeholder
+      STRIPE_PRICE_PRO_ANNUAL: price_ci_placeholder
+      STRIPE_PRICE_PRO_MONTHLY_INTRO: price_ci_placeholder
+      CLOUDFLARE_R2_ACCESS_KEY_ID: ci_placeholder_not_a_real_key
+      CLOUDFLARE_R2_SECRET_ACCESS_KEY: ci_placeholder_not_a_real_secret
+      CLOUDFLARE_R2_BUCKET_NAME: ci-placeholder-bucket
+      CLOUDFLARE_R2_ENDPOINT: https://ci-placeholder.r2.cloudflarestorage.com
     steps:
       - uses: actions/checkout@v4
 
@@ -109,6 +135,19 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Separate, pre-existing gap discovered alongside the Clerk/R2
+      # placeholders above: this job's Postgres service starts genuinely
+      # empty (no schema), and nothing ever ran migrations against it --
+      # only exposed once the Build step itself started succeeding.
+      # cover-letter-structured-cv.e2e-spec.ts does real entity inserts
+      # (not just GET /api/health, which needs no schema) and fails with
+      # a confusing "Cannot read properties of undefined" once its own
+      # setup silently can't create rows against nonexistent tables.
+      - name: Run migrations
+        run: npm run migration:run --workspace=apps/api
+        env:
+          DATABASE_URL: postgresql://cvpilot:cvpilot@localhost:5432/cvpilot_test
 
       - name: E2E Tests
         run: npm run test:e2e --workspace=apps/api

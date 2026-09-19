@@ -19,7 +19,8 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "inputs": ["src/**", "test/**"]
+      "inputs": ["src/**", "test/**"],
+      "env": ["REDIS_URL"]
     },
     "test:e2e": {
       "dependsOn": ["^build"],
