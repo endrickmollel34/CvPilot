@@ -8,7 +8,7 @@
     "start": "node dist/main.js",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
     "typecheck": "tsc --noEmit",
-    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
+    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
     "test:watch": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --watch",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "migration:run": "typeorm migration:run -d dist/data-source.js",
