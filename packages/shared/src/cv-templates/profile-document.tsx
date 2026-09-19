@@ -898,6 +898,32 @@ export function buildProfileCss(template: TemplateDefinition): string {
 }
 .cv-profile-doc .cvpf-sidebar {
   position: relative;
+  /* Fix (RABBIT_NOTEBOOK.md, Profile-preview sidebar-content-invisible bug):
+     z-index: 0 turns this into its OWN stacking context, so the z-index: -1
+     on .cvpf-sidebar-first::before below (the page-edge background bleed)
+     resolves LOCALLY, against this element's own children, instead of
+     escaping to whatever ancestor stacking context happens to be nearest.
+     Without this, a positioned box (position: absolute, z-index: auto) —
+     which is exactly what that bleed pseudo-element is — paints ABOVE every
+     ordinary non-positioned sibling regardless of DOM order (CSS painting-
+     order steps: non-positioned in-flow content paints BEFORE positioned
+     descendants with z-index: auto/0). Since the bleed's opaque fill
+     geometrically covers the sidebar's entire content area (top/bottom set
+     to bleed past both page margins), every plain, non-positioned piece of
+     real sidebar content (Personal Details, Skills, Languages — anything
+     that isn't itself separately positioned) was silently painted UNDER it
+     and invisible, even though still genuinely present in the DOM. Only
+     content that happened to ALSO be positioned escaped this: the photo
+     (.cvpf-photo-wrap is position: absolute) and Qualities list items
+     (.cvpf-qualities li is position: relative, for their own bullet-dot
+     marker) — both paint in the same "positioned" bucket as the bleed and
+     so land on top of it by tree order, which is exactly why only those two
+     kept rendering visibly while everything else vanished. Confirmed via
+     direct elementFromPoint hit-testing against a real local production
+     build before this fix (every sidebar text point resolved to the
+     .cvpf-sidebar/.cvpf-cap element itself, not the real text node
+     underneath) and re-verified after. */
+  z-index: 0;
   flex: 0 0 ${sidebarPct}%;
   max-width: ${sidebarPct}%;
   background: ${sidebarBg};
@@ -924,6 +950,11 @@ export function buildProfileCss(template: TemplateDefinition): string {
 .cv-profile-doc .cvpf-sidebar-first::before {
   content: '';
   position: absolute;
+  /* z-index: -1, scoped to .cvpf-sidebar's own stacking context (see its
+     z-index: 0 above) — paints this purely-decorative bleed BEHIND the
+     sidebar's real content instead of in front of it. See the sidebar-
+     content-invisible bug fix above for the full explanation. */
+  z-index: -1;
   top: -${marginTop}pt;
   left: -${marginLeft}pt;
   bottom: -${marginBottom}pt;
@@ -932,6 +963,14 @@ export function buildProfileCss(template: TemplateDefinition): string {
 }
 .cv-profile-doc .cvpf-cap {
   position: relative;
+  /* Fix (RABBIT_NOTEBOOK.md, Profile-preview sidebar-content-invisible bug)
+     — same reasoning as .cvpf-sidebar's z-index: 0 above: scopes
+     .cvpf-cap::before's z-index: -1 to this element's own stacking
+     context, so the cap's page-edge bleed paints behind the name/job-title
+     text instead of in front of it. Without this, that text (plain,
+     non-positioned) was silently painted under the bleed and invisible —
+     only the photo (itself position: absolute) escaped it. */
+  z-index: 0;
   background: ${capBg};
   /* Fix: was 20pt/14pt/22pt, silently mismatched with the PDFKit renderer's
      CAP_PADDING_TOP/CAP_PADDING_X/CAP_PADDING_BOTTOM (22/16/20) — top and
@@ -971,6 +1010,8 @@ export function buildProfileCss(template: TemplateDefinition): string {
 .cv-profile-doc .cvpf-cap::before {
   content: '';
   position: absolute;
+  /* z-index: -1 — see .cvpf-cap's own z-index: 0 above. */
+  z-index: -1;
   top: -${marginTop}pt;
   left: -${marginLeft}pt;
   right: -${s.sectionGap / 2}pt;
