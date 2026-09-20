@@ -12,6 +12,7 @@ import type {
 import { PROFILE_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
   formatDateRange,
+  formatLinkedInLabel,
   normalizeExternalUrl,
   normalizeParagraph,
   shortenUrlLabel,
@@ -330,24 +331,47 @@ function ContactLink({ href, label }: { href: string; label: string }) {
  *  — Personal Details itself is still always kept atomic (one page-
  *  placement unit) by both renderers, so in practice this is rendered as
  *  a whole list, not split — exported for symmetry/future use, not
- *  because it's split today. */
-export function getPersonalDetailsRows(
-  pd: CvContent['personalDetails'],
-): Array<{ key: string; icon: React.ReactNode; text: string; node: React.ReactNode }> {
-  const rows: Array<{ key: string; icon: React.ReactNode; text: string; node: React.ReactNode }> =
-    [];
+ *  because it's split today.
+ *
+ *  `wrap` (RABBIT_NOTEBOOK.md, "Improve LinkedIn address rendering"): true
+ *  only for the LinkedIn row. Every other row stays single-line,
+ *  shrink-to-fit, ellipsis-truncated exactly as before — this is
+ *  deliberately scoped to LinkedIn only. A wrap row's `text` is the FULL,
+ *  untruncated label (`formatLinkedInLabel`, no ellipsis) and its caller
+ *  must (a) skip it when computing shrink-to-fit sizes (it doesn't need
+ *  shrinking — it wraps instead) and (b) render its span without
+ *  `white-space: nowrap`, letting the browser wrap it naturally within the
+ *  row's existing width. Continuation lines land aligned with the first
+ *  line "for free": the icon and the text span are separate flex-row
+ *  items, so the text's own internal line-wrapping stays within its own
+ *  column, left-aligned with itself, regardless of the icon's width. */
+export function getPersonalDetailsRows(pd: CvContent['personalDetails']): Array<{
+  key: string;
+  icon: React.ReactNode;
+  text: string;
+  node: React.ReactNode;
+  wrap?: boolean;
+}> {
+  const rows: Array<{
+    key: string;
+    icon: React.ReactNode;
+    text: string;
+    node: React.ReactNode;
+    wrap?: boolean;
+  }> = [];
   if (pd.email) rows.push({ key: 'email', icon: <IconEnvelope />, text: pd.email, node: pd.email });
   if (pd.phone) rows.push({ key: 'phone', icon: <IconPhone />, text: pd.phone, node: pd.phone });
   if (pd.location) {
     rows.push({ key: 'location', icon: <IconPin />, text: pd.location, node: pd.location });
   }
   if (pd.linkedIn) {
-    const label = shortenUrlLabel(pd.linkedIn, 26);
+    const label = formatLinkedInLabel(pd.linkedIn);
     rows.push({
       key: 'linkedIn',
       icon: <IconLink />,
       text: label,
       node: <ContactLink href={pd.linkedIn} label={label} />,
+      wrap: true,
     });
   }
   if (pd.website) {
@@ -376,6 +400,10 @@ export function getPersonalDetailsRows(
 // anywhere` remains on `.cvpf-pd-list li` in buildProfileCss purely as a
 // last-resort safety net (e.g. before this effect has run on first
 // paint), not as the primary wrapping mechanism.
+// Fix (RABBIT_NOTEBOOK.md, "Improve LinkedIn address rendering"): the
+// LinkedIn row (`r.wrap`) is the one exception — see getPersonalDetailsRows'
+// own doc comment. It's excluded from the shrink-to-fit sizing pass below
+// (it wraps instead of shrinking) and rendered without `white-space: nowrap`.
 function PersonalDetailsBlock({
   pd,
   bodySize,
@@ -395,7 +423,7 @@ function PersonalDetailsBlock({
     const availableWidthPx = el.clientWidth - iconAndGapPx;
     setSizes(
       computeContactRowFontSizes(
-        rows.map((r) => ({ key: r.key, text: r.text })),
+        rows.filter((r) => !r.wrap).map((r) => ({ key: r.key, text: r.text })),
         availableWidthPx,
         baseSize,
       ),
@@ -417,7 +445,7 @@ function PersonalDetailsBlock({
             <span
               style={{
                 fontSize: sizes.has(r.key) ? `${sizes.get(r.key)}pt` : undefined,
-                whiteSpace: 'nowrap',
+                whiteSpace: r.wrap ? 'normal' : 'nowrap',
               }}
             >
               {r.node}

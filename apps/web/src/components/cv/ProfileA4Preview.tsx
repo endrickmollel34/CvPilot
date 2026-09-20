@@ -444,7 +444,11 @@ export function ProfileA4Preview({
       const availableWidthPx = pdListEl.clientWidth - iconAndGapPx;
       setPdSizes(
         computeContactRowFontSizes(
-          pdRows.map((r) => ({ key: r.key, text: r.text })),
+          // Fix (RABBIT_NOTEBOOK.md, "Improve LinkedIn address rendering"):
+          // the LinkedIn row (`wrap: true`, see getPersonalDetailsRows) is
+          // excluded here — it wraps across lines instead of shrinking, so
+          // it never needs (and must not get) a shrink-to-fit size.
+          pdRows.filter((r) => !r.wrap).map((r) => ({ key: r.key, text: r.text })),
           availableWidthPx,
           template.typography.bodySize - 0.6,
         ),
@@ -554,7 +558,12 @@ export function ProfileA4Preview({
                         <span
                           style={{
                             fontSize: pdSizes.has(r.key) ? `${pdSizes.get(r.key)}pt` : undefined,
-                            whiteSpace: 'nowrap',
+                            // Fix (RABBIT_NOTEBOOK.md, "Improve LinkedIn
+                            // address rendering"): the LinkedIn row wraps
+                            // instead of staying single-line — kept in sync
+                            // with the visible page's own identical block
+                            // below (measurement-pass parity, §23/§24/§38/§39).
+                            whiteSpace: r.wrap ? 'normal' : 'nowrap',
                           }}
                         >
                           {r.node}
@@ -665,7 +674,13 @@ export function ProfileA4Preview({
                                         fontSize: pdSizes.has(r.key)
                                           ? `${pdSizes.get(r.key)}pt`
                                           : undefined,
-                                        whiteSpace: 'nowrap',
+                                        // Fix (RABBIT_NOTEBOOK.md, "Improve
+                                        // LinkedIn address rendering"): the
+                                        // LinkedIn row wraps instead of
+                                        // staying single-line — see
+                                        // getPersonalDetailsRows' own doc
+                                        // comment (packages/shared).
+                                        whiteSpace: r.wrap ? 'normal' : 'nowrap',
                                       }}
                                     >
                                       {r.node}

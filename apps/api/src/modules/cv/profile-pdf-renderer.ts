@@ -12,6 +12,7 @@ import {
   applyProfileDensity,
   estimateProfileDensity,
   formatDateRange,
+  formatLinkedInLabel,
   normalizeExternalUrl,
   normalizeParagraph,
   resolveSectionOrder,
@@ -595,15 +596,26 @@ function renderPersonalDetails(
   const textWidth = width - iconSize - 7;
   const baseSize = t.typography.bodySize - 0.6;
 
-  const rows: Array<{ icon: IconType; text: string; url?: string }> = [];
+  // Fix (RABBIT_NOTEBOOK.md, "Improve LinkedIn address rendering"): `wrap`
+  // is true only for the LinkedIn row — every other row keeps the existing
+  // single-line, shrink-to-fit, ellipsis-truncated behavior unchanged. A
+  // wrap row's `text` is the full, untruncated label (`formatLinkedInLabel`
+  // — no ellipsis) and is measured/drawn WITHOUT `lineBreak: false`, so
+  // PDFKit wraps it naturally within `textWidth` instead of shrinking or
+  // clipping it; continuation lines land aligned with the first line for
+  // free (both stay within the same `textX`/`textWidth` column). `url`
+  // still comes from the untruncated raw value via normalizeExternalUrl —
+  // unaffected by the display label, so the link target is unaffected too.
+  const rows: Array<{ icon: IconType; text: string; url?: string; wrap?: boolean }> = [];
   if (pd.email) rows.push({ icon: 'email', text: pd.email });
   if (pd.phone) rows.push({ icon: 'phone', text: pd.phone });
   if (pd.location) rows.push({ icon: 'location', text: pd.location });
   if (pd.linkedIn) {
     rows.push({
       icon: 'link',
-      text: shortenUrlLabel(pd.linkedIn, 26),
+      text: formatLinkedInLabel(pd.linkedIn),
       url: normalizeExternalUrl(pd.linkedIn),
+      wrap: true,
     });
   }
   if (pd.website) {
@@ -620,8 +632,14 @@ function renderPersonalDetails(
   profileHeading(doc, 'Personal Details', x, width, t);
 
   rows.forEach((row, i) => {
-    const size = contactTextFontSize(doc, row.text, textWidth, baseSize);
-    const h = doc.heightOfString(row.text, { width: textWidth, lineBreak: false });
+    const size = row.wrap ? baseSize : contactTextFontSize(doc, row.text, textWidth, baseSize);
+    // Fix: wrapped rows measure/draw WITH wrapping (no `lineBreak: false`)
+    // so `h`/the drawn text both reflect the real, possibly multi-line
+    // height BEFORE `ensureSpace` reserves room for it — accounting for
+    // wrapped text height in pagination, not just in the drawn output.
+    const h = row.wrap
+      ? doc.heightOfString(row.text, { width: textWidth })
+      : doc.heightOfString(row.text, { width: textWidth, lineBreak: false });
     ensureSpace(h + 8);
     const rowY = doc.y;
     drawIcon(doc, row.icon, x, rowY + 0.5, iconSize, t.colors.accent);
@@ -629,9 +647,18 @@ function renderPersonalDetails(
       .font('Body')
       .fontSize(size)
       .fillColor(t.colors.text)
-      .text(row.text, textX, rowY, { width: textWidth, lineBreak: false });
+      .text(
+        row.text,
+        textX,
+        rowY,
+        row.wrap ? { width: textWidth } : { width: textWidth, lineBreak: false },
+      );
     if (row.url) {
-      doc.link(textX, rowY, doc.widthOfString(row.text), h, row.url);
+      // Wrapped rows: the clickable region covers the row's full
+      // (multi-line) bounding box rather than just doc.widthOfString of a
+      // single line, which would only cover part of a wrapped label.
+      const linkWidth = row.wrap ? textWidth : doc.widthOfString(row.text);
+      doc.link(textX, rowY, linkWidth, h, row.url);
     }
     doc.y = Math.max(doc.y, rowY + iconSize) + (i < rows.length - 1 ? 6 : 0);
   });

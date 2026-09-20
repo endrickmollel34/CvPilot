@@ -2196,4 +2196,115 @@ describe('PdfGenerationService — Profile template', () => {
     const skillOccurrences = text.split('PostgreSQL').length - 1;
     expect(skillOccurrences).toBe(1);
   });
+
+  // ─── "Improve LinkedIn address rendering" (RABBIT_NOTEBOOK.md) ──────────
+  // Was: shortenUrlLabel(pd.linkedIn, 26), ellipsis-truncated, shrink-to-fit,
+  // forced single line. Now: formatLinkedInLabel (no truncation), wraps
+  // across lines instead of shrinking, tracking query params/hash stripped
+  // from the DISPLAYED label only — the hyperlink target is always built
+  // from the untruncated raw value via normalizeExternalUrl, unaffected.
+
+  it('displays a clean, untruncated LinkedIn label (scheme/www/tracking params stripped) while the hyperlink still points at the complete original URL', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      personalDetails: {
+        ...FULL_FIXTURE.personalDetails,
+        linkedIn: 'https://www.linkedin.com/in/alex-johnson/?trk=public_profile_browsemap&x=1',
+      },
+    };
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    // normalizeWhitespace: even this short handle can legitimately wrap
+    // within the narrow sidebar column (same wrap-reconstruction convention
+    // this file already uses elsewhere) — the assertion below is about
+    // content survival, not about whether it happens to wrap.
+    const text = normalizeWhitespace(await extractText(pdf));
+    const raw = pdf.toString('latin1');
+
+    // Visible label: clean, no scheme/www/tracking params, not truncated.
+    // (FULL_FIXTURE's own `website` field is unrelated and still legitimately
+    // ellipsis-truncated by shortenUrlLabel — out of scope for this fix —
+    // so this checks the LinkedIn label specifically, not "no ellipsis
+    // anywhere on the page".)
+    expect(text).toContain('linkedin.com/in/alex-johnson');
+    expect(text).not.toContain('https://linkedin.com/in/alex-johnson');
+    expect(text).not.toContain('www.linkedin.com');
+    expect(text).not.toContain('trk=');
+    expect(text).not.toContain('linkedin.com/in/alex-johnson…');
+
+    // Hyperlink target: the COMPLETE original URL, tracking params and all
+    // — normalizeExternalUrl/the href is untouched by the display fix.
+    expect(raw).toContain('/Subtype /Link');
+    expect(raw).toContain(
+      '/URI (https://www.linkedin.com/in/alex-johnson/?trk=public_profile_browsemap&x=1)',
+    );
+  });
+
+  it('wraps a long LinkedIn handle across multiple lines with every character preserved, instead of truncating it', async () => {
+    const longHandle = 'alexander-maximilian-christopherson-wordsworth-example-handle';
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      personalDetails: {
+        ...FULL_FIXTURE.personalDetails,
+        linkedIn: `https://www.linkedin.com/in/${longHandle}`,
+      },
+    };
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const text = normalizeWhitespace(await extractText(pdf));
+
+    // The full handle survives intact (pdf-parse inserts a real newline at
+    // whatever point PDFKit wrapped it — normalizeWhitespace reconstructs
+    // it, same convention as this file's other long-text wrap assertions).
+    expect(text).toContain(`linkedin.com/in/${longHandle}`);
+    // Not truncated at the old 26-char ellipsis point (this handle is well
+    // past that) — checked specifically against this handle, not the whole
+    // page, since FULL_FIXTURE's unrelated `website` field is still
+    // legitimately truncated with its own ellipsis (shortenUrlLabel,
+    // out of scope for this fix).
+    expect(text).not.toContain(`${longHandle.slice(0, 25)}…`);
+  });
+
+  it("accounts for the wrapped LinkedIn row's real height in sidebar pagination — no overlap or duplication on a genuinely long CV", async () => {
+    const longHandle =
+      'alexander-maximilian-christopherson-wordsworth-fitzgerald-longer-example-handle-for-testing';
+    const manySkills = Array.from({ length: 40 }, (_, i) => ({
+      id: `sk-${i}`,
+      name: `Skill Number ${i} With A Reasonably Long Name`,
+    }));
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      personalDetails: {
+        ...FULL_FIXTURE.personalDetails,
+        linkedIn: `https://www.linkedin.com/in/${longHandle}`,
+      },
+      skills: manySkills,
+    };
+
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const parser = new PDFParse({ data: pdf });
+    let pageCount: number;
+    let text: string;
+    try {
+      const result = await parser.getText();
+      pageCount = result.pages.length;
+      text = result.text;
+    } finally {
+      await parser.destroy();
+    }
+
+    expect(pageCount).toBeGreaterThan(1);
+    const normalizedText = normalizeWhitespace(text);
+    // The wrapped LinkedIn handle itself must appear exactly once — if its
+    // reserved height were wrong, a page-break could land mid-row and
+    // either duplicate or drop part of it.
+    const linkedInOccurrences = normalizedText.split(`linkedin.com/in/${longHandle}`).length - 1;
+    expect(linkedInOccurrences).toBe(1);
+    // Every skill after it must also survive exactly once — confirms the
+    // LinkedIn row's variable height didn't throw off where Skills starts.
+    for (let i = 0; i < manySkills.length; i++) {
+      const occurrences =
+        normalizedText.split(`Skill Number ${i} With A Reasonably Long Name`).length - 1;
+      expect(occurrences).toBe(1);
+    }
+    expect(normalizedText).toContain('Acme Technologies GmbH');
+  });
 });

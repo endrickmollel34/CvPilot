@@ -65,6 +65,38 @@ export function shortenUrlLabel(raw: string, maxLen = 34): string {
 }
 
 /**
+ * Full (never-truncated) display label for a LinkedIn profile URL —
+ * strips the scheme, a leading "www.", any query string (tracking
+ * parameters like "?trk=..." or "?utm_source=...") and hash fragment, and
+ * a trailing slash: "https://www.linkedin.com/in/alex-johnson/?trk=public"
+ * becomes "linkedin.com/in/alex-johnson". Unlike `shortenUrlLabel`, this
+ * never truncates with an ellipsis — the caller is expected to let this
+ * wrap across multiple lines instead of shrinking or clipping it
+ * (RABBIT_NOTEBOOK.md: "Improve LinkedIn address rendering"). Every
+ * meaningful profile-path character (the "/in/handle" segment and
+ * anything else before the query string) is preserved.
+ *
+ * Display-only, same convention as `shortenUrlLabel`: the underlying
+ * hyperlink (built from the untruncated RAW value via
+ * `normalizeExternalUrl`, unchanged by this function) still points at the
+ * complete original URL, tracking parameters included — this only affects
+ * what's shown on the page/PDF, never the actual link destination or the
+ * stored CV data.
+ */
+export function formatLinkedInLabel(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  let label = trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^www\./i, '');
+  // Strip tracking query parameters and any hash fragment first — neither
+  // is part of the profile's own path, and stripping them AFTER a trailing
+  // slash removal (like shortenUrlLabel does) would leave a stray slash
+  // right before the "?"/"#" in some inputs.
+  label = label.split(/[?#]/)[0] ?? label;
+  label = label.replace(/\/$/, '');
+  return label;
+}
+
+/**
  * Inserts an invisible break opportunity (U+200B, zero-width space) so an
  * email/URL with no spaces at all — which otherwise gives the browser's
  * CSS wrapping no legal break point, and it falls back to an arbitrary
