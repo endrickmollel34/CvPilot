@@ -541,7 +541,11 @@ export function ProfileA4Preview({
                 <ProfileCap pd={content.personalDetails} photoUrl={photoUrl} />
               </div>
               {pdRows.length > 0 && (
-                <div ref={pdMeasureRef} className="cvpf-sidebar-body" style={{ padding: '0 12pt' }}>
+                <div
+                  ref={pdMeasureRef}
+                  className="cvpf-sidebar-body"
+                  style={{ padding: '0 12pt 0 0' }}
+                >
                   <SectionHeading title="Personal Details" />
                   <ul className="cvpf-pd-list" ref={pdListRef}>
                     {pdRows.map((r) => (
@@ -563,7 +567,7 @@ export function ProfileA4Preview({
               <div
                 ref={sidebarListMeasureRef}
                 className="cvpf-sidebar-body"
-                style={{ padding: '0 12pt' }}
+                style={{ padding: '0 12pt 0 0' }}
               >
                 {/* Reuses SidebarColumnItems — the exact component the
                   visible page renders below — fed the FULL, unpaginated

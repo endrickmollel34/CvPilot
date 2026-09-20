@@ -826,7 +826,23 @@ export function buildProfileCss(template: TemplateDefinition): string {
   // an independently-rounded approximation of it.
   const pageContentWidthPt = A4_WIDTH_PT - marginLeft - marginRight;
   const sidebarColumnWidthPt = (pageContentWidthPt * sidebarPct) / 100;
-  const sidebarBleedWidthPt = marginLeft + sidebarColumnWidthPt + s.sectionGap / 2;
+  // Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): mirrors
+  // profile-pdf-renderer.ts's own SIDEBAR_INSET exactly — Personal
+  // Details/Skills/Languages/Qualities previously started at the page's
+  // own `marginLeft` (40pt, the SAME margin the plain white main column
+  // uses), which read as an excessive gap given the sidebar's own colored
+  // background already bleeds to the true left edge (x=0). This gives the
+  // sidebar's own content a smaller, purely cosmetic inset (target ~20-24pt)
+  // independent of `marginLeft`, which stays the real page margin for
+  // everything else. Applied via `.cvpf-sidebar`'s own `margin-left` below
+  // — its WIDTH (`sidebarColumnWidthPt`/`sidebarPct`) is UNCHANGED, so this
+  // only moves where that same-width column starts; the sidebar's visual
+  // footprint (sidebarBleedWidthPt) shrinks by the same amount the content
+  // moved left by, and .cvpf-main (flex: 1 1 auto) automatically absorbs
+  // that recovered width — never by shrinking sidebar text.
+  const SIDEBAR_INSET = 22;
+  const sidebarLeftShift = marginLeft - SIDEBAR_INSET;
+  const sidebarBleedWidthPt = SIDEBAR_INSET + sidebarColumnWidthPt + s.sectionGap / 2;
   return `
 .cv-profile-doc {
   position: relative;
@@ -927,6 +943,13 @@ export function buildProfileCss(template: TemplateDefinition): string {
   flex: 0 0 ${sidebarPct}%;
   max-width: ${sidebarPct}%;
   background: ${sidebarBg};
+  /* Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): shifts the
+     WHOLE sidebar box (background + cap + sidebar-body, as one flex item)
+     left by (marginLeft - SIDEBAR_INSET) — see sidebarLeftShift's own doc
+     comment above. .cvpf-main (flex: 1 1 auto) automatically absorbs the
+     recovered width; .cvpf-sidebar's own WIDTH (flex-basis, above) is
+     untouched, so the usable text width inside is preserved, not shrunk. */
+  margin-left: -${sidebarLeftShift}pt;
 }
 /* Fix (RABBIT_NOTEBOOK.md §25): PDFKit's own sidebar rect
    (doc.rect(0, 0, sidebarBleedRight, doc.page.height)) is filled BEFORE
@@ -956,7 +979,14 @@ export function buildProfileCss(template: TemplateDefinition): string {
      content-invisible bug fix above for the full explanation. */
   z-index: -1;
   top: -${marginTop}pt;
-  left: -${marginLeft}pt;
+  /* Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): was
+     -marginLeft, which assumed .cvpf-sidebar's own padding box started
+     exactly at marginLeft from the true page edge. Now that .cvpf-sidebar
+     carries its own margin-left: -sidebarLeftShift (above), its padding
+     box already starts at SIDEBAR_INSET instead — so this offset must be
+     -SIDEBAR_INSET to still land the bleed's own left edge at the true
+     x=0 (SIDEBAR_INSET + (-SIDEBAR_INSET) = 0), not past it. */
+  left: -${SIDEBAR_INSET}pt;
   bottom: -${marginBottom}pt;
   width: ${sidebarBleedWidthPt}pt;
   background: ${sidebarBg};
@@ -1021,7 +1051,12 @@ export function buildProfileCss(template: TemplateDefinition): string {
   /* z-index: -1 — see .cvpf-cap's own z-index: 0 above. */
   z-index: -1;
   top: -${marginTop}pt;
-  left: -${marginLeft}pt;
+  /* Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): was
+     -marginLeft — same reasoning as .cvpf-sidebar-first::before's own
+     left offset above: .cvpf-cap's padding box now starts at SIDEBAR_INSET
+     (it's a plain child of the now-shifted .cvpf-sidebar), so this must be
+     -SIDEBAR_INSET to still land at the true page edge (x=0). */
+  left: -${SIDEBAR_INSET}pt;
   right: -${s.sectionGap / 2}pt;
   bottom: 0;
   background: ${capBg};
@@ -1079,19 +1114,30 @@ export function buildProfileCss(template: TemplateDefinition): string {
   display: block;
 }
 /* Fix (RABBIT_NOTEBOOK.md, sidebar width/padding rebalance): left/right
-   16pt -> 12pt (kept symmetric, not lopsided) — the PDF renderer's
+   16pt -> 12pt (kept symmetric at the time) — the PDF renderer's
    equivalent sidebar-body content (Personal Details/Skills/Languages/
    Qualities) never had this much horizontal inset to begin with (it uses
    the column's near-full width, offset only by the icon+gap where an icon
    is present — see profile-pdf-renderer.ts's renderPersonalDetails/
-   renderRatedList/renderQualities), so this also brings the browser
+   renderRatedList/renderQualities), so this also brought the browser
    preview closer to the PDF's own usable text width, on top of the
-   sidebarWidthRatio reduction in template-types.ts. Top/bottom (18pt/20pt)
-   are untouched. ProfileA4Preview.tsx's hidden measurement pass has two
-   inline overrides of this same padding for measurement accuracy — kept
-   in sync there too (see its own comments). */
+   sidebarWidthRatio reduction in template-types.ts.
+   Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): left further
+   reduced 12pt -> 0pt. .cvpf-sidebar itself now carries its own
+   margin-left shift (SIDEBAR_INSET, see .cvpf-sidebar above) that already
+   positions the WHOLE sidebar box at the correct ~20-24pt effective inset
+   from the true page edge — this element's own left padding, stacked on
+   top of that, would have pushed content past the target again. 0 here
+   means content starts flush at the (already correctly positioned) box
+   edge, matching the PDF's own sidebarX exactly. Right (12pt) is
+   deliberately kept — "reasonable padding near the column boundary"
+   (RABBIT_NOTEBOOK.md) — so text doesn't crowd the gap before the main
+   column. Top/bottom (18pt/20pt) are untouched. ProfileA4Preview.tsx's
+   hidden measurement pass has two inline overrides of this same padding
+   for measurement accuracy — kept in sync there too (see its own
+   comments). */
 .cv-profile-doc .cvpf-sidebar-body {
-  padding: 18pt 12pt 20pt;
+  padding: 18pt 12pt 20pt 0pt;
 }
 .cv-profile-doc .cvpf-sidebar-body-with-photo {
   padding-top: ${sidebarBodyPaddingTopWithPhoto}pt;

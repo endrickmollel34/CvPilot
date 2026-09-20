@@ -135,10 +135,27 @@ export function renderProfileTemplate(
 
   const sidebarRatio = t.sidebarWidthRatio ?? 0.3;
   const gap = t.spacing.sectionGap;
+  // Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): Personal
+  // Details/Skills/Languages/Qualities previously started at `sidebarX =
+  // lm` (the page's own 40pt margin — the SAME margin the plain white main
+  // column uses), which read as an excessive gap given the sidebar's own
+  // colored background already visually anchors the page's left edge (it
+  // bleeds all the way to the true x=0 — see the rect().fill() below).
+  // SIDEBAR_INSET gives the sidebar's own content a smaller, purely
+  // cosmetic left inset (target ~20-24pt) independent of `lm`, which
+  // remains the real page margin for everything else (the main column's
+  // own edges, the continuation header, top/bottom/right margins).
+  // `sidebarW` (the actual usable TEXT width) is UNCHANGED — this only
+  // moves where that same-width column starts, it does not additionally
+  // narrow it — so `sidebarX` moving left by (lm - SIDEBAR_INSET) shrinks
+  // the sidebar's own visual footprint (sidebarBleedRight) by that exact
+  // amount, and `mainW` grows by the same amount: recovered width goes
+  // entirely to the main column, never by shrinking sidebar text.
+  const SIDEBAR_INSET = 22;
   const sidebarW = pageW * sidebarRatio - gap / 2;
-  const mainW = pageW - sidebarW - gap;
-  const sidebarX = lm;
-  const mainX = lm + sidebarW + gap;
+  const mainW = pageW - sidebarW - gap + (lm - SIDEBAR_INSET);
+  const sidebarX = SIDEBAR_INSET;
+  const mainX = SIDEBAR_INSET + sidebarW + gap;
   const sidebarBleedRight = mainX - gap / 2;
 
   // Pale sidebar background, full page-1 height — bleeds to the physical
