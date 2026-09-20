@@ -1,6 +1,6 @@
 import * as zlib from 'zlib';
 import { PDFParse } from 'pdf-parse';
-import type { CvContent } from '@cvpilot/shared';
+import type { CvContent, CvReferenceEntry } from '@cvpilot/shared';
 import { PdfGenerationService } from './pdf-generation.service';
 
 /**
@@ -2307,4 +2307,140 @@ describe('PdfGenerationService — Profile template', () => {
     }
     expect(normalizedText).toContain('Acme Technologies GmbH');
   });
+
+  // ─── References/continuation pagination (RABBIT_NOTEBOOK.md) ────────────
+  // Reproduces Alex_Johnson (21).pdf: a genuinely long Employment section
+  // (repeated bullet text — intentional test input, preserved verbatim, not
+  // a content bug) forces a second page; a short two-entry References
+  // section previously split across it, heading left on page 1, the second
+  // entry stranded alone at the page's own left margin on page 2 with no
+  // heading and no sidebar tint.
+
+  const REPEATED_BULLET = 'Collaborated with a team of 5 engineers using Agile methodology';
+  const REPRO_REFERENCES: CvReferenceEntry[] = [
+    {
+      id: 'ref-1',
+      fullName: 'Endrick Mollel',
+      jobTitle: 'Manager',
+      company: 'Johnson Johnson',
+      email: 'endrickmollel34@gmail.com',
+      phone: '0465739452',
+    },
+    {
+      id: 'ref-2',
+      fullName: 'Baraka Tukay',
+      jobTitle: 'Backend Engineer',
+      company: 'Taesa',
+      relationship: 'Manager',
+      email: 'loinbaraka5@gmail.com',
+      phone: '0752213973',
+    },
+  ];
+
+  async function pageTexts(pdf: Buffer): Promise<string[]> {
+    const parser = new PDFParse({ data: pdf });
+    try {
+      const result = await parser.getText();
+      return result.pages.map((p) => p.text);
+    } finally {
+      await parser.destroy();
+    }
+  }
+
+  it('reproduces Alex_Johnson (21).pdf and keeps the short References heading together with both entries on one page, instead of splitting the second entry off alone', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      workExperience: [
+        {
+          id: 'we-repro-1',
+          company: 'Tech Startup Ltd',
+          title: 'Software Engineering Intern',
+          location: 'London, UK',
+          startDate: '2024-06',
+          endDate: '2024-09',
+          current: false,
+          // Repeated intentionally, exactly as in the reported reproduction
+          // PDF, to force a second page — preserved verbatim, not
+          // deduplicated or treated as a content bug.
+          bullets: Array.from({ length: 16 }, () => REPEATED_BULLET),
+        },
+        {
+          id: 'we-repro-2',
+          company: 'Technova Solutions',
+          title: 'Backend Software Engineer',
+          location: 'Geneva',
+          startDate: '2029-03',
+          endDate: '2029-09',
+          current: false,
+          bullets: Array.from({ length: 16 }, () => REPEATED_BULLET),
+        },
+      ],
+      references: REPRO_REFERENCES,
+      referencesAvailableUponRequest: false,
+      sectionOrder: [...FULL_FIXTURE.sectionOrder, 'references'],
+    };
+
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const pages = await pageTexts(pdf);
+    expect(pages.length).toBeGreaterThan(1);
+
+    const headingPage = pages.findIndex((p) => p.includes('References'));
+    const entry1Page = pages.findIndex((p) => p.includes('Endrick Mollel'));
+    const entry2Page = pages.findIndex((p) => p.includes('Baraka Tukay'));
+    expect(headingPage).toBeGreaterThanOrEqual(0);
+    expect(entry1Page).toBe(headingPage);
+    expect(entry2Page).toBe(headingPage);
+    // Repeated bullet text survives verbatim, every occurrence — the
+    // intentional test input this fix must not alter.
+    const fullText = normalizeWhitespace(pages.join(' '));
+    const bulletOccurrences = fullText.split(REPEATED_BULLET).length - 1;
+    expect(bulletOccurrences).toBe(32);
+  });
+
+  it('splits a References list too long for one page safely between entries, with "References — continued" on the page it resumes on, each entry exactly once', async () => {
+    const manyRefs: CvReferenceEntry[] = Array.from({ length: 30 }, (_, i) => ({
+      id: `ref-${i}`,
+      fullName: `Reference Person ${i}`,
+      jobTitle: 'Manager',
+      company: `Company ${i}`,
+      email: `reference${i}@example.com`,
+      phone: '0123456789',
+    }));
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      references: manyRefs,
+      referencesAvailableUponRequest: false,
+      sectionOrder: [...FULL_FIXTURE.sectionOrder, 'references'],
+    };
+
+    const pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    const pages = await pageTexts(pdf);
+    expect(pages.length).toBeGreaterThan(1);
+
+    const fullText = pages.join(' ');
+    expect(fullText).toContain('References — continued');
+    for (let i = 0; i < manyRefs.length; i++) {
+      // Negative lookahead for a trailing digit — a plain substring count
+      // would wrongly count "Reference Person 1" as also occurring inside
+      // "Reference Person 10".."19" (and similarly for every other
+      // single-digit i), since it's a literal prefix of those names.
+      const occurrences = (fullText.match(new RegExp(`Reference Person ${i}(?!\\d)`, 'g')) ?? [])
+        .length;
+      expect(occurrences).toBe(1);
+    }
+  });
+
+  // Continuation-page main-column x-alignment (the "abruptly switches to
+  // the far-left margin" bug) is NOT covered by an automated Jest test
+  // here: it needs pdfjs-dist's per-glyph coordinate API
+  // (`page.getTextContent()`'s `item.transform`), and dynamic-importing
+  // its ESM build reliably fails under ts-jest's module resolution
+  // (`Cannot find module ... pdf.mjs`, even given an absolute, verified-
+  // to-exist path) — the same friction already hit and worked around with
+  // a standalone Node script, not a Jest test, in the "Improve LinkedIn
+  // address rendering" task (RABBIT_NOTEBOOK.md §41). Verified manually
+  // instead, the same way: a standalone Node script using the identical
+  // pdfjs-dist API against a real generated PDF, confirming page 1's
+  // "Employment" heading and page 2's "References" heading land at the
+  // same x — see the notebook for the recorded result.
 });

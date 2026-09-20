@@ -191,7 +191,13 @@ export function renderProfileTemplate(
   // ── Sidebar pass — its own local cursor, may span multiple pages ──────
   doc.y = contentTop0;
   let sidebarPageIndex = 0;
-  const sidebarEnsureSpace = (needed: number): void => {
+  // Fix (RABBIT_NOTEBOOK.md, References/continuation pagination):
+  // `ensureSpace` now returns whether IT caused a page break, so callers
+  // that need to react to a fresh page (the References "— continued"
+  // marker below) can tell without any separate page-index bookkeeping of
+  // their own. Every existing caller that doesn't need this simply ignores
+  // the return value — a non-breaking widening of the callback shape.
+  const sidebarEnsureSpace = (needed: number): boolean => {
     const spaceLeft = doc.page.height - t.margins.bottom - doc.y;
     const pageContentHeight = doc.page.height - t.margins.top - t.margins.bottom;
     if (needed > spaceLeft && needed <= pageContentHeight) {
@@ -207,9 +213,38 @@ export function renderProfileTemplate(
       if (top === undefined) {
         top = drawContinuationHeader(doc, candidateName, lm, pageW, t);
         pageContentTop.set(nextIndex, top);
+        // Fix (RABBIT_NOTEBOOK.md, References/continuation pagination):
+        // PDFKit previously never painted the sidebar's pale tint on any
+        // continuation page — only page 1's rect(0,0,...) at the very top
+        // of this function ever painted it, so a page the sidebar itself
+        // overflowed onto rendered with a plain white left column,
+        // silently dropping the template's own visual identity there.
+        // This is reached ONLY when the SIDEBAR pass itself is the one
+        // creating this page (sidebar content genuinely continues here),
+        // so it never tints a page that turns out to have no sidebar
+        // content — matching profile-document.tsx's own
+        // `sidebarStillActive`-gated continuation tint exactly (see its
+        // buildProfileCss doc comment: "ordinary margin-inset background,
+        // not bled" — this rect starts at `sidebarX`, not bled to the
+        // true x=0 the way page 1's rect is, and stops at
+        // `sidebarBleedRight` on the right, same as page 1's own content
+        // area). Painted BEFORE anything else touches this page, so it
+        // sits behind the continuation header/sidebar text drawn after it.
+        doc
+          .rect(
+            sidebarX,
+            top,
+            sidebarBleedRight - sidebarX,
+            doc.page.height - t.margins.bottom - top,
+          )
+          .fillColor(t.sidebarBackground ?? '#F4F5F6')
+          .fill();
+        doc.fillColor(t.colors.text);
       }
       doc.y = top;
+      return true;
     }
+    return false;
   };
 
   renderPersonalDetails(doc, pd, sidebarX, sidebarW, t, sidebarEnsureSpace);
@@ -223,14 +258,25 @@ export function renderProfileTemplate(
   // margin on page 0 (mainContentTop0 — NOT contentTop0, which is below
   // the sidebar's cap; the main column has no cap of its own). Shares any
   // continuation page the sidebar already created (same mainX/mainW while
-  // doing so); once past the sidebar's last page it widens to the full
-  // page width, same convention as Modern/
-  // Professional's own main-column collapse. ─────────────────────────────
+  // doing so).
+  // Fix (RABBIT_NOTEBOOK.md, References/continuation pagination): this
+  // used to widen `column` to the full page width once
+  // `mainPageIndex > sidebarMaxPageIndex` (sidebar finished, so "nothing
+  // left to share the row with") — but that made main content visibly
+  // jump from the aligned two-column position on page 1 to the page's own
+  // left margin on a later page, exactly the reported "abruptly switches
+  // to the far-left margin" bug. `column` now stays at mainX/mainW on
+  // EVERY page, matching profile-document.tsx's own preview (its
+  // `.cvpf-main` keeps the same flex-basis regardless of whether the
+  // sidebar column is present on that page — see its own render logic) —
+  // continuation-page main content always stays aligned with page 1's
+  // main column, even on a page where the sidebar has nothing left to
+  // show. ─────────────────────────────────────────────────────────
   doc.switchToPage(0);
   doc.y = mainContentTop0;
   const column: ProfileColumn = { x: mainX, width: mainW };
   let mainPageIndex = 0;
-  const mainEnsureSpace = (needed: number): void => {
+  const mainEnsureSpace = (needed: number): boolean => {
     const spaceLeft = doc.page.height - t.margins.bottom - doc.y;
     const pageContentHeight = doc.page.height - t.margins.top - t.margins.bottom;
     if (needed > spaceLeft && needed <= pageContentHeight) {
@@ -247,12 +293,10 @@ export function renderProfileTemplate(
         pageContentTop.set(nextIndex, top);
       }
       mainPageIndex = nextIndex;
-      if (mainPageIndex > sidebarMaxPageIndex) {
-        column.x = lm;
-        column.width = pageW;
-      }
       doc.y = top;
+      return true;
     }
+    return false;
   };
 
   for (const section of mainSections) {
@@ -589,7 +633,7 @@ function renderPersonalDetails(
   x: number,
   width: number,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   const iconSize = 9;
   const textX = x + iconSize + 7;
@@ -672,7 +716,7 @@ function renderQualities(
   x: number,
   width: number,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   if (!qualities.length) return;
 
@@ -728,7 +772,7 @@ function renderRatedList(
   x: number,
   width: number,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   if (!entries.length) return;
 
@@ -766,7 +810,7 @@ function renderSidebarSection(
   x: number,
   width: number,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   if (section === 'skills') {
     renderRatedList(doc, 'Skills', content.skills, x, width, t, ensureSpace);
@@ -820,7 +864,7 @@ function renderWorkEntry(
   entry: CvWorkEntry,
   column: ProfileColumn,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   const dateStr = formatDateRange(entry.startDate, entry.endDate, entry.current);
   const dateGap = dateStr ? 10 : 0;
@@ -876,7 +920,7 @@ function renderEducationEntry(
   entry: CvEducationEntry,
   column: ProfileColumn,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   const dateStr = formatDateRange(entry.startDate, entry.endDate);
   const dateGap = dateStr ? 10 : 0;
@@ -933,7 +977,7 @@ function renderCertification(
   c: CvCertificationEntry,
   column: ProfileColumn,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   doc.font('Heading').fontSize(t.typography.bodySize - 0.5);
   const nameH = doc.heightOfString(c.name, { width: column.width });
@@ -956,12 +1000,56 @@ function renderCertification(
   doc.moveDown(0.65);
 }
 
+/** Sums the SAME per-entry height formula `renderReferenceEntry` itself
+ *  uses (nameH + orgH + relH + contactH + 12), plus `profileHeading`'s own
+ *  exact height formula, so this estimate can never drift from what's
+ *  actually drawn. Used ONLY to decide whether a References section is
+ *  short enough to ever fit on a single page — see its one call site's
+ *  own doc comment (RABBIT_NOTEBOOK.md, References/continuation
+ *  pagination) for why. */
+function measureReferencesHeight(
+  doc: PDFKit.PDFDocument,
+  refs: CvReferenceEntry[],
+  availableUponRequest: boolean,
+  width: number,
+  t: TemplateDefinition,
+): number {
+  doc.font('Body').fontSize(t.typography.headingSize);
+  const headingH = doc.heightOfString('References', { width }) + 3 + 8; // matches profileHeading's own ruleY(+3)/content-start(+8) geometry exactly
+
+  if (availableUponRequest) {
+    doc.font('Body').fontSize(t.typography.bodySize);
+    const bodyH = doc.heightOfString('References available upon request.', {
+      width,
+      lineGap: t.spacing.lineGap,
+    });
+    // doc.currentLineHeight() reads PDFKit's own real line-height for the
+    // font/size just selected above — matches what the real
+    // `doc.moveDown(1.1)` call in the actual render path advances by,
+    // rather than an independently-guessed constant.
+    return headingH + bodyH + doc.currentLineHeight() * 1.1;
+  }
+
+  let h = headingH;
+  for (const r of refs) {
+    const orgLine = [r.jobTitle, r.company].filter(Boolean).join(', ');
+    const contactLine = [r.email, r.phone].filter(Boolean).join('  ·  ');
+    doc.font('Heading').fontSize(t.typography.bodySize);
+    const nameH = doc.heightOfString(r.fullName, { width });
+    const orgH = orgLine ? t.typography.bodySize + 2 : 0;
+    const relH = r.relationship ? t.typography.metaSize + 2 : 0;
+    const contactH = contactLine ? t.typography.metaSize + 2 : 0;
+    h += nameH + orgH + relH + contactH + 12;
+  }
+  return h;
+}
+
 function renderReferenceEntry(
   doc: PDFKit.PDFDocument,
   entry: CvReferenceEntry,
   column: ProfileColumn,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   const orgLine = [entry.jobTitle, entry.company].filter(Boolean).join(', ');
   const contactLine = [entry.email, entry.phone].filter(Boolean).join('  ·  ');
@@ -971,7 +1059,20 @@ function renderReferenceEntry(
   const orgH = orgLine ? t.typography.bodySize + 2 : 0;
   const relH = entry.relationship ? t.typography.metaSize + 2 : 0;
   const contactH = contactLine ? t.typography.metaSize + 2 : 0;
-  ensureSpace(nameH + orgH + relH + contactH + 12);
+  const brokeToNewPage = ensureSpace(nameH + orgH + relH + contactH + 12);
+  // Fix (RABBIT_NOTEBOOK.md, References/continuation pagination): a
+  // References list too long to keep together (see measureReferencesHeight's
+  // call site) still splits safely between entries — but previously an
+  // entry landing on a later page had NO heading or context above it at
+  // all, since "References" itself was only ever drawn once, earlier, on
+  // whatever page the list started on. Whenever THIS entry's own
+  // ensureSpace call is what causes the break, draw a small
+  // "References — continued" label first — same profileHeading treatment
+  // as every other heading in this template, so it reads as a real,
+  // intentional section marker rather than an orphaned entry.
+  if (brokeToNewPage) {
+    profileHeading(doc, 'References — continued', column.x, column.width, t);
+  }
 
   doc
     .font('Heading')
@@ -1012,7 +1113,7 @@ function renderMainSection(
   section: CvSection,
   column: ProfileColumn,
   t: TemplateDefinition,
-  ensureSpace: (needed: number) => void,
+  ensureSpace: (needed: number) => boolean,
 ): void {
   switch (section) {
     case 'summary': {
@@ -1055,7 +1156,30 @@ function renderMainSection(
       const refs = content.references ?? [];
       const availableUponRequest = content.referencesAvailableUponRequest ?? false;
       if (!refs.length && !availableUponRequest) return;
-      ensureSpace(60);
+      // Fix (RABBIT_NOTEBOOK.md, References/continuation pagination): a
+      // References section short enough to ever fit on ONE page (heading
+      // + every entry, or heading + the "available upon request"
+      // sentence) is kept together as a single unit — reported bug: a
+      // two-entry list split across pages with the heading left behind
+      // and the second entry stranded at the page's own left margin.
+      // `ensureSpace(totalH)` is a no-op if it already fits where we are;
+      // otherwise it pushes the WHOLE section to a fresh page (its own
+      // `needed <= pageContentHeight` guard is exactly "doesn't fit here,
+      // but would fit on an empty page"). Deliberately bounded: a section
+      // too long to ever fit on any single page (totalH > a full page's
+      // content height) is EXCLUDED from this and falls through to the
+      // plain `ensureSpace(60)` heading-only minimum instead (unchanged
+      // from before) — it must still split safely between entries, which
+      // `renderReferenceEntry`'s own per-entry ensureSpace (plus the
+      // "References — continued" marker it now draws whenever ITS OWN
+      // call is what causes a break) already handles correctly.
+      const pageContentHeight = doc.page.height - t.margins.top - t.margins.bottom;
+      const totalH = measureReferencesHeight(doc, refs, availableUponRequest, column.width, t);
+      if (totalH <= pageContentHeight) {
+        ensureSpace(totalH);
+      } else {
+        ensureSpace(60);
+      }
       profileHeading(doc, 'References', column.x, column.width, t);
       if (availableUponRequest) {
         doc

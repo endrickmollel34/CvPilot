@@ -100,7 +100,7 @@ const PT_TO_PX = 4 / 3; // CSS's fixed pt→px ratio (96dpi / 72pt-per-inch) —
 const A4_WIDTH_PX = A4_WIDTH_PT * PT_TO_PX;
 const A4_HEIGHT_PX = A4_HEIGHT_PT * PT_TO_PX;
 
-interface Block {
+export interface Block {
   id: string;
   sectionTitle: string;
   node: React.ReactElement;
@@ -184,8 +184,8 @@ function buildMainBlocks(content: CvContent, mainSections: CvSection[]): Block[]
   return blocks;
 }
 
-interface PageColumn {
-  items: Array<{ block: Block; showHeading: boolean }>;
+export interface PageColumn {
+  items: Array<{ block: Block; showHeading: boolean; continued?: boolean }>;
 }
 
 /** Flags each block with whether it's the first of a new section, in
@@ -213,8 +213,33 @@ function withSectionHeadingFlags(blocks: Block[]): Array<{ block: Block; showHea
  *  `showHeading` comes from `withSectionHeadingFlags` — a section that
  *  continues onto a later page correctly keeps `showHeading: false` for
  *  its continuing items (no heading repeats), matching profile-pdf-
- *  renderer.ts's own behaviour. */
-function packColumn(
+ *  renderer.ts's own behaviour.
+ *
+ *  Two refinements (RABBIT_NOTEBOOK.md, References/continuation
+ *  pagination), mirroring profile-pdf-renderer.ts's own equivalents
+ *  exactly (measureReferencesHeight / the `ensureSpace(totalH)` whole-
+ *  section check / the "— continued" marker there):
+ *  1. Keep-together for short sections: when a NEW section begins (its
+ *     first block), this sums that section's WHOLE remaining height
+ *     (heading + every one of its own blocks, up to the next section) and
+ *     checks whether it would fit on a single FRESH page. If so, and it
+ *     doesn't fit in the current page's remaining room, the WHOLE section
+ *     moves together — not just the block that triggered the check —
+ *     instead of starting here and stranding a later block of the SAME
+ *     section alone on the next page with no heading (the reported bug: a
+ *     short two-entry References section). A section too long to ever fit
+ *     on one page is deliberately excluded from this — it falls through
+ *     to the per-block placement below unchanged, which still keeps a
+ *     heading with its own first block via `needed`.
+ *  2. Continuation marker: a block that lands as the first item on its
+ *     OWN page but whose `showHeading` is false (a section that had to
+ *     split, per #1's own exclusion) is flagged `continued: true` so the
+ *     caller renders "<Section> — continued" instead of silently showing
+ *     it with no heading/context at all — the exact bug this fixes. Its
+ *     own `headingH` is added to `y` alongside it, so later items on that
+ *     same page are positioned accounting for the marker's real height
+ *     too, not just the block's own. */
+export function packColumn(
   items: Array<{ block: Block; showHeading: boolean }>,
   heights: Map<string, number>,
   headingH: number,
@@ -226,20 +251,42 @@ function packColumn(
   let pageIndex = 0;
   let y = firstPageStartY;
 
-  for (const { block, showHeading } of items) {
+  for (let i = 0; i < items.length; i++) {
+    const current = items[i];
+    if (!current) continue;
+    const { block, showHeading } = current;
     const h = heights.get(block.id) ?? 0;
+
+    if (showHeading) {
+      let sectionTotal = headingH + h;
+      for (let j = i + 1; j < items.length; j++) {
+        const next = items[j];
+        if (!next || next.showHeading) break;
+        sectionTotal += heights.get(next.block.id) ?? 0;
+      }
+      const sectionPageStart = pageIndex === 0 ? firstPageStartY : continuationHeaderH;
+      const sectionRoomLeft = pageContentH - y;
+      if (sectionTotal <= pageContentH - sectionPageStart && sectionTotal > sectionRoomLeft) {
+        pageIndex += 1;
+        pages.push({ items: [] });
+        y = continuationHeaderH;
+      }
+    }
+
     const needed = h + (showHeading ? headingH : 0);
     const pageStart = pageIndex === 0 ? firstPageStartY : continuationHeaderH;
     const roomLeft = pageContentH - y;
+    let continued = false;
     if (needed > roomLeft && needed <= pageContentH - pageStart) {
       pageIndex += 1;
       pages.push({ items: [] });
       y = continuationHeaderH;
+      continued = !showHeading;
     }
     const currentPage = pages[pageIndex];
     if (!currentPage) throw new Error('unreachable: page just pushed for this index');
-    currentPage.items.push({ block, showHeading });
-    y += needed;
+    currentPage.items.push({ block, showHeading, continued });
+    y += needed + (continued ? headingH : 0);
   }
 
   return pages;
@@ -247,13 +294,23 @@ function packColumn(
 
 function SidebarColumnItems({ page }: { page: PageColumn | undefined }) {
   if (!page) return null;
-  const groups: Array<{ title: string; heading: boolean; items: React.ReactElement[] }> = [];
-  for (const { block, showHeading } of page.items) {
+  const groups: Array<{
+    title: string;
+    heading: boolean;
+    continued: boolean;
+    items: React.ReactElement[];
+  }> = [];
+  for (const { block, showHeading, continued } of page.items) {
     const last = groups[groups.length - 1];
     if (last && last.title === block.sectionTitle) {
       last.items.push(block.node);
     } else {
-      groups.push({ title: block.sectionTitle, heading: showHeading, items: [block.node] });
+      groups.push({
+        title: block.sectionTitle,
+        heading: showHeading,
+        continued: !!continued,
+        items: [block.node],
+      });
     }
   }
   return (
@@ -261,6 +318,12 @@ function SidebarColumnItems({ page }: { page: PageColumn | undefined }) {
       {groups.map((g) => (
         <div key={g.title}>
           {g.heading && <SectionHeading title={g.title} />}
+          {/* Fix (RABBIT_NOTEBOOK.md, References/continuation pagination):
+              a section too long to keep together (see packColumn's own
+              doc comment) splits between blocks — this labels whichever
+              later page it resumes on, instead of showing that block with
+              no heading/context at all. */}
+          {g.continued && <SectionHeading title={`${g.title} — continued`} />}
           <ul className={g.title === 'Qualities' ? 'cvpf-qualities' : 'cvpf-rated-list'}>
             {g.items}
           </ul>
@@ -274,7 +337,7 @@ function MainColumnItems({ page }: { page: PageColumn | undefined }) {
   if (!page) return null;
   return (
     <>
-      {page.items.map(({ block, showHeading }) => (
+      {page.items.map(({ block, showHeading, continued }) => (
         // Fragment, NOT a wrapping element: `.cvpf-entry`'s CSS
         // (`:first-child` gets a smaller margin-top than the normal
         // between-entries gap) depends on its REAL DOM sibling position
@@ -283,6 +346,12 @@ function MainColumnItems({ page }: { page: PageColumn | undefined }) {
         // breaking that rule for every entry after the true first one.
         <Fragment key={block.id}>
           {showHeading && <SectionHeading title={block.sectionTitle} />}
+          {/* Fix (RABBIT_NOTEBOOK.md, References/continuation pagination):
+              see packColumn's own doc comment — a block that had to split
+              away from its section's heading gets this marker instead of
+              rendering with no heading/context at all (the reported bug:
+              a References entry stranded alone on a later page). */}
+          {continued && <SectionHeading title={`${block.sectionTitle} — continued`} />}
           {block.node}
         </Fragment>
       ))}
@@ -652,48 +721,70 @@ export function ProfileA4Preview({
                       <ProfileContinuationHeader name={candidateName} />
                     )}
                   <div className="cvpf-columns">
-                    {sidebarStillActive && (
-                      <div className={`cvpf-sidebar ${isFirstPage ? 'cvpf-sidebar-first' : ''}`}>
-                        {isFirstPage && (
-                          <ProfileCap pd={content.personalDetails} photoUrl={photoUrl} />
-                        )}
-                        <div
-                          className={`cvpf-sidebar-body ${
-                            isFirstPage && photoUrl ? 'cvpf-sidebar-body-with-photo' : ''
-                          }`}
-                        >
-                          {isFirstPage && pdRows.length > 0 && (
-                            <div>
-                              <SectionHeading title="Personal Details" />
-                              <ul className="cvpf-pd-list">
-                                {pdRows.map((r) => (
-                                  <li key={r.key}>
-                                    {r.icon}
-                                    <span
-                                      style={{
-                                        fontSize: pdSizes.has(r.key)
-                                          ? `${pdSizes.get(r.key)}pt`
-                                          : undefined,
-                                        // Fix (RABBIT_NOTEBOOK.md, "Improve
-                                        // LinkedIn address rendering"): the
-                                        // LinkedIn row wraps instead of
-                                        // staying single-line — see
-                                        // getPersonalDetailsRows' own doc
-                                        // comment (packages/shared).
-                                        whiteSpace: r.wrap ? 'normal' : 'nowrap',
-                                      }}
-                                    >
-                                      {r.node}
-                                    </span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
+                    {/* Fix (RABBIT_NOTEBOOK.md, References/continuation
+                        pagination): this column now ALWAYS renders — even
+                        on a page where the sidebar has genuinely finished
+                        (`sidebarStillActive` false) — so `.cvpf-main`
+                        (flex: 1 1 auto) never expands to claim its width.
+                        Before this fix, main content visibly jumped from
+                        its aligned page-1 position to the page's own left
+                        margin on any later page the sidebar had nothing
+                        left to share the row with — the reported "abruptly
+                        switches to the far-left margin" bug. Its own pale
+                        background is suppressed (not its width/position)
+                        when there's no real sidebar content, so an
+                        otherwise-empty page reads as blank space there
+                        rather than a tint with nothing in it — matching
+                        profile-pdf-renderer.ts's own equivalent (it only
+                        paints a continuation page's sidebar tint when the
+                        SIDEBAR pass itself is the one reaching that page). */}
+                    <div
+                      className={`cvpf-sidebar ${isFirstPage ? 'cvpf-sidebar-first' : ''}`}
+                      style={sidebarStillActive ? undefined : { background: 'transparent' }}
+                    >
+                      {sidebarStillActive && (
+                        <>
+                          {isFirstPage && (
+                            <ProfileCap pd={content.personalDetails} photoUrl={photoUrl} />
                           )}
-                          <SidebarColumnItems page={sidebarPage} />
-                        </div>
-                      </div>
-                    )}
+                          <div
+                            className={`cvpf-sidebar-body ${
+                              isFirstPage && photoUrl ? 'cvpf-sidebar-body-with-photo' : ''
+                            }`}
+                          >
+                            {isFirstPage && pdRows.length > 0 && (
+                              <div>
+                                <SectionHeading title="Personal Details" />
+                                <ul className="cvpf-pd-list">
+                                  {pdRows.map((r) => (
+                                    <li key={r.key}>
+                                      {r.icon}
+                                      <span
+                                        style={{
+                                          fontSize: pdSizes.has(r.key)
+                                            ? `${pdSizes.get(r.key)}pt`
+                                            : undefined,
+                                          // Fix (RABBIT_NOTEBOOK.md, "Improve
+                                          // LinkedIn address rendering"): the
+                                          // LinkedIn row wraps instead of
+                                          // staying single-line — see
+                                          // getPersonalDetailsRows' own doc
+                                          // comment (packages/shared).
+                                          whiteSpace: r.wrap ? 'normal' : 'nowrap',
+                                        }}
+                                      >
+                                        {r.node}
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            <SidebarColumnItems page={sidebarPage} />
+                          </div>
+                        </>
+                      )}
+                    </div>
                     <div className="cvpf-main">
                       <MainColumnItems page={mainPage} />
                     </div>
