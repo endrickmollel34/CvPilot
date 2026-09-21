@@ -730,18 +730,32 @@ export function ProfileA4Preview({
                         its aligned page-1 position to the page's own left
                         margin on any later page the sidebar had nothing
                         left to share the row with — the reported "abruptly
-                        switches to the far-left margin" bug. Its own pale
-                        background is suppressed (not its width/position)
-                        when there's no real sidebar content, so an
-                        otherwise-empty page reads as blank space there
-                        rather than a tint with nothing in it — matching
-                        profile-pdf-renderer.ts's own equivalent (it only
-                        paints a continuation page's sidebar tint when the
-                        SIDEBAR pass itself is the one reaching that page). */}
-                    <div
-                      className={`cvpf-sidebar ${isFirstPage ? 'cvpf-sidebar-first' : ''}`}
-                      style={sidebarStillActive ? undefined : { background: 'transparent' }}
-                    >
+                        switches to the far-left margin" bug.
+                        Fix (RABBIT_NOTEBOOK.md, "Profile-template colour
+                        update" — missing continuation-page sidebar
+                        background): this div used to ALSO suppress its own
+                        `.cvpf-sidebar` background (via an inline
+                        `background: transparent` override) whenever
+                        `sidebarStillActive` was false, on the theory that
+                        an empty column shouldn't show a tint with nothing
+                        in it — deliberately mirroring
+                        profile-pdf-renderer.ts's own (then-buggy) behavior
+                        of only painting a continuation page's tint when the
+                        SIDEBAR pass itself reached that page. That's
+                        exactly what produced Alex_Johnson (22).pdf's
+                        all-white page-2 left strip: a page created purely
+                        by MAIN-column overflow, with no sidebar content of
+                        its own, got no tint at all in either renderer. The
+                        override is removed — `.cvpf-sidebar` now always
+                        keeps its real `background: ${sidebarBg}` (from
+                        buildProfileCss) on every page, continuation pages
+                        included, whether or not real sidebar content is
+                        present there — the colored column continues
+                        visually down every page, matching page 1's
+                        always-tinted sidebar. Only the CONTENT (cap/photo/
+                        Personal Details/section items) stays gated on
+                        `sidebarStillActive`, so nothing is ever repeated. */}
+                    <div className={`cvpf-sidebar ${isFirstPage ? 'cvpf-sidebar-first' : ''}`}>
                       {sidebarStillActive && (
                         <>
                           {isFirstPage && (

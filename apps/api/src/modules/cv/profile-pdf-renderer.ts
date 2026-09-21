@@ -183,6 +183,56 @@ export function renderProfileTemplate(
   // shared CONTINUATION page (index >= 1) starts.
   const pageContentTop = new Map<number, number>();
 
+  // Fix (RABBIT_NOTEBOOK.md, "Profile-template colour update" — missing
+  // continuation-page sidebar background): previously, EACH pass
+  // (`sidebarEnsureSpace`/`mainEnsureSpace`) had its own separate
+  // `if (top === undefined) { draw header; ... }` branch, but only the
+  // sidebar pass's branch also painted the sidebar tint rect — the main
+  // pass's branch drew the continuation header and stopped. Whichever pass
+  // reached a given continuation page FIRST decided whether it got a tint
+  // at all: a page created purely by the MAIN column overflowing (sidebar
+  // content already finished on page 1 — exactly Alex_Johnson (22).pdf's
+  // shape) got a plain white left strip, because it was the main pass, not
+  // the sidebar pass, that first called `doc.addPage()`/`switchToPage()`
+  // for it. Consolidating page-establishment into this ONE shared helper
+  // — called by both passes — guarantees the header AND the tint are
+  // painted together, exactly once per continuation page, regardless of
+  // which pass gets there first. The tint is unconditional (every
+  // continuation page, even one with zero remaining sidebar content) per
+  // this fix's explicit requirement: the colored column continues visually
+  // down every page, matching page 1's always-tinted sidebar rather than
+  // only appearing where sidebar text happens to still be printing.
+  //
+  // Paint order within this helper is deliberate: the continuation header
+  // (candidate name + rule) is drawn first, and returns `top` — the y
+  // BELOW that header/rule. The tint rect then fills from `top` down to
+  // the page's bottom margin, never the header's own y-range, so it can
+  // never paint over the header text (verified: `top` is always strictly
+  // below the header's own bottom edge, by construction of
+  // `drawContinuationHeader`'s return value). Both passes only draw their
+  // OWN section content after calling `ensureSpace`, i.e. after this
+  // helper returns — so real content from either pass always lands on top
+  // of the tint, never under it.
+  const ensureContinuationPage = (nextIndex: number): number => {
+    const total = doc.bufferedPageRange().count;
+    if (nextIndex < total) {
+      doc.switchToPage(nextIndex);
+    } else {
+      doc.addPage();
+    }
+    let top = pageContentTop.get(nextIndex);
+    if (top === undefined) {
+      top = drawContinuationHeader(doc, candidateName, lm, pageW, t);
+      doc
+        .rect(sidebarX, top, sidebarBleedRight - sidebarX, doc.page.height - t.margins.bottom - top)
+        .fillColor(t.sidebarBackground ?? '#F4F5F6')
+        .fill();
+      doc.fillColor(t.colors.text);
+      pageContentTop.set(nextIndex, top);
+    }
+    return top;
+  };
+
   const order = resolveSectionOrder(content.sectionOrder);
   const sidebarSet = new Set(t.sidebarSections ?? []);
   const sidebarSections = order.filter((s) => sidebarSet.has(s));
@@ -202,46 +252,8 @@ export function renderProfileTemplate(
     const pageContentHeight = doc.page.height - t.margins.top - t.margins.bottom;
     if (needed > spaceLeft && needed <= pageContentHeight) {
       const nextIndex = sidebarPageIndex + 1;
-      const total = doc.bufferedPageRange().count;
-      if (nextIndex < total) {
-        doc.switchToPage(nextIndex);
-      } else {
-        doc.addPage();
-      }
+      doc.y = ensureContinuationPage(nextIndex);
       sidebarPageIndex = nextIndex;
-      let top = pageContentTop.get(nextIndex);
-      if (top === undefined) {
-        top = drawContinuationHeader(doc, candidateName, lm, pageW, t);
-        pageContentTop.set(nextIndex, top);
-        // Fix (RABBIT_NOTEBOOK.md, References/continuation pagination):
-        // PDFKit previously never painted the sidebar's pale tint on any
-        // continuation page — only page 1's rect(0,0,...) at the very top
-        // of this function ever painted it, so a page the sidebar itself
-        // overflowed onto rendered with a plain white left column,
-        // silently dropping the template's own visual identity there.
-        // This is reached ONLY when the SIDEBAR pass itself is the one
-        // creating this page (sidebar content genuinely continues here),
-        // so it never tints a page that turns out to have no sidebar
-        // content — matching profile-document.tsx's own
-        // `sidebarStillActive`-gated continuation tint exactly (see its
-        // buildProfileCss doc comment: "ordinary margin-inset background,
-        // not bled" — this rect starts at `sidebarX`, not bled to the
-        // true x=0 the way page 1's rect is, and stops at
-        // `sidebarBleedRight` on the right, same as page 1's own content
-        // area). Painted BEFORE anything else touches this page, so it
-        // sits behind the continuation header/sidebar text drawn after it.
-        doc
-          .rect(
-            sidebarX,
-            top,
-            sidebarBleedRight - sidebarX,
-            doc.page.height - t.margins.bottom - top,
-          )
-          .fillColor(t.sidebarBackground ?? '#F4F5F6')
-          .fill();
-        doc.fillColor(t.colors.text);
-      }
-      doc.y = top;
       return true;
     }
     return false;
@@ -281,19 +293,8 @@ export function renderProfileTemplate(
     const pageContentHeight = doc.page.height - t.margins.top - t.margins.bottom;
     if (needed > spaceLeft && needed <= pageContentHeight) {
       const nextIndex = mainPageIndex + 1;
-      const total = doc.bufferedPageRange().count;
-      let top = pageContentTop.get(nextIndex);
-      if (nextIndex < total) {
-        doc.switchToPage(nextIndex);
-      } else {
-        doc.addPage();
-      }
-      if (top === undefined) {
-        top = drawContinuationHeader(doc, candidateName, lm, pageW, t);
-        pageContentTop.set(nextIndex, top);
-      }
+      doc.y = ensureContinuationPage(nextIndex);
       mainPageIndex = nextIndex;
-      doc.y = top;
       return true;
     }
     return false;

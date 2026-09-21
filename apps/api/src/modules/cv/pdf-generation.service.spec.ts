@@ -1,5 +1,6 @@
 import * as zlib from 'zlib';
 import { PDFParse } from 'pdf-parse';
+import PDFDocument from 'pdfkit';
 import type { CvContent, CvReferenceEntry } from '@cvpilot/shared';
 import { PdfGenerationService } from './pdf-generation.service';
 
@@ -33,6 +34,72 @@ async function extractText(pdf: Buffer): Promise<string> {
   } finally {
     await parser.destroy();
   }
+}
+
+interface RectFillEvent {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+}
+
+/**
+ * Real-evidence regression harness for the "Profile-template colour
+ * update"/missing continuation-page sidebar background fix
+ * (RABBIT_NOTEBOOK.md): rather than searching the generated PDF's raw
+ * bytes for a hex color string (unreliable — PDFKit compresses content
+ * streams by default, and a byte match proves nothing about WHERE or
+ * whether a shape was actually filled), this intercepts the real PDFKit
+ * vector-graphics calls (`rect`/`fillColor`/`fill`) `profile-pdf-
+ * renderer.ts` actually issues during a genuine `generateStream()` call.
+ * `jest.spyOn` with a pass-through `mockImplementation` preserves real
+ * rendering (the returned PDF is unaffected) while recording each
+ * rect-then-fillColor-then-fill() triple in call order — exactly the
+ * `doc.rect(...).fillColor(...).fill()` chain the renderer uses for both
+ * the sidebar tint and (via a different color) the Qualities bullet
+ * markers, so filtering by the exact fill color is what isolates the
+ * sidebar-tint events specifically.
+ */
+function spyOnRectFills(): { events: RectFillEvent[]; restore: () => void } {
+  const events: RectFillEvent[] = [];
+  let pendingRect: { x: number; y: number; width: number; height: number } | undefined;
+  let pendingColor: string | undefined;
+
+  const proto = PDFDocument.prototype as unknown as {
+    rect: (x: number, y: number, width: number, height: number) => unknown;
+    fillColor: (color: string, opacity?: number) => unknown;
+    fill: (...args: unknown[]) => unknown;
+  };
+  const origRect = proto.rect;
+  const origFillColor = proto.fillColor;
+  const origFill = proto.fill;
+
+  proto.rect = function (this: unknown, x: number, y: number, width: number, height: number) {
+    pendingRect = { x, y, width, height };
+    return origRect.call(this, x, y, width, height);
+  };
+  proto.fillColor = function (this: unknown, color: string, opacity?: number) {
+    if (typeof color === 'string') pendingColor = color;
+    return origFillColor.call(this, color, opacity);
+  };
+  proto.fill = function (this: unknown, ...args: unknown[]) {
+    if (args.length === 0 && pendingRect && pendingColor) {
+      events.push({ ...pendingRect, color: pendingColor });
+    }
+    pendingRect = undefined;
+    pendingColor = undefined;
+    return origFill.apply(this, args);
+  };
+
+  return {
+    events,
+    restore: () => {
+      proto.rect = origRect;
+      proto.fillColor = origFillColor;
+      proto.fill = origFill;
+    },
+  };
 }
 
 const FULL_FIXTURE: CvContent = {
@@ -2428,6 +2495,129 @@ describe('PdfGenerationService — Profile template', () => {
         .length;
       expect(occurrences).toBe(1);
     }
+  });
+
+  // ─── Continuation-page sidebar background (RABBIT_NOTEBOOK.md,
+  // "Profile-template colour update") ──────────────────────────────────
+  // Reproduces Alex_Johnson (22).pdf: page 1's sidebar (Personal Details,
+  // Skills, Languages, Qualities — all short) finishes there; page 2 is
+  // created PURELY by the main column's own Employment/References
+  // overflow, with the sidebar pass never itself reaching page 2. Before
+  // this fix, only the pass that FIRST creates a continuation page painted
+  // the sidebar tint — since that was the main pass here, page 2 got a
+  // plain white left strip.
+
+  it('paints the sidebar background tint on a continuation page created purely by main-column overflow, with the correct colour and matching width — not only when the sidebar pass itself overflows', async () => {
+    const content: CvContent = {
+      ...FULL_FIXTURE,
+      workExperience: [
+        {
+          id: 'we-bg-repro-1',
+          company: 'Tech Startup Ltd',
+          title: 'Software Engineering Intern',
+          location: 'London, UK',
+          startDate: '2024-06',
+          endDate: '2024-09',
+          current: false,
+          bullets: Array.from({ length: 16 }, () => REPEATED_BULLET),
+        },
+        {
+          id: 'we-bg-repro-2',
+          company: 'Technova Solutions',
+          title: 'Backend Software Engineer',
+          location: 'Geneva',
+          startDate: '2029-03',
+          endDate: '2029-09',
+          current: false,
+          bullets: Array.from({ length: 16 }, () => REPEATED_BULLET),
+        },
+      ],
+      references: REPRO_REFERENCES,
+      referencesAvailableUponRequest: false,
+      sectionOrder: [...FULL_FIXTURE.sectionOrder, 'references'],
+    };
+
+    const { events, restore } = spyOnRectFills();
+    let pdf: Buffer;
+    try {
+      pdf = await streamToBuffer(service.generateStream(content, undefined, 'profile'));
+    } finally {
+      restore();
+    }
+
+    // Sanity: this really is a 2-page document — the exact shape being
+    // guarded against.
+    const pages = await pageTexts(pdf);
+    expect(pages.length).toBe(2);
+
+    const sidebarTintEvents = events.filter((e) => e.color === '#E3EAF2');
+    // One tint fill per page: page 1's full-bleed rect, and page 2's
+    // continuation rect. Before this fix, page 2 contributed NONE, so this
+    // would be 1, not 2.
+    expect(sidebarTintEvents.length).toBe(2);
+
+    const [page1Tint, page2Tint] = sidebarTintEvents;
+    if (!page1Tint || !page2Tint) throw new Error('unreachable: length already asserted to be 2');
+
+    // Page 1: bleeds all the way to the physical page edge.
+    expect(page1Tint.x).toBe(0);
+    expect(page1Tint.y).toBe(0);
+
+    // Page 2 (continuation): inset from the true edge (SIDEBAR_INSET),
+    // not bled — and, critically, the SAME width as page 1's tint minus
+    // that inset, i.e. the identical sidebar column, not some other
+    // shrunk/expanded rectangle. Derived from page 1's own measured width
+    // rather than a hardcoded constant, so this stays correct if
+    // SIDEBAR_INSET or the sidebar ratio is ever retuned.
+    expect(page2Tint.x).toBeGreaterThan(0);
+    expect(page2Tint.width).toBeCloseTo(page1Tint.width - page2Tint.x, 5);
+    // Starts below the continuation header (not at the true page top) and
+    // extends down toward the bottom margin — never zero/negative height.
+    expect(page2Tint.y).toBeGreaterThan(0);
+    expect(page2Tint.height).toBeGreaterThan(0);
+
+    // Paint-order safety: the tint must never be the LAST thing drawn on
+    // top of already-placed content. Confirmed structurally by re-parsing
+    // the actual text — every factual field on page 2 is still present
+    // and readable (a background painted over text would not change the
+    // EXTRACTED text, since pdf-parse reads the text-rendering operators
+    // regardless of what's visually underneath/behind them — so this
+    // specifically confirms real content lands there, corroborating the
+    // "content drawn after ensureSpace returns" ordering guarantee
+    // documented at the fix's `ensureContinuationPage` helper).
+    expect(pages[1]).toContain('References');
+    expect(pages[1]).toContain('Endrick Mollel');
+    expect(pages[1]).toContain('Baraka Tukay');
+  });
+
+  it('paints the cap/header background in the requested stronger blue (#315D87)', async () => {
+    const { events, restore } = spyOnRectFills();
+    // The cap is a curved path (moveTo/quadraticCurveTo/closePath), not a
+    // rect — spyOnRectFills only records rect-based fills, so this checks
+    // the fillColor value directly via a separate light spy on the same
+    // chain shape used for the cap fill.
+    const proto = PDFDocument.prototype as unknown as {
+      fillColor: (color: string, opacity?: number) => unknown;
+    };
+    const origFillColor = proto.fillColor;
+    const fillColorCalls: string[] = [];
+    proto.fillColor = function (this: unknown, color: string, opacity?: number) {
+      if (typeof color === 'string') fillColorCalls.push(color);
+      return origFillColor.call(this, color, opacity);
+    };
+    let pdf: Buffer;
+    try {
+      pdf = await streamToBuffer(service.generateStream(FULL_FIXTURE, undefined, 'profile'));
+    } finally {
+      proto.fillColor = origFillColor;
+      restore();
+    }
+    expect(pdf.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+    expect(fillColorCalls).toContain('#315D87');
+    // The old, replaced colour must genuinely be gone from the render,
+    // not merely unasserted.
+    expect(fillColorCalls).not.toContain('#3B6FA0');
+    expect(events.map((e) => e.color)).not.toContain('#F4F5F6');
   });
 
   // Continuation-page main-column x-alignment (the "abruptly switches to

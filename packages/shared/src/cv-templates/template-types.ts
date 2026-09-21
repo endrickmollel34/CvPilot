@@ -694,9 +694,13 @@ export const PROFILE_TEMPLATE: TemplateDefinition = {
     muted: '#6B7280',
     rule: '#D9DEE2',
     accent: '#2C5C8A',
-    // The cap's fill — a slightly deeper blue than `heading` so white cap
-    // text stays confidently legible against it.
-    headerBackground: '#3B6FA0',
+    // Fix (RABBIT_NOTEBOOK.md, "Profile-template colour update"): was
+    // '#3B6FA0' — the user asked for a visibly STRONGER cap blue, not a
+    // more faded one. '#315D87' keeps `headerText`'s white comfortably
+    // legible (the darker background only improves that contrast) and is
+    // untouched elsewhere — `heading`/`accent` (the body-text blue) are
+    // deliberately a separate, lighter shade and stay as they were.
+    headerBackground: '#315D87',
     headerText: '#FFFFFF',
     headerMutedText: '#D9E4EE',
   },
@@ -726,7 +730,15 @@ export const PROFILE_TEMPLATE: TemplateDefinition = {
   // entire recovered width (mainW = pageW - sidebarW - gap in both
   // renderers) — no text anywhere was shrunk to make room.
   sidebarWidthRatio: 0.3,
-  sidebarBackground: '#F4F5F6',
+  // Fix (RABBIT_NOTEBOOK.md, "Profile-template colour update"): was
+  // '#F4F5F6' — a visibly stronger, more saturated pale blue-gray per the
+  // user's explicit request ("stronger, not more faded"), still light
+  // enough that `colors.text` (#23272B) stays comfortably readable over
+  // it. This is the single source of truth both renderers paint the
+  // sidebar tint from (profile-pdf-renderer.ts's `t.sidebarBackground`,
+  // profile-document.tsx's `sidebarBg`) — changing it here alone recolors
+  // both.
+  sidebarBackground: '#E3EAF2',
   supportsPhoto: true,
 };
 
