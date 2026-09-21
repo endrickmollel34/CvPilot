@@ -37,6 +37,30 @@ const PROFILE_NAME_BASE_SIZE = PROFILE_TEMPLATE.typography.nameSize;
 const PROFILE_NAME_FLOOR_SIZE = 14;
 const PROFILE_NAME_STEP = 1.5;
 
+// Mirrors profile-pdf-renderer.ts's own private SIDEBAR_INSET constant
+// (kept independently there per this template's established per-renderer-
+// file duplication trade-off — see that module's own top-of-file doc
+// comment) — the sidebar's own content's purely cosmetic left inset,
+// independent of the page's real left margin. Module-scoped here (not
+// buildProfileCss-local) so `profileSidebarBleedWidthPt` below can use it
+// too.
+const PROFILE_SIDEBAR_INSET = 22;
+
+// Mirrors profile-pdf-renderer.ts's own private CAP_PADDING_X constant —
+// .cvpf-cap's own left/right padding (see its CSS rule below). Exported
+// so ProfileA4Preview.tsx's name-wrap measurement (profileNameWrapWidthPt
+// below) can derive the exact same text width PDFKit's drawCap does.
+const PROFILE_CAP_PADDING_X = 12;
+
+/** The exact width profile-pdf-renderer.ts's drawCap wraps the candidate
+ *  NAME against (its bled capWidth minus CAP_PADDING_X on both sides) —
+ *  see profileSidebarBleedWidthPt's own doc comment for why
+ *  ProfileA4Preview.tsx measures against this rather than .cvpf-cap's own
+ *  (deliberately narrower) rendered box width. */
+export function profileNameWrapWidthPt(template: TemplateDefinition): number {
+  return profileSidebarBleedWidthPt(template) - PROFILE_CAP_PADDING_X * 2;
+}
+
 // Matches profile-pdf-renderer.ts's CONTACT_TEXT_FLOOR_SIZE exactly — an
 // absolute (not tier-proportional) minimum, so "keep it readable" means
 // the same thing regardless of density tier in both renderers.
@@ -102,10 +126,82 @@ export function computeContactRowFontSizes(
   return sizes;
 }
 
-/** Same adaptive-name-size technique proven on Professional/Minimal (see
- *  their own hooks) re-derived here with Profile's own narrower cap width
- *  and smaller floor — the cap is only ~33% of the page, so a long name
- *  needs more headroom to shrink than a full-width header does. */
+/** The actual adaptive-name-size ALGORITHM (canvas-based greedy word-wrap
+ *  line-count check, same technique proven on Professional/Minimal — see
+ *  their own hooks), extracted as a pure, synchronous function so it can
+ *  be called from exactly one place per real measurement pass instead of
+ *  living only inside a React effect.
+ *
+ *  Fix (RABBIT_NOTEBOOK.md §44 — preview/PDF parity investigation):
+ *  `useProfileNameFontSize` below used to run this ENTIRELY inside its own
+ *  `useLayoutEffect` + `setState`, called independently by EVERY mounted
+ *  `ProfileCap` instance (the hidden measurement pass's copy AND the
+ *  visible page's copy are two SEPARATE component instances). React fires
+ *  layout effects bottom-up per commit, but a `setState` from a CHILD's
+ *  layout effect does not retroactively re-run an ALREADY-EXECUTED
+ *  ancestor's own layout effect in the same commit — so
+ *  ProfileA4Preview.tsx's own pagination-measurement effect (a sibling-
+ *  level ancestor effect, not a descendant of ProfileCap) was reading
+ *  `capMeasureRef.current.offsetHeight` from the cap's FIRST-render state,
+ *  i.e. BEFORE this shrink ever applied, every single time a name
+ *  genuinely needed shrinking to fit — deterministically baking in the
+ *  UNSHRUNK (taller, more-likely-to-wrap) cap height into pagination.
+ *  Confirmed via direct measurement (RABBIT_NOTEBOOK.md §44): the hidden
+ *  pass's measured name font-size was consistently the base/unshrunk
+ *  28px/21pt across every real run, never the shrunk value, even for a
+ *  name ("Alex Johnson") that visibly needed to shrink to stay on one
+ *  line at the cap's real width — exactly matching the reported "preview
+ *  wraps the name onto two lines, PDF doesn't" divergence, since PDFKit's
+ *  single-pass synchronous `profileNameFontSize` has no such race by
+ *  construction.
+ *
+ *  Extracting the algorithm lets ProfileA4Preview.tsx call it directly,
+ *  synchronously, in its OWN single measurement effect — computing the
+ *  correct, final size once and passing it down to EVERY `ProfileCap`
+ *  instance (hidden pass and visible page alike) as an explicit prop, the
+ *  same "compute once during measurement, apply everywhere" pattern this
+ *  file already uses for `computeContactRowFontSizes`/`pdSizes`. This
+ *  guarantees `capH` (what pagination uses) and the ACTUAL rendered cap
+ *  height (what the reader sees) can never drift apart, and removes the
+ *  timing dependency entirely — not just narrows the window for it. */
+export function resolveProfileNameFontSize(name: string, availableWidthPx: number): number {
+  if (!availableWidthPx || typeof document === 'undefined') return PROFILE_NAME_BASE_SIZE;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return PROFILE_NAME_BASE_SIZE;
+
+  const words = name.split(/\s+/).filter(Boolean);
+  let chosen = PROFILE_NAME_BASE_SIZE;
+  for (
+    let candidate = PROFILE_NAME_BASE_SIZE;
+    candidate >= PROFILE_NAME_FLOOR_SIZE;
+    candidate -= PROFILE_NAME_STEP
+  ) {
+    ctx.font = `700 ${(candidate * 96) / 72}px Arial`;
+    let lines = 1;
+    let lineWidth = 0;
+    for (const word of words) {
+      const wordWidth = ctx.measureText(`${word} `).width;
+      if (lineWidth > 0 && lineWidth + wordWidth > availableWidthPx) {
+        lines += 1;
+        lineWidth = wordWidth;
+      } else {
+        lineWidth += wordWidth;
+      }
+    }
+    chosen = candidate;
+    if (lines <= 3) break;
+  }
+  return chosen;
+}
+
+/** Self-contained fallback for any consumer that renders a bare
+ *  `<ProfileCap>` without a pre-resolved `nameFontSize` (see that
+ *  component's own doc comment) — re-runs the same algorithm above, but
+ *  through its own effect/state, carrying the exact timing caveat
+ *  documented on `resolveProfileNameFontSize`. ProfileA4Preview.tsx (the
+ *  one consumer that needs pagination-accurate correctness) never
+ *  exercises this path — it always supplies `nameFontSize` explicitly. */
 function useProfileNameFontSize(
   name: string,
 ): [number, React.RefObject<HTMLHeadingElement | null>] {
@@ -114,36 +210,10 @@ function useProfileNameFontSize(
 
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el || typeof document === 'undefined') return;
+    if (!el) return;
     const widthPx = el.clientWidth;
     if (!widthPx) return;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const words = name.split(/\s+/).filter(Boolean);
-    let chosen = PROFILE_NAME_BASE_SIZE;
-    for (
-      let candidate = PROFILE_NAME_BASE_SIZE;
-      candidate >= PROFILE_NAME_FLOOR_SIZE;
-      candidate -= PROFILE_NAME_STEP
-    ) {
-      ctx.font = `700 ${(candidate * 96) / 72}px Arial`;
-      let lines = 1;
-      let lineWidth = 0;
-      for (const word of words) {
-        const wordWidth = ctx.measureText(`${word} `).width;
-        if (lineWidth > 0 && lineWidth + wordWidth > widthPx) {
-          lines += 1;
-          lineWidth = wordWidth;
-        } else {
-          lineWidth += wordWidth;
-        }
-      }
-      chosen = candidate;
-      if (lines <= 3) break;
-    }
-    setSize(chosen);
+    setSize(resolveProfileNameFontSize(name, widthPx));
   }, [name]);
 
   return [size, ref];
@@ -272,15 +342,24 @@ export function SectionHeading({ title }: { title: string }) {
  *  so the paginated preview can render it once, on page 1 only (a
  *  continuation page gets ProfileContinuationHeader instead — see below —
  *  matching profile-pdf-renderer.ts's own drawCap/drawContinuationHeader
- *  split exactly). */
+ *  split exactly).
+ *
+ *  `nameFontSize`, when provided, is used AS-IS (see
+ *  `resolveProfileNameFontSize`'s own doc comment for why
+ *  ProfileA4Preview.tsx always supplies this rather than letting this
+ *  component resolve its own) — the internal `useProfileNameFontSize`
+ *  hook only runs as a self-contained fallback when it's omitted. */
 export function ProfileCap({
   pd,
   photoUrl,
+  nameFontSize: nameFontSizeProp,
 }: {
   pd: CvContent['personalDetails'];
   photoUrl?: string | null;
+  nameFontSize?: number;
 }) {
-  const [nameFontSize, nameRef] = useProfileNameFontSize(pd.fullName || 'Your Name');
+  const [resolvedNameFontSize, nameRef] = useProfileNameFontSize(pd.fullName || 'Your Name');
+  const nameFontSize = nameFontSizeProp ?? resolvedNameFontSize;
   return (
     <div className={`cvpf-cap ${photoUrl ? 'cvpf-cap-with-photo' : ''}`}>
       <h1 ref={nameRef} style={{ fontSize: `${nameFontSize}pt` }}>
@@ -801,6 +880,32 @@ export function ProfileCvDocument({
   );
 }
 
+/** Mirrors profile-pdf-renderer.ts's own `sidebarBleedRight` geometry
+ *  exactly (SIDEBAR_INSET + the sidebar column's own content width + half
+ *  the section gap) — the width the sidebar/cap BACKGROUND bleeds to on
+ *  the true page edge. Exported (not just inlined in `buildProfileCss`
+ *  below) so ProfileA4Preview.tsx can also use it directly — specifically
+ *  to measure the cap's NAME text against the same width PDFKit's own
+ *  `drawCap`/`profileNameFontSize` wraps against, without needing to
+ *  actually widen `.cvpf-cap`'s own CSS box (see `.cvpf-sidebar::before`'s
+ *  own doc comment below for why THAT specific change previously reopened
+ *  a sidebar-clipping regression — this keeps the cap's real layout box
+ *  exactly as it was, only the NAME-WRAP MEASUREMENT now uses the wider,
+ *  PDFKit-equivalent width). See RABBIT_NOTEBOOK.md §44 for the
+ *  measured before/after: the browser's cap box is narrower than
+ *  PDFKit's by SIDEBAR_INSET + half the section gap (~27pt for
+ *  PROFILE_TEMPLATE's own defaults) — enough for a two-word name like
+ *  "Alex Johnson" to wrap to 2 lines in the browser while fitting on 1 in
+ *  the PDF, even though both renderers use the identical "wrap to at most
+ *  3 lines" shrink algorithm — a real geometry mismatch, not a timing
+ *  race. */
+export function profileSidebarBleedWidthPt(template: TemplateDefinition): number {
+  const sidebarPct = Math.round((template.sidebarWidthRatio ?? 0.3) * 100);
+  const pageContentWidthPt = A4_WIDTH_PT - template.margins.left - template.margins.right;
+  const sidebarColumnWidthPt = (pageContentWidthPt * sidebarPct) / 100;
+  return PROFILE_SIDEBAR_INSET + sidebarColumnWidthPt + template.spacing.sectionGap / 2;
+}
+
 /** Plain CSS built from PROFILE_TEMPLATE's tokens — same pattern as every
  *  other template. Scoped under `.cv-profile-doc`. The curved cap bottom
  *  uses the standard CSS "wave header" trick (symmetric 50%-width bottom
@@ -868,9 +973,36 @@ export function buildProfileCss(template: TemplateDefinition): string {
   // footprint (sidebarBleedWidthPt) shrinks by the same amount the content
   // moved left by, and .cvpf-main (flex: 1 1 auto) automatically absorbs
   // that recovered width — never by shrinking sidebar text.
-  const SIDEBAR_INSET = 22;
+  const SIDEBAR_INSET = PROFILE_SIDEBAR_INSET;
   const sidebarLeftShift = marginLeft - SIDEBAR_INSET;
-  const sidebarBleedWidthPt = SIDEBAR_INSET + sidebarColumnWidthPt + s.sectionGap / 2;
+  const sidebarBleedWidthPt = profileSidebarBleedWidthPt(template);
+  // Fix (RABBIT_NOTEBOOK.md §44 — preview/PDF parity investigation):
+  // profile-pdf-renderer.ts's drawCap wraps the name/job-title against
+  // its BLED capWidth (sidebarBleedRight, reaching the true page edge)
+  // minus CAP_PADDING_X — a genuinely WIDER text box than .cvpf-cap's own
+  // (deliberately narrower — see its own history below) rendered CSS box.
+  // Confirmed via direct measurement (RABBIT_NOTEBOOK.md §44): PDFKit's
+  // LiberationSans-Bold and this canvas's own "Arial" metric are
+  // essentially IDENTICAL per character (a real 21pt "Alex Johnson"
+  // measured 137.69pt in PDFKit vs 137.69pt-equivalent in the browser) —
+  // the divergence is PURELY that .cvpf-cap's own box was narrower than
+  // PDFKit's bled width by ~27pt for this template's own defaults, wide
+  // enough for a plain two-word name to wrap to 2 lines in the browser
+  // while comfortably fitting 1 line in the PDF. `capNameWrapExtraPt`
+  // extends the name/job-title text's own effective wrap width to match
+  // PDFKit's exactly, via a symmetric negative margin (below) — the same
+  // established bleed technique already used for `.cvpf-sidebar::before`/
+  // `.cvpf-cap::before` above, so the WIDER text stays comfortably inside
+  // the cap's own (even-further-bled) background, never outside it.
+  // Deliberately does NOT touch `.cvpf-cap`'s own box/padding/width
+  // (unlike an EARLIER attempt at this — see `.cvpf-sidebar::before`'s
+  // own doc comment for why that specific approach previously reopened a
+  // sidebar-clipping regression) — this only widens the WRAP WIDTH of
+  // the two text elements themselves, leaving the cap's actual layout
+  // width (and therefore every OTHER measurement anchored to it) exactly
+  // as it was.
+  const capContentWidthPt = sidebarColumnWidthPt - PROFILE_CAP_PADDING_X * 2;
+  const capNameWrapExtraPt = Math.max(0, profileNameWrapWidthPt(template) - capContentWidthPt) / 2;
   return `
 .cv-profile-doc {
   position: relative;
@@ -944,7 +1076,7 @@ export function buildProfileCss(template: TemplateDefinition): string {
   position: relative;
   /* Fix (RABBIT_NOTEBOOK.md, Profile-preview sidebar-content-invisible bug):
      z-index: 0 turns this into its OWN stacking context, so the z-index: -1
-     on .cvpf-sidebar-first::before below (the page-edge background bleed)
+     on .cvpf-sidebar::before below (the page-edge background bleed)
      resolves LOCALLY, against this element's own children, instead of
      escaping to whatever ancestor stacking context happens to be nearest.
      Without this, a positioned box (position: absolute, z-index: auto) —
@@ -979,26 +1111,33 @@ export function buildProfileCss(template: TemplateDefinition): string {
      untouched, so the usable text width inside is preserved, not shrunk. */
   margin-left: -${sidebarLeftShift}pt;
 }
-/* Fix (RABBIT_NOTEBOOK.md §25): PDFKit's own sidebar rect
+/* Fix (RABBIT_NOTEBOOK.md §25, widened §44): PDFKit's own sidebar rect
    (doc.rect(0, 0, sidebarBleedRight, doc.page.height)) is filled BEFORE
    any margin is applied, so it reaches the page's true top/left/bottom
    edges; .cvpf-sidebar's own background above only fills its OWN
-   (margin-inset) box. This ::before, scoped to page 1 only via the
-   cvpf-sidebar-first modifier class (ProfileA4Preview.tsx adds it only
-   when isFirstPage; ProfileCvDocument — always page-1-shaped — carries
-   it unconditionally), extends the SAME color into the margin strips a
-   plain .cvpf-sidebar background can't reach without disturbing where
-   .cvpf-main starts (a flex item's own margin would shift its sibling;
-   an absolutely positioned ::before paints without affecting layout at
-   all). top/left/bottom resolve against .cvpf-sidebar's PADDING
-   box (CSS spec's containing-block rule for position: absolute), so
-   the negative marginTop/marginLeft/marginBottom offsets land it exactly
-   at the page's true edges — the same page box .cv-profile-doc's own
-   padding is subtracted from. Continuation pages (no cvpf-sidebar-first
-   class) keep their existing, unchanged, margin-inset tint — this fix is
-   explicitly scoped to the first page only, matching the task that
-   requested it. */
-.cv-profile-doc .cvpf-sidebar-first::before {
+   (margin-inset) box. This ::before extends the SAME color into the
+   margin strips a plain .cvpf-sidebar background can't reach without
+   disturbing where .cvpf-main starts (a flex item's own margin would
+   shift its sibling; an absolutely positioned ::before paints without
+   affecting layout at all). top/left/bottom resolve against
+   .cvpf-sidebar's PADDING box (CSS spec's containing-block rule for
+   position: absolute), so the negative marginTop/marginLeft/marginBottom
+   offsets land it exactly at the page's true edges — the same page box
+   .cv-profile-doc's own padding is subtracted from. This geometry is
+   identical for page 1 and any later continuation page (same page
+   margins, same SIDEBAR_INSET, same sidebar width regardless of what
+   content happens to be inside it), so the selector below applies to
+   EVERY .cvpf-sidebar — not just .cvpf-sidebar-first (§25's original,
+   narrower scope). Fix (§44): a continuation page's sidebar used to keep
+   only the plain, margin-inset background — visible as an inset
+   rectangle with white space above/left/below it compared to page 1's
+   own edge-to-edge tint, the reported "continuation sidebar background
+   inconsistency" bug. Every page's .cvpf-sidebar already carries
+   z-index: 0 (its own stacking context, unconditionally — see above),
+   so this ::before's z-index: -1 resolves LOCALLY and paints behind
+   real content on every page, matching PDFKit's own equivalent fix
+   (profile-pdf-renderer.ts's ensureContinuationPage). */
+.cv-profile-doc .cvpf-sidebar::before {
   content: '';
   position: absolute;
   /* z-index: -1, scoped to .cvpf-sidebar's own stacking context (see its
@@ -1043,7 +1182,7 @@ export function buildProfileCss(template: TemplateDefinition): string {
      bottom (22pt/20pt) are untouched — they govern the photo/curve
      geometry (capFlatHeight, PHOTO_TEXT_CLEARANCE/PHOTO_BOTTOM_GAP), which
      this rebalance deliberately leaves alone. */
-  padding: 22pt 12pt 20pt;
+  padding: 22pt ${PROFILE_CAP_PADDING_X}pt 20pt;
   text-align: center;
   border-bottom-left-radius: 50% 18pt;
   border-bottom-right-radius: 50% 18pt;
@@ -1095,14 +1234,14 @@ export function buildProfileCss(template: TemplateDefinition): string {
   padding-bottom: ${capPaddingBottomWithPhoto}pt;
 }
 .cv-profile-doc .cvpf-cap h1 {
-  margin: 0;
+  margin: 0 -${capNameWrapExtraPt}pt;
   font-weight: 700;
   color: ${capText};
   line-height: 1.15;
   word-break: break-word;
 }
 .cv-profile-doc .cvpf-job-title {
-  margin: 5pt 0 0;
+  margin: 5pt -${capNameWrapExtraPt}pt 0;
   font-size: ${t.jobTitleSize}pt;
   font-weight: 400;
   color: ${capMuted};
@@ -1420,15 +1559,40 @@ export function buildProfileCss(template: TemplateDefinition): string {
   color: ${c.muted};
   font-size: ${t.metaSize}pt;
 }
-@media (max-width: 700px) {
-  .cv-profile-doc {
-    flex-direction: column;
-  }
-  .cv-profile-doc .cvpf-sidebar {
-    max-width: 100%;
-    flex-basis: auto;
-  }
-}
+/* Fix (RABBIT_NOTEBOOK.md §44 — preview/PDF parity investigation):
+   REMOVED a leftover "@media (max-width: 700px) { .cv-profile-doc {
+   flex-direction: column } .cvpf-sidebar { max-width: 100%; flex-basis:
+   auto } }" rule here. It predated ProfileA4Preview.tsx's FIXED-WIDTH +
+   transform: scale() rewrite (see that file's own top-of-file doc
+   comment) — from when .cv-profile-doc sized itself to a percentage of
+   whatever (possibly narrow) box it was given, so reflowing to a single
+   stacked column below 700 CSS px was a reasonable responsive fallback
+   for that OLD architecture. CSS media queries evaluate against the
+   real browser VIEWPORT width — not any individual element's own
+   explicit pixel width — so this rule kept firing even after the
+   rewrite, and it fired for BOTH the visible page (whose whole point is
+   to stay a fixed 595.28pt/A4-proportioned document at every viewport,
+   scaled visually via transform: scale(), never reflowed) AND the
+   hidden, explicitly-fixed-width (A4_WIDTH_PT points wide) measurement
+   pass ProfileA4Preview.tsx uses to compute real pagination — meaning
+   .cvpf-sidebar's actual width (and therefore every wrap/height
+   measurement inside it: the name in the cap, every skill/language/
+   quality row) silently changed whenever the ACTUAL BROWSER WINDOW
+   happened to be ≤700px, something neither renderer's architecture was
+   ever supposed to depend on. Confirmed via direct measurement
+   (RABBIT_NOTEBOOK.md §44): the exact same CV/content produced a
+   measured cap height of 206px at a 1600px-wide window vs 153px at a
+   700px-wide window, and a Qualities list that paginated correctly at
+   one width but silently overflowed page 1 (clipped by the page box's
+   own overflow: hidden) at another — reproducing both the reported
+   Qualities-clipping bug and part of the preview/PDF name-wrapping
+   divergence. No live consumer of this stylesheet currently wants
+   viewport-responsive reflow (ProfileCvDocument, the only other
+   consumer, isn't rendered anywhere in this codebase today) — removing
+   this rule makes "browser viewport size scales the A4 preview rather
+   than changing the document's layout" (this task's own explicit
+   requirement) actually true, matching the fixed-width architecture's
+   already-stated intent. */
 `;
 }
 

@@ -60,9 +60,14 @@ describe('Profile sidebar width/padding rebalance (RABBIT_NOTEBOOK.md regression
     expect(match![1]).toMatch(/padding:\s*18pt 12pt 20pt 0pt\s*;/);
   });
 
-  it('re-anchors the sidebar-first and cap bleed pseudo-elements to the new SIDEBAR_INSET (-22pt), not the old -marginLeft (-40pt), so they still reach the true page edge after the box shift', () => {
+  it('re-anchors the sidebar and cap bleed pseudo-elements to the new SIDEBAR_INSET (-22pt), not the old -marginLeft (-40pt), so they still reach the true page edge after the box shift', () => {
     const css = buildProfileCss(PROFILE_TEMPLATE);
-    const sidebarBleed = css.match(/\.cv-profile-doc \.cvpf-sidebar-first::before \{([^}]*)\}/);
+    // Fix (RABBIT_NOTEBOOK.md §44): the sidebar bleed selector widened from
+    // `.cvpf-sidebar-first::before` to plain `.cvpf-sidebar::before` — every
+    // page's sidebar now bleeds full-height/edge-to-edge, not just page 1's
+    // (the "continuation sidebar background inconsistency" fix) — same
+    // geometry, broader scope.
+    const sidebarBleed = css.match(/\.cv-profile-doc \.cvpf-sidebar::before \{([^}]*)\}/);
     const capBleed = css.match(/\.cv-profile-doc \.cvpf-cap::before \{([^}]*)\}/);
     expect(sidebarBleed).not.toBeNull();
     expect(capBleed).not.toBeNull();
@@ -75,7 +80,7 @@ describe('Profile sidebar width/padding rebalance (RABBIT_NOTEBOOK.md regression
 
   it('shrinks the sidebar bleed width by the same 18pt the content moved left by (184.084pt, was 202.084pt)', () => {
     const css = buildProfileCss(PROFILE_TEMPLATE);
-    const match = css.match(/\.cv-profile-doc \.cvpf-sidebar-first::before \{([^}]*)\}/);
+    const match = css.match(/\.cv-profile-doc \.cvpf-sidebar::before \{([^}]*)\}/);
     expect(match).not.toBeNull();
     expect(match![1]).toMatch(/width:\s*184\.084pt\s*;/);
   });

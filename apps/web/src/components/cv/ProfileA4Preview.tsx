@@ -4,6 +4,8 @@ import { Fragment, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ProfileCap,
   ProfileContinuationHeader,
+  resolveProfileNameFontSize,
+  profileNameWrapWidthPt,
   SectionHeading,
   SkillItem,
   LanguageItem,
@@ -399,6 +401,7 @@ export function ProfileA4Preview({
     () => withSectionHeadingFlags(mainBlocks),
     [mainBlocks],
   );
+  const candidateName = content.personalDetails.fullName || 'CV';
 
   const pageWidthRef = useRef<HTMLDivElement>(null);
   const capMeasureRef = useRef<HTMLDivElement>(null);
@@ -412,6 +415,7 @@ export function ProfileA4Preview({
   const [scale, setScale] = useState(1);
   const [pages, setPages] = useState<{ sidebar: PageColumn[]; main: PageColumn[] } | null>(null);
   const [pdSizes, setPdSizes] = useState<Map<string, number>>(new Map());
+  const [nameFontSize, setNameFontSize] = useState<number>(PROFILE_TEMPLATE.typography.nameSize);
 
   useLayoutEffect(() => {
     const pageEl = pageWidthRef.current;
@@ -434,6 +438,46 @@ export function ProfileA4Preview({
     const contEl = continuationHeaderRef.current;
     const headingEl = headingMeasureRef.current;
     if (!capEl || !headingEl || !contEl || !sidebarListEl || !mainListEl) return;
+
+    // Fix (RABBIT_NOTEBOOK.md §44 — preview/PDF parity investigation):
+    // "Alex Johnson" (and names like it) previously wrapped to 2 lines in
+    // this preview but stayed on 1 line, with a visibly shorter cap, in
+    // the real PDF — even though both renderers run the IDENTICAL
+    // "shrink the name only if it would otherwise exceed 3 lines"
+    // algorithm (resolveProfileNameFontSize / profile-pdf-renderer.ts's
+    // own profileNameFontSize). Confirmed via direct measurement: this
+    // was never a timing issue — it's that the two renderers wrap the
+    // NAME against two DIFFERENT widths. PDFKit's drawCap wraps against
+    // its bled `capWidth` (`sidebarBleedRight`, reaching the true page
+    // edge) minus CAP_PADDING_X — but `.cvpf-cap`'s own rendered CSS box
+    // (what `useProfileNameFontSize` would normally measure via
+    // `el.clientWidth`) is deliberately narrower than that bleed, by
+    // design (see `.cvpf-sidebar::before`'s own doc comment: widening
+    // `.cvpf-cap`'s actual box previously reopened a sidebar-clipping
+    // regression). `profileNameWrapWidthPt` (profile-document.tsx) gives
+    // the exact PDFKit-equivalent width WITHOUT touching `.cvpf-cap`'s
+    // real box at all — used here instead of the rendered element's own
+    // (narrower) `clientWidth`, so the browser now wraps the name exactly
+    // where the PDF does.
+    //
+    // Resolved HERE, synchronously (not inside `ProfileCap`'s own
+    // `useProfileNameFontSize` hook, whose child-layout-effect `setState`
+    // this ancestor effect can never observe in the same commit anyway),
+    // and applied via a plain DOM mutation BEFORE `capEl.offsetHeight` is
+    // read below, so `capH` always reflects the FINAL, correct size with
+    // no extra render and no effect-ordering dependency. The same
+    // resolved value is then stored in state and passed down as an
+    // explicit `nameFontSize` prop to the VISIBLE page's own `ProfileCap`
+    // (below), so the actual rendered cap can never drift from what
+    // pagination assumed — the same "compute once during measurement,
+    // apply everywhere" pattern already used here for
+    // `pdSizes`/`computeContactRowFontSizes`.
+    const capNameEl = capEl.querySelector('h1');
+    const nameWrapWidthPx = profileNameWrapWidthPt(template) * PT_TO_PX;
+    const resolvedNameFontSize = resolveProfileNameFontSize(candidateName, nameWrapWidthPx);
+    if (capNameEl instanceof HTMLElement) {
+      capNameEl.style.fontSize = `${resolvedNameFontSize}pt`;
+    }
 
     const heights = new Map<string, number>();
     // Fix: this used to read each sidebar block's bare `offsetHeight` off
@@ -541,6 +585,7 @@ export function ProfileA4Preview({
       pageContentH,
     );
 
+    setNameFontSize(resolvedNameFontSize);
     setPages({ sidebar: sidebarPages, main: mainPages });
   }, [
     content,
@@ -551,11 +596,11 @@ export function ProfileA4Preview({
     mainBlocks,
     sidebarItemsWithHeadingFlags,
     mainItemsWithHeadingFlags,
+    candidateName,
   ]);
 
   const totalPages = pages ? Math.max(pages.sidebar.length, pages.main.length, 1) : 1;
   const sidebarLastPageIndex = pages ? pages.sidebar.length - 1 : 0;
-  const candidateName = content.personalDetails.fullName || 'CV';
 
   return (
     <div ref={pageWidthRef} className="mx-auto w-full" style={{ maxWidth: '210mm' }}>
@@ -611,7 +656,11 @@ export function ProfileA4Preview({
               actually renders). */}
             <div className="cvpf-sidebar cvpf-sidebar-first">
               <div ref={capMeasureRef}>
-                <ProfileCap pd={content.personalDetails} photoUrl={photoUrl} />
+                <ProfileCap
+                  pd={content.personalDetails}
+                  photoUrl={photoUrl}
+                  nameFontSize={nameFontSize}
+                />
               </div>
               {pdRows.length > 0 && (
                 <div
@@ -759,7 +808,11 @@ export function ProfileA4Preview({
                       {sidebarStillActive && (
                         <>
                           {isFirstPage && (
-                            <ProfileCap pd={content.personalDetails} photoUrl={photoUrl} />
+                            <ProfileCap
+                              pd={content.personalDetails}
+                              photoUrl={photoUrl}
+                              nameFontSize={nameFontSize}
+                            />
                           )}
                           <div
                             className={`cvpf-sidebar-body ${

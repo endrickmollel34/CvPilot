@@ -54,8 +54,12 @@ describe('buildProfileCss sidebar/cap stacking order (RABBIT_NOTEBOOK.md sidebar
     expect(ruleBodyFor('.cv-profile-doc .cvpf-sidebar ')).toMatch(/z-index:\s*0\s*;/);
   });
 
-  it('paints .cvpf-sidebar-first::before BEHIND real content (z-index: -1)', () => {
-    expect(ruleBodyFor('.cv-profile-doc .cvpf-sidebar-first::before')).toMatch(/z-index:\s*-1\s*;/);
+  it('paints .cvpf-sidebar::before BEHIND real content (z-index: -1)', () => {
+    // Fix (RABBIT_NOTEBOOK.md §44): widened from .cvpf-sidebar-first::before
+    // to plain .cvpf-sidebar::before — every page's sidebar bleed now
+    // paints behind real content, not just page 1's (see that fix's own
+    // doc comment in profile-document.tsx).
+    expect(ruleBodyFor('.cv-profile-doc .cvpf-sidebar::before')).toMatch(/z-index:\s*-1\s*;/);
   });
 
   it('makes .cvpf-cap its own stacking context (z-index: 0)', () => {

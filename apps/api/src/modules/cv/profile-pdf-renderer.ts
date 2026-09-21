@@ -222,12 +222,25 @@ export function renderProfileTemplate(
     }
     let top = pageContentTop.get(nextIndex);
     if (top === undefined) {
-      top = drawContinuationHeader(doc, candidateName, lm, pageW, t);
+      // Fix (RABBIT_NOTEBOOK.md §44 — continuation sidebar background
+      // consistency): this used to paint an INSET rect (x=sidebarX,
+      // y=top..bottom margin), leaving visible white space above, to the
+      // left, and below it compared to page 1's own full-bleed rect
+      // (x=0, y=0, the full physical page). Now identical to page 1's
+      // own rect — same x=0 start, same width (sidebarBleedRight), same
+      // full page height — so every page's sidebar column reads as the
+      // exact same colored strip, edge to edge. Painted BEFORE the
+      // continuation header (reversed from before) so the header text
+      // lands on TOP of the tint, never underneath it — the sidebar's
+      // own CONTENT INSET (sidebarX, unaffected by this) still governs
+      // where actual sidebar text starts, only the background geometry
+      // changed here.
       doc
-        .rect(sidebarX, top, sidebarBleedRight - sidebarX, doc.page.height - t.margins.bottom - top)
+        .rect(0, 0, sidebarBleedRight, doc.page.height)
         .fillColor(t.sidebarBackground ?? '#F4F5F6')
         .fill();
       doc.fillColor(t.colors.text);
+      top = drawContinuationHeader(doc, candidateName, lm, pageW, t);
       pageContentTop.set(nextIndex, top);
     }
     return top;

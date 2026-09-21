@@ -28,11 +28,44 @@ function WorkExperienceEntry({
   }
 
   function addBullet() {
+    const newIndex = entry.bullets.length;
     onChange({ ...entry, bullets: [...entry.bullets, ''] });
+    requestAnimationFrame(() => {
+      const next = document.getElementById(`we-${entry.id}-bullet-${newIndex}`);
+      next?.focus();
+    });
+  }
+
+  // Fix (RABBIT_NOTEBOOK.md §44 — bullet editing): Enter inside a bullet's
+  // textarea inserts a new bullet right after this one (focused
+  // immediately), the same "one Enter, one new bullet" behaviour a list
+  // editor is expected to have, and consistent with the existing
+  // "+ Add bullet" control's own effect — rather than either doing nothing
+  // or inserting a literal newline INTO the bullet's stored text (bullets
+  // are rendered as a single wrappable line by both CV renderers, which
+  // don't expect embedded "\n" characters).
+  function insertBulletAfter(i: number) {
+    const bullets = [...entry.bullets];
+    bullets.splice(i + 1, 0, '');
+    onChange({ ...entry, bullets });
+    requestAnimationFrame(() => {
+      const next = document.getElementById(`we-${entry.id}-bullet-${i + 1}`);
+      next?.focus();
+    });
   }
 
   function removeBullet(i: number) {
     onChange({ ...entry, bullets: entry.bullets.filter((_, idx) => idx !== i) });
+  }
+
+  // Auto-grows a bullet's textarea to fit its full (possibly multi-line,
+  // wrapped) content — no fixed row count, no internal scrollbar, no
+  // truncation. Runs on mount (so an existing long bullet already renders
+  // at its full height, not just after the next edit) and on every input.
+  function autoGrowBulletTextarea(el: HTMLTextAreaElement | null) {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
   }
 
   const iconBtn =
@@ -156,19 +189,30 @@ function WorkExperienceEntry({
         <p className="mb-1 text-xs font-medium text-gray-700">Bullet points</p>
         {entry.bullets.map((b, i) => (
           <div key={i} className="mb-1.5 flex gap-2">
-            <input
-              type="text"
+            <textarea
+              id={`we-${entry.id}-bullet-${i}`}
+              ref={autoGrowBulletTextarea}
               value={b}
-              onChange={(e) => updateBullet(i, e.target.value)}
+              onChange={(e) => {
+                updateBullet(i, e.target.value);
+                autoGrowBulletTextarea(e.target);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  insertBulletAfter(i);
+                }
+              }}
               placeholder="Describe an achievement or responsibility…"
               aria-label={`Bullet point ${i + 1}`}
-              className="flex-1 rounded border border-gray-300 px-3 py-1 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              rows={1}
+              className="flex-1 resize-none overflow-hidden rounded border border-gray-300 px-3 py-1 text-sm leading-normal focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <button
               type="button"
               onClick={() => removeBullet(i)}
               aria-label={`Remove bullet point ${i + 1}`}
-              className="text-xs text-gray-400 hover:text-red-500 focus:outline-none"
+              className="self-start text-xs text-gray-400 hover:text-red-500 focus:outline-none"
             >
               ✕
             </button>

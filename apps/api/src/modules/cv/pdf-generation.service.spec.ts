@@ -2563,18 +2563,19 @@ describe('PdfGenerationService — Profile template', () => {
     expect(page1Tint.x).toBe(0);
     expect(page1Tint.y).toBe(0);
 
-    // Page 2 (continuation): inset from the true edge (SIDEBAR_INSET),
-    // not bled — and, critically, the SAME width as page 1's tint minus
-    // that inset, i.e. the identical sidebar column, not some other
-    // shrunk/expanded rectangle. Derived from page 1's own measured width
-    // rather than a hardcoded constant, so this stays correct if
-    // SIDEBAR_INSET or the sidebar ratio is ever retuned.
-    expect(page2Tint.x).toBeGreaterThan(0);
-    expect(page2Tint.width).toBeCloseTo(page1Tint.width - page2Tint.x, 5);
-    // Starts below the continuation header (not at the true page top) and
-    // extends down toward the bottom margin — never zero/negative height.
-    expect(page2Tint.y).toBeGreaterThan(0);
-    expect(page2Tint.height).toBeGreaterThan(0);
+    // Page 2 (continuation): fix (RABBIT_NOTEBOOK.md §44 — continuation
+    // sidebar background consistency) — IDENTICAL geometry to page 1's own
+    // tint, not merely an inset rect starting below the header. Before
+    // this fix, a continuation page's tint was inset (x=SIDEBAR_INSET,
+    // y=below the header, height=short of the top margin), leaving visible
+    // white space above/left/below it compared to page 1's edge-to-edge
+    // fill — the reported "inset rectangle" bug. Derived from page 1's own
+    // measured rect rather than hardcoded constants, so this stays correct
+    // if SIDEBAR_INSET/the sidebar ratio/page margins are ever retuned.
+    expect(page2Tint.x).toBe(page1Tint.x);
+    expect(page2Tint.y).toBe(page1Tint.y);
+    expect(page2Tint.width).toBe(page1Tint.width);
+    expect(page2Tint.height).toBe(page1Tint.height);
 
     // Paint-order safety: the tint must never be the LAST thing drawn on
     // top of already-placed content. Confirmed structurally by re-parsing
