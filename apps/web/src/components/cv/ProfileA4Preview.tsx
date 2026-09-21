@@ -416,6 +416,13 @@ export function ProfileA4Preview({
   const [pages, setPages] = useState<{ sidebar: PageColumn[]; main: PageColumn[] } | null>(null);
   const [pdSizes, setPdSizes] = useState<Map<string, number>>(new Map());
   const [nameFontSize, setNameFontSize] = useState<number>(PROFILE_TEMPLATE.typography.nameSize);
+  // Fix (RABBIT_NOTEBOOK.md §45): the REAL measured continuation-header
+  // height, stored so the visible page below can tell .cvpf-sidebar's
+  // bled ::before exactly how much further to extend upward on any page
+  // that actually renders a continuation header — see that CSS rule's
+  // own doc comment (profile-document.tsx) for why a fixed `-marginTop`
+  // alone under-reaches the true page top on those pages.
+  const [continuationHeaderHeight, setContinuationHeaderHeight] = useState(0);
 
   useLayoutEffect(() => {
     const pageEl = pageWidthRef.current;
@@ -586,6 +593,7 @@ export function ProfileA4Preview({
     );
 
     setNameFontSize(resolvedNameFontSize);
+    setContinuationHeaderHeight(continuationHeaderH);
     setPages({ sidebar: sidebarPages, main: mainPages });
   }, [
     content,
@@ -728,6 +736,15 @@ export function ProfileA4Preview({
           const mainPage = pages?.main[pageIndex];
           const sidebarStillActive = pageIndex <= sidebarLastPageIndex;
           const isFirstPage = pageIndex === 0;
+          // Fix (RABBIT_NOTEBOOK.md §45): the exact same condition the
+          // continuation header render below uses, hoisted so
+          // .cvpf-sidebar's bled ::before (via --cvpf-cont-header-h) can
+          // tell whether THIS page actually has one, and by exactly how
+          // much real, measured height to extend its own top offset —
+          // never approximated, never out of sync with what actually
+          // renders.
+          const hasContinuationHeader =
+            !isFirstPage && (sidebarStillActive || (mainPage && mainPage.items.length > 0));
           const scaledHeight = A4_HEIGHT_PX * scale;
 
           return (
@@ -765,10 +782,7 @@ export function ProfileA4Preview({
                       a separate one inside main) that showed the name
                       TWICE on any continuation page where both columns
                       still had content. */}
-                  {!isFirstPage &&
-                    (sidebarStillActive || (mainPage && mainPage.items.length > 0)) && (
-                      <ProfileContinuationHeader name={candidateName} />
-                    )}
+                  {hasContinuationHeader && <ProfileContinuationHeader name={candidateName} />}
                   <div className="cvpf-columns">
                     {/* Fix (RABBIT_NOTEBOOK.md, References/continuation
                         pagination): this column now ALWAYS renders — even
@@ -804,7 +818,16 @@ export function ProfileA4Preview({
                         always-tinted sidebar. Only the CONTENT (cap/photo/
                         Personal Details/section items) stays gated on
                         `sidebarStillActive`, so nothing is ever repeated. */}
-                    <div className={`cvpf-sidebar ${isFirstPage ? 'cvpf-sidebar-first' : ''}`}>
+                    <div
+                      className={`cvpf-sidebar ${isFirstPage ? 'cvpf-sidebar-first' : ''}`}
+                      style={
+                        {
+                          '--cvpf-cont-header-h': hasContinuationHeader
+                            ? `${continuationHeaderHeight}px`
+                            : '0px',
+                        } as React.CSSProperties
+                      }
+                    >
                       {sidebarStillActive && (
                         <>
                           {isFirstPage && (

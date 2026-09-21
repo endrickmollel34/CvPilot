@@ -906,6 +906,15 @@ export function profileSidebarBleedWidthPt(template: TemplateDefinition): number
   return PROFILE_SIDEBAR_INSET + sidebarColumnWidthPt + template.spacing.sectionGap / 2;
 }
 
+// Measured directly against the real embedded font (LiberationSans-Regular
+// via PDFKit's own doc.currentLineHeight(), a standalone Node script — see
+// RABBIT_NOTEBOOK.md §45): this font's natural (no extra gap) line height
+// is 1.1171875x its font size, consistently across sizes. Used below to
+// compute a bullet line-height that matches profile-pdf-renderer.ts's own
+// renderBullets exactly, rather than inheriting .cv-profile-doc's generic
+// (and, for dense wrapped body text, far too generous) line-height: 1.5.
+const LIBERATION_SANS_LINE_HEIGHT_RATIO = 1.1171875;
+
 /** Plain CSS built from PROFILE_TEMPLATE's tokens — same pattern as every
  *  other template. Scoped under `.cv-profile-doc`. The curved cap bottom
  *  uses the standard CSS "wave header" trick (symmetric 50%-width bottom
@@ -913,6 +922,24 @@ export function profileSidebarBleedWidthPt(template: TemplateDefinition): number
  *  doc comment for the PDFKit-side equivalent (a quadratic Bézier curve). */
 export function buildProfileCss(template: TemplateDefinition): string {
   const { typography: t, colors: c, spacing: s } = template;
+  // Fix (RABBIT_NOTEBOOK.md §45 — preview/PDF pagination parity): the
+  // ACTUAL cause of Education landing on page 2 in the browser but page 1
+  // in the PDF for a bullet-heavy CV. .cvpf-bullets li had no line-height
+  // of its own, so it inherited .cv-profile-doc's generic `line-height:
+  // 1.5` — while profile-pdf-renderer.ts's renderBullets draws each
+  // wrapped bullet line at `doc.currentLineHeight() + (t.spacing.lineGap
+  // - 1)`, i.e. LIBERATION_SANS_LINE_HEIGHT_RATIO (~1.117x) plus a SMALL
+  // explicit gap — nowhere near 1.5x. Confirmed via direct measurement
+  // (RABBIT_NOTEBOOK.md §45): the SAME repro CV's three Employment
+  // entries measured 113.68pt/108.67pt/227.27pt in PDFKit but
+  // 129.75pt/138.75pt/268.5pt in the browser — a gap that grows with
+  // wrapped-line count (worst for the entry with the longest bullets),
+  // pushing Education past the page-1 boundary in the browser alone. This
+  // computes the EXACT matching pt value for THIS template's own
+  // (possibly density-adjusted) bodySize/lineGap, instead of a guessed
+  // unitless ratio — an unrelated font-size change elsewhere can never
+  // silently drift this back out of sync.
+  const bulletLineHeightPt = t.bodySize * LIBERATION_SANS_LINE_HEIGHT_RATIO + (s.lineGap - 1);
   const sidebarPct = Math.round((template.sidebarWidthRatio ?? 0.3) * 100);
   const capBg = template.colors.headerBackground ?? c.accent;
   const capText = template.colors.headerText ?? '#FFFFFF';
@@ -1136,7 +1163,31 @@ export function buildProfileCss(template: TemplateDefinition): string {
    z-index: 0 (its own stacking context, unconditionally — see above),
    so this ::before's z-index: -1 resolves LOCALLY and paints behind
    real content on every page, matching PDFKit's own equivalent fix
-   (profile-pdf-renderer.ts's ensureContinuationPage). */
+   (profile-pdf-renderer.ts's ensureContinuationPage).
+   Fix (RABBIT_NOTEBOOK.md §45 — follow-up): the claim above ("identical
+   geometry for page 1 and any continuation page") was WRONG for the top
+   offset specifically. A plain -marginTop correctly cancels
+   .cv-profile-doc's own top padding ONLY when .cvpf-sidebar is
+   .cv-profile-doc's very FIRST flex child (true on page 1, which has no
+   header before it) — on a continuation page, ProfileContinuationHeader
+   (ProfileA4Preview.tsx) is an EARLIER flex-column sibling ABOVE
+   .cvpf-columns, pushing .cvpf-sidebar's own top down by the header's
+   real rendered height — so a fixed -marginTop under-reaches the true
+   page top by exactly that amount, leaving the reported white strip.
+   The --cvpf-cont-header-h custom property (set inline, per page, by
+   ProfileA4Preview.tsx from its own REAL measured continuationHeaderH —
+   0px on page 1 / any page with no header) makes this exact on every
+   page without guessing a constant.
+   Separately: this rect is PART OF .cvpf-columns's box in the outer
+   .cv-profile-doc stacking order (.cvpf-sidebar's own z-index:0 only
+   reorders its OWN children, not its standing relative to ANCESTOR
+   siblings) — and .cvpf-columns is a LATER DOM sibling than the
+   continuation header, so even before this fix, whenever their boxes
+   geometrically overlapped, this bleed painted OVER the header's text,
+   not under it — confirmed by direct inspection (a real screenshot
+   showed the header fully invisible, not merely the tint gap alone).
+   See .cvpf-continuation-header's own z-index fix below for the other
+   half of this. */
 .cv-profile-doc .cvpf-sidebar::before {
   content: '';
   position: absolute;
@@ -1145,7 +1196,7 @@ export function buildProfileCss(template: TemplateDefinition): string {
      sidebar's real content instead of in front of it. See the sidebar-
      content-invisible bug fix above for the full explanation. */
   z-index: -1;
-  top: -${marginTop}pt;
+  top: calc(-${marginTop}pt - var(--cvpf-cont-header-h, 0px));
   /* Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): was
      -marginLeft, which assumed .cvpf-sidebar's own padding box started
      exactly at marginLeft from the true page edge. Now that .cvpf-sidebar
@@ -1470,6 +1521,20 @@ export function buildProfileCss(template: TemplateDefinition): string {
    why this needs flex-direction: column rather than flex-wrap. */
 .cv-profile-doc .cvpf-continuation-header {
   margin-bottom: 16pt;
+  /* Fix (RABBIT_NOTEBOOK.md §45): .cvpf-sidebar's bled ::before (below)
+     is part of .cvpf-columns's box in .cv-profile-doc's own stacking
+     order; .cvpf-columns is a LATER DOM sibling than this header, so
+     whenever their boxes overlap (always, before the top-offset fix
+     above; still possible at the boundary even after it, e.g. a header
+     taller than one line), plain in-flow siblings paint in DOM order —
+     the bleed would paint OVER this header's text, not under it. A
+     small explicit stacking elevation guarantees this header always
+     wins, regardless of exact overlap geometry — confirmed as the
+     actual (not merely hypothesised) cause by direct inspection: a real
+     screenshot showed the continuation header fully invisible, not
+     just a tint gap above it. */
+  position: relative;
+  z-index: 1;
 }
 .cv-profile-doc .cvpf-continuation-header span {
   display: block;
@@ -1534,6 +1599,11 @@ export function buildProfileCss(template: TemplateDefinition): string {
   position: relative;
   margin-top: ${s.bulletGap}pt;
   font-size: ${t.bodySize}pt;
+  /* Fix (RABBIT_NOTEBOOK.md §45): was unset (inheriting .cv-profile-doc's
+     generic line-height: 1.5) — see bulletLineHeightPt's own doc comment
+     above for why that silently made wrapped bullets taller here than in
+     the PDF, enough to shift Education onto a whole extra page. */
+  line-height: ${bulletLineHeightPt}pt;
   color: ${c.text};
   overflow-wrap: break-word;
 }
