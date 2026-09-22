@@ -533,7 +533,22 @@ export function ProfileA4Preview({
     const marginBottomPx = template.margins.bottom * PT_TO_PX;
     const pageContentH = A4_HEIGHT_PX - marginTopPx - marginBottomPx;
     const headingH = headingEl.offsetHeight;
-    const continuationHeaderH = contEl.offsetHeight;
+    // Fix (RABBIT_NOTEBOOK.md §46): `.cvpf-continuation-header` carries its
+    // own `margin-bottom: 16pt` (the gap before .cvpf-columns resumes,
+    // matching profile-pdf-renderer.ts's drawContinuationHeader, which
+    // returns `ruleY + 16` — i.e. its OWN real "how far the header pushes
+    // everything after it down" already bakes in that same 16pt gap).
+    // `offsetHeight` alone never includes margin, so this previously
+    // undercounted the true push-down by exactly that 16pt — both for
+    // `packColumn`'s continuation-page budget below (letting it pack
+    // slightly more onto a continuation page than the real, header-pushed-
+    // down space allows) AND for `--cvpf-cont-header-h` (below), leaving a
+    // 16pt white strip above the continuation sidebar tint (it under-
+    // reached the true page top by the same missing 16pt). Same
+    // read-the-real-computed-margin technique already used for each
+    // sidebar `<li>`'s own `marginTopPx` above.
+    const continuationHeaderMarginBottomPx = parseFloat(getComputedStyle(contEl).marginBottom) || 0;
+    const continuationHeaderH = contEl.offsetHeight + continuationHeaderMarginBottomPx;
     const capH = capEl.offsetHeight;
     const pdH = pdRows.length ? (pdEl?.offsetHeight ?? 0) : 0;
 
@@ -575,11 +590,27 @@ export function ProfileA4Preview({
       );
     }
 
+    // Fix (RABBIT_NOTEBOOK.md §46): profile-pdf-renderer.ts's drawCap draws
+    // the cap from the page's true absolute origin (y=0), so PDFKit's own
+    // sidebar-content budget on page 1 is effectively pageContentH +
+    // marginTop — the cap consumes room INSIDE the top-margin strip, not
+    // out of the same marginTop-to-marginBottom budget the main column
+    // uses. `firstPageStartY` (page 1's own "already consumed" offset,
+    // measured against the shared `pageContentH` below) previously counted
+    // the FULL `capH + pdH` against that budget with no such allowance,
+    // undercounting page 1's real sidebar capacity by a full marginTop —
+    // confirmed empirically (RABBIT_NOTEBOOK.md §46): the real PDF fits
+    // Qualities 1-10 on page 1's sidebar for the exact repro fixture, the
+    // browser previously fit only 1-3 before this fix. Subtracting
+    // marginTopPx here (never below 0) restores that same "for free" room,
+    // matching PDFKit's real page-1 sidebar capacity — capH/pdH themselves,
+    // and every other page's/column's own budget, are untouched.
+    const firstPageSidebarStartY = Math.max(0, capH + pdH - marginTopPx);
     const sidebarPages = packColumn(
       sidebarItemsWithHeadingFlags,
       heights,
       headingH,
-      capH + pdH,
+      firstPageSidebarStartY,
       continuationHeaderH,
       pageContentH,
     );

@@ -1211,6 +1211,49 @@ export function buildProfileCss(template: TemplateDefinition): string {
 }
 .cv-profile-doc .cvpf-cap {
   position: relative;
+  /* Fix (RABBIT_NOTEBOOK.md §46 — "excess blue space above the name", and
+     the page-1 sidebar under-filling that a first, paint-only (transform)
+     version of this fix left uncorrected): profile-pdf-renderer.ts's
+     drawCap draws the WHOLE cap — background AND name/job-title/photo —
+     from the page's true absolute origin (moveTo(0, 0); doc.y =
+     CAP_PADDING_TOP), ignoring the page's top margin entirely, by design.
+     .cvpf-cap's own normal-flow box, by contrast, only ever bled its
+     BACKGROUND that far (via ::before, below) — the box itself (and
+     therefore the name/job-title/photo inside it, and everything that
+     follows in flow, i.e. .cvpf-sidebar-body) still started at
+     .cv-profile-doc's own padding-top (marginTop), same as .cvpf-main.
+     A REAL margin-top (not a paint-only transform — confirmed the wrong
+     tool via direct measurement, RABBIT_NOTEBOOK.md §46: a transform left
+     capH/offsetHeight, and therefore the page-1 sidebar pagination budget
+     below, computed against a page-1 sidebar capacity that was
+     marginTop pt SMALLER than the real PDF's, and once that budget was
+     separately corrected to match, the transform's now-double-counted
+     marginTop of "free" room was never physically real, silently clipping
+     the extra items the corrected budget assigned to page 1 against the
+     page box's own fixed-height overflow: hidden — invisible in a real
+     screenshot despite still being present in the DOM) genuinely moves
+     .cvpf-cap's own box, so .cvpf-sidebar-body (the very next sibling in
+     normal block flow) is pulled up by the same marginTop and lands at the
+     correct real absolute position too — matching PDFKit's contentTop0
+     without any separate compensation. capH/offsetHeight (an element's own
+     border-box height) is unaffected by its own margin, so this changes
+     WHERE the cap sits, never its measured height — every pagination
+     calculation that reads capH stays exactly as accurate as before.
+     .cvpf-photo-wrap and .cvpf-cap-with-photo's own padding-bottom are
+     positioned/sized relative to .cvpf-cap's PADDING box, which this
+     margin does not change the size of — only its position — so the photo
+     stays correctly anchored, just moved up together with the rest of the
+     cap, matching PDFKit's own equally-shifted photo position. Scoped to
+     ONE column's ONE child (not .cvpf-sidebar itself, and not applied to
+     any continuation page, which has no .cvpf-cap at all — see
+     ProfileContinuationHeader), so .cvpf-main's own top position (already
+     correct, matching PDFKit's mainContentTop0 = margins.top) is
+     completely untouched — the two columns are INTENTIONALLY misaligned
+     at the top by exactly marginTop, matching the real PDF's own
+     asymmetric look (confirmed by direct comparison: the PDF's "Profile"
+     heading in the main column visibly starts lower than the cap's own
+     top, not level with it). */
+  margin-top: -${marginTop}pt;
   /* Fix (RABBIT_NOTEBOOK.md, Profile-preview sidebar-content-invisible bug)
      — same reasoning as .cvpf-sidebar's z-index: 0 above: scopes
      .cvpf-cap::before's z-index: -1 to this element's own stacking
@@ -1268,7 +1311,17 @@ export function buildProfileCss(template: TemplateDefinition): string {
   position: absolute;
   /* z-index: -1 — see .cvpf-cap's own z-index: 0 above. */
   z-index: -1;
-  top: -${marginTop}pt;
+  /* Fix (RABBIT_NOTEBOOK.md §46): was -${marginTop}pt, compensating for
+     .cvpf-cap's own padding box starting marginTop down from the true page
+     top. Now that .cvpf-cap carries a real margin-top: -marginTop (above)
+     and its padding box already starts AT the true page top, this
+     absolutely-positioned bleed (which resolves against that same padding
+     box, per the CSS containing-block rule for position: absolute —
+     margin is outside that box, so .cvpf-cap's own margin does not shift
+     what "top: 0" means here) needs no further offset — a leftover
+     -marginTop here would double-compensate and push the bleed's top
+     ABOVE the true page edge. */
+  top: 0;
   /* Fix (RABBIT_NOTEBOOK.md, sidebar left-inset rebalance): was
      -marginLeft — same reasoning as .cvpf-sidebar-first::before's own
      left offset above: .cvpf-cap's padding box now starts at SIDEBAR_INSET
