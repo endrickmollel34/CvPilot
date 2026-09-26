@@ -25,7 +25,26 @@ import type { CvContent } from '@cvpilot/shared';
 // documented cleanup policy. This version bump plus the schema/prompt
 // changes below fix all four; see §47 for the full trace and the
 // before/after real-call evidence.
-const EXTRACTION_VERSION = 2;
+//
+// Fix (RABBIT_NOTEBOOK.md §48): bumped 2 -> 3. A real production import
+// after §47 shipped (`Alex_Johnson (39).pdf`) confirmed the §47 fixes hold,
+// but surfaced two narrower, real (not assumed) gaps in the SAME model-
+// reliability territory as the summary-omission finding above, both
+// present in the real captured model response used for §47's own test
+// fixture too (not a new bug §47 introduced): (1) an education entry's
+// `location` — schema-supported since §47, reliably extracted in this
+// service's own local test calls, but omitted for one real production
+// call — and (2) a reference's short relationship word ("Manager")
+// occasionally filed as `jobTitle` instead, inconsistent with how the
+// model itself correctly split the OTHER reference in the very same
+// response. Neither is a schema/mapping/rendering defect (confirmed by
+// reading profile-pdf-renderer.ts's renderEducationEntry, which already
+// renders `entry.location` correctly whenever present, and by the second
+// reference's own correct split in the same real response) — both are
+// prompt-reliability gaps, addressed with two added, general rules below
+// (no institution/employer names hardcoded, no location inferred from
+// outside knowledge — see §48 for the full trace).
+const EXTRACTION_VERSION = 3;
 const MAX_ATTEMPTS = 3;
 
 // Exported so prefill-extraction.service.spec.ts's sentinel test can assert
@@ -44,9 +63,14 @@ export const SYSTEM_PROMPT = [
   '- Extraction must be VERBATIM, not a rewrite. Copy the summary/profile paragraph and every bullet point exactly as written, character-for-character (aside from fixing an obviously broken line-wrap). Do NOT deduplicate, merge, reorder, shorten, paraphrase, summarise, or correct spelling/typos — including when a sentence, bullet, or the summary paragraph is repeated more than once in the source text. Preserve every repeated or near-duplicate occurrence as its own separate entry, in the order it appears.',
   '- Extract the professional summary/profile paragraph whenever the CV contains one (e.g. under a heading like "Profile", "Summary", or "About"), even if it is long or contains repeated sentences — repetition is never a reason to omit, shorten, or skip it.',
   '- If the CV states that references are "available upon request" (or equivalent) instead of listing named referees, set referencesAvailableUponRequest to true and leave references empty. Otherwise extract each individual reference actually listed, capturing every line shown for them: jobTitle (their job title) and company are usually on one line, often as "Job Title, Company"; relationship is their relationship to the candidate (e.g. "Manager", "Supervisor", "Colleague", "Lecturer") and is usually shown on its own separate line below that — do not confuse the two, and do not drop jobTitle/company just because a relationship label is also present.',
+  '- Apply that SAME reference layout convention consistently to every reference in the CV. If one reference clearly shows a short relationship word (e.g. "Manager") on its own line separate from a job-title/company line, treat every other reference\'s own standalone short line the same way — as relationship, never as jobTitle — even if that other reference\'s job-title/company line itself is ambiguous or hard to split. Never move a standalone relationship line into the jobTitle field.',
+  '- Extract the location for BOTH work experience AND education entries whenever the CV shows one (e.g. "Institution · City, Country" or "Institution, City, Country") — do not omit an education entry\'s location just because it is shown after a separator, the same way you would not omit a work entry\'s location shown the same way.',
 ].join('\n');
 
-const JSON_SCHEMA_HINT = `{
+// Exported for the same reason as SYSTEM_PROMPT above, and so a real,
+// local, one-off verification script can send the byte-for-byte real
+// prompt/schema without hand-duplicating it (see RABBIT_NOTEBOOK.md §48).
+export const JSON_SCHEMA_HINT = `{
   "personalDetails": { "fullName": "string", "email": "string", "phone"?: "string", "location"?: "string", "linkedIn"?: "string", "website"?: "string", "jobTitle"?: "string", "nationality"?: "string" },
   "summary"?: "string",
   "workExperience": [{ "company": "string", "title": "string", "location"?: "string", "startDate": "YYYY-MM", "endDate"?: "YYYY-MM", "current": false, "bullets": ["string"] }],

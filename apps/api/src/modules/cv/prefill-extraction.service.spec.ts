@@ -22,6 +22,13 @@ import { PrefillExtractionService, SYSTEM_PROMPT } from './prefill-extraction.se
  * actual reported source PDF's real pdf-parse output, before and after
  * this fix's prompt change; see §47 for that evidence. No production
  * verification is claimed from this file.
+ *
+ * §48 extends this with two narrower, real-production-confirmed gaps in
+ * the same territory: an education entry's `location` (schema-supported
+ * since §47, but omitted by one real production call) and a reference's
+ * `jobTitle`/`relationship` field attribution (one real call filed a
+ * relationship word as `jobTitle` for one reference while correctly
+ * splitting the other, in the same response) — see §48 for that evidence.
  */
 
 const mockCreate = jest.fn();
@@ -95,6 +102,34 @@ describe('PrefillExtractionService', () => {
     expect(result.content.sectionOrder).toContain('references');
   });
 
+  it("carries education entries' location through unchanged when the model returns it (§48)", async () => {
+    mockModelResponse({
+      personalDetails: { fullName: 'Alex Johnson', email: 'alex@example.com' },
+      workExperience: [],
+      education: [
+        {
+          institution: 'University of London',
+          degree: 'BSc Computer Science',
+          location: 'London, UK',
+        },
+        {
+          institution: 'Marwadi University',
+          degree: 'Diploma',
+          location: 'Gujarat - India',
+        },
+      ],
+      skills: [],
+      languages: [],
+      certifications: [],
+    });
+
+    const service = new PrefillExtractionService(mockConfig);
+    const result = await service.extract('irrelevant for this mock');
+
+    expect(result.content.education[0]?.location).toBe('London, UK');
+    expect(result.content.education[1]?.location).toBe('Gujarat - India');
+  });
+
   it('sets referencesAvailableUponRequest and leaves references empty when the model reports that case', async () => {
     mockModelResponse({
       personalDetails: { fullName: 'Alex Johnson', email: 'alex@example.com' },
@@ -145,5 +180,12 @@ describe('PrefillExtractionService', () => {
     expect(SYSTEM_PROMPT).toMatch(/VERBATIM/);
     expect(SYSTEM_PROMPT).toMatch(/do not.*deduplicate/i);
     expect(SYSTEM_PROMPT).toMatch(/repetition is never a reason to omit/i);
+  });
+
+  // Sentinel for §48's two fixes — same guard-the-instruction rationale as
+  // the test above.
+  it('still asks the model to extract education location and to apply the reference relationship/jobTitle split consistently', () => {
+    expect(SYSTEM_PROMPT).toMatch(/education entries whenever the CV shows one/i);
+    expect(SYSTEM_PROMPT).toMatch(/never as jobTitle/i);
   });
 });

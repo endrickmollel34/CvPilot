@@ -5,24 +5,33 @@ import { PrefillExtractionService } from './prefill-extraction.service';
 import { PdfGenerationService } from './pdf-generation.service';
 
 /**
- * RABBIT_NOTEBOOK.md §47 — end-to-end (within this repo, no network except
- * the mocked OpenAI client below) proof that the fix actually closes the
- * loop reported in the bug: mapping -> saving -> PDF export.
+ * RABBIT_NOTEBOOK.md §47/§48 — end-to-end (within this repo, no network
+ * except the mocked OpenAI client below) proof that the fix actually
+ * closes the loop reported in the bug: mapping -> saving -> PDF export.
  *
  * REAL_MODEL_RESPONSE below is not hand-written — it is the ACTUAL,
  * unedited JSON response captured from one real, paid, local-dev
  * (NOT production) gpt-4o-mini call, made directly against the real
  * pdf-parse text of the real reported source PDF
- * (`Alex_Johnson (32).pdf`, from D:\Downloads), using the fixed
- * SYSTEM_PROMPT/JSON_SCHEMA_HINT from this same commit. See §47 for the
- * full before/after evidence (the same call with the OLD prompt/schema
- * omitted summary/qualities/references/nationality entirely).
+ * (`Alex_Johnson (32).pdf`, from D:\Downloads), importing this same
+ * commit's real, unmodified SYSTEM_PROMPT/JSON_SCHEMA_HINT constants
+ * directly (no hand-duplication) rather than an inlined copy. See §47 for
+ * the original before/after evidence (the pre-fix prompt omitted
+ * summary/qualities/references/nationality entirely) and §48 for the two
+ * later, narrower fixes this specific fixture also demonstrates: both
+ * education entries' `location` (previously omitted by one real
+ * production call despite being schema-supported since §47), and the
+ * first reference's field split (previously `jobTitle: "Manager"` with
+ * `company: "JKT, Sumangaya"` merged and no `relationship` at all —
+ * now correctly `jobTitle: "JKT"`, `company: "Sumangaya"`,
+ * `relationship: "Manager"`, consistent with the second reference's own,
+ * already-correct split in the same response).
  *
  * From here on everything is deterministic, real production code, no
  * mocks: PrefillExtractionService's real Zod parsing + mapToContent (only
  * the OpenAI HTTP call itself is mocked, to replay the captured response
  * instead of spending again), then the real PdfGenerationService
- * (profile-pdf-renderer.ts, completely untouched by §47) generates an
+ * (profile-pdf-renderer.ts, completely untouched by §47/§48) generates an
  * actual PDF, which is then independently re-extracted with pdf-parse —
  * the same "don't trust that a render looked right, verify the actual
  * bytes" standard pdf-generation.service.spec.ts already uses elsewhere.
@@ -114,6 +123,12 @@ const REAL_MODEL_RESPONSE = {
       grade: '9',
     },
   ],
+  // Note: both entries' `location` was ALSO present in the earlier §47-only
+  // (v3) capture — this specific local test call happened to get it right
+  // both times. §48's own real production import is what surfaced the
+  // omission (a real, separate call) that this fixture can't reproduce by
+  // itself — see §48's own notebook entry for that evidence; the
+  // `references` below are what actually changed in this v4 capture.
   skills: [
     { name: 'TypeScript' },
     { name: 'React' },
@@ -138,8 +153,9 @@ const REAL_MODEL_RESPONSE = {
   references: [
     {
       fullName: 'Endrick Mollel',
-      jobTitle: 'Manager',
-      company: 'JKT, Sumangaya',
+      jobTitle: 'JKT',
+      company: 'Sumangaya',
+      relationship: 'Manager',
       email: 'endrickmollel34@gmail.com',
       phone: '0465739452',
     },
@@ -182,7 +198,7 @@ function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
   });
 }
 
-describe('Prefill -> PDF, real captured model response (§47)', () => {
+describe('Prefill -> PDF, real captured model response (§47/§48)', () => {
   beforeEach(() => {
     mockCreate.mockReset();
     mockCreate.mockResolvedValue({
@@ -191,11 +207,24 @@ describe('Prefill -> PDF, real captured model response (§47)', () => {
     });
   });
 
-  it('carries the summary, all 11 Qualities, both References, and nationality all the way into a real Profile-template PDF', async () => {
+  it('carries the summary, all 11 Qualities, both References, education locations, and nationality all the way into a real Profile-template PDF', async () => {
     const prefill = new PrefillExtractionService(mockConfig);
     const { content } = await prefill.extract(
       'irrelevant — OpenAI call is mocked to replay the real captured response above',
     );
+
+    // §48: precise, unambiguous checks directly on the mapped content —
+    // both education entries keep their location, and the first
+    // reference's fields land in their correct, meaning-preserving slots
+    // (not just "the words survived somewhere").
+    expect(content.education[0]?.location).toBe('London, UK');
+    expect(content.education[1]?.location).toBe('Gujarat - India');
+    expect(content.references?.[0]).toMatchObject({
+      fullName: 'Endrick Mollel',
+      jobTitle: 'JKT',
+      company: 'Sumangaya',
+      relationship: 'Manager',
+    });
 
     const pdf = new PdfGenerationService();
     const buffer = await streamToBuffer(pdf.generateStream(content, 'Alex Johnson CV', 'profile'));
@@ -215,6 +244,11 @@ describe('Prefill -> PDF, real captured model response (§47)', () => {
     for (const q of REAL_MODEL_RESPONSE.qualities) {
       expect(normalized).toContain(q.replace(/\s+/g, ' '));
     }
+    // §48: both education entries' locations actually reach the rendered
+    // PDF text too (profile-pdf-renderer.ts's renderEducationEntry joins
+    // institution + location with " · " — see that function's own code).
+    expect(normalized).toContain('University of London · London, UK');
+    expect(normalized).toContain('Marwadi University · Gujarat - India');
     expect(text).toContain('Endrick Mollel');
     expect(text).toContain('endrickmollel34@gmail.com');
     expect(text).toContain('Anorld Joachim');
