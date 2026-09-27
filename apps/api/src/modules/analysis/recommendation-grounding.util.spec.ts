@@ -91,6 +91,25 @@ describe('groundSuggestions()', () => {
     expect(suggestions[0]).toBe(original);
   });
 
+  // Fix (RABBIT_NOTEBOOK.md §49): confirmed against a real production
+  // analysis — a suggestion naming "HTML" was being rewritten into the
+  // generic "doesn't clearly appear on your CV" template even though the
+  // CV genuinely said "HTML5" (same normalize()-leaves-digits-attached
+  // boundary bug as ats-keyword.util.ts's own copy of this function,
+  // fixed identically here).
+  it('(§49) does not rewrite a MISSING_KEYWORD suggestion when the CV phrases the term with a trailing version number', () => {
+    const keywords: AtsKeyword[] = [{ keyword: 'HTML', found: false }];
+    const original = suggestion({
+      category: 'MISSING_KEYWORD',
+      text: 'Add HTML to your CV to match the job description.',
+    });
+    const cvWithVersionedTerm = 'Built responsive pages using HTML5, CSS3, and modern JavaScript.';
+    const { suggestions, stats } = groundSuggestions([original], cvWithVersionedTerm, keywords);
+
+    expect(stats.rewritten).toBe(0);
+    expect(suggestions[0]).toBe(original);
+  });
+
   it('does not rewrite a suggestion that names no key term at all', () => {
     const original = suggestion({
       category: 'STRUCTURE',

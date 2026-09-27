@@ -99,13 +99,28 @@ function normalize(text: string): string {
 }
 
 /** Whole-word/whole-phrase containment, not a loose substring match — same
- *  pattern used throughout the codebase's other grounding utils. */
+ *  pattern used throughout the codebase's other grounding utils.
+ *
+ * Fix (RABBIT_NOTEBOOK.md §49): a trailing version-number run (e.g. the "5"
+ * in "HTML5", the "3" in "CSS3") is now also accepted as a valid right
+ * boundary, not just whitespace/end-of-string. Confirmed via a real
+ * production analysis: "HTML"/"CSS" are both in HARD_SKILL_TERMS (below)
+ * and genuinely present in the candidate's CV, but the CV phrased them as
+ * "HTML5"/"CSS3" — normalize() leaves digits attached to the preceding
+ * letters (no word-boundary between a letter and a digit), so the OLD
+ * regex's `($|\s)` right-boundary never matched inside "html5"/"css3",
+ * producing a false `found: false` for both. The extra `(\d*)` group
+ * requires the digits to themselves be followed by a real boundary
+ * (end-of-string or whitespace), so this still correctly rejects a
+ * genuinely different, longer word like "csslibrary" or "css3x" — it only
+ * recognizes "known base term + bare trailing version digits" as the same
+ * term, never an arbitrary compound. */
 function containsWholePhrase(haystack: string, phrase: string): boolean {
   const normPhrase = normalize(phrase);
   if (!normPhrase) return false;
   const normHaystack = normalize(haystack);
   const escaped = normPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|\\s)${escaped}($|\\s)`).test(normHaystack);
+  return new RegExp(`(^|\\s)${escaped}(\\d*)($|\\s)`).test(normHaystack);
 }
 
 function matchesAny(text: string, terms: Iterable<string>): boolean {

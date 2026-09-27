@@ -199,6 +199,46 @@ describe('classifyAndVerifyKeywords() — normalization, aliasing, deterministic
     // Deliberately NOT merged — two distinct classified entries survive.
     expect(result).toHaveLength(2);
   });
+
+  // Fix (RABBIT_NOTEBOOK.md §49): confirmed against a real production
+  // analysis — "HTML" and "CSS" were genuinely on the candidate's CV
+  // (as "HTML5"/"CSS3") and in the job description, yet both showed
+  // `found: false`, because normalize() leaves digits attached to the
+  // preceding letters and the old boundary regex required whitespace or
+  // end-of-string immediately after the phrase.
+  it('(§49) JD "HTML"/"CSS" matches a CV that phrases them as "HTML5"/"CSS3"', () => {
+    const result = classifyAndVerifyKeywords(
+      [
+        { keyword: 'HTML', found: false },
+        { keyword: 'CSS', found: false },
+      ],
+      'Skilled in HTML5, CSS3, and JavaScript.',
+    );
+    expect(result.find((k) => k.keyword === 'HTML')?.found).toBe(true);
+    expect(result.find((k) => k.keyword === 'CSS')?.found).toBe(true);
+  });
+
+  it('(§49) the version-digit allowance still does NOT match a genuinely different, longer word', () => {
+    const result = classifyAndVerifyKeywords(
+      [{ keyword: 'CSS', found: false }],
+      'Experience with csslibrary and css3x frameworks.',
+    );
+    expect(result[0]?.found).toBe(false);
+  });
+
+  it('(§49) also matches in the reverse direction: JD lists a versioned term, CV uses the bare one', () => {
+    const result = classifyAndVerifyKeywords(
+      [{ keyword: 'Python3', found: false }],
+      'Proficient in Python, building data pipelines.',
+    );
+    // "python3" (JD, versioned) has no matching whole word in a CV that
+    // only ever writes bare "python" — this direction is NOT expected to
+    // match (the CV never contains the literal token "python3"), unlike
+    // the other direction above. Recorded as a deliberate boundary, not a
+    // bug: only "known base term + bare trailing digits found in the
+    // haystack" is treated as equivalent, never the reverse.
+    expect(result[0]?.found).toBe(false);
+  });
 });
 
 describe('computeAtsScore() — weighted scoring', () => {

@@ -109,13 +109,23 @@ function normalize(input: string): string {
 }
 
 /** Whole-word/whole-phrase containment, not a loose substring match — "art"
- *  must not match inside "party", "AWS" must not match inside "jAWSome". */
+ *  must not match inside "party", "AWS" must not match inside "jAWSome".
+ *
+ * Fix (RABBIT_NOTEBOOK.md §49): same fix as ats-keyword.util.ts's own copy
+ * of this function (this file deliberately keeps its own copy rather than
+ * importing one — see this module's header) — a trailing version-number
+ * run (e.g. "HTML5", "CSS3") is now also accepted as a right boundary.
+ * Without this, a suggestion that named "HTML" would be judged ungrounded
+ * (and silently rewritten to a generic "doesn't clearly appear on your
+ * CV" template) even when the CV genuinely says "HTML5" — the same false
+ * negative confirmed against real production evidence in §49, here
+ * affecting recommendation wording rather than the ATS score. */
 function containsWholePhrase(haystack: string, phrase: string): boolean {
   const normPhrase = normalize(phrase);
   if (!normPhrase) return false;
   const normHaystack = normalize(haystack);
   const escaped = normPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|\\s)${escaped}($|\\s)`).test(normHaystack);
+  return new RegExp(`(^|\\s)${escaped}(\\d*)($|\\s)`).test(normHaystack);
 }
 
 function hasUnsupportedFormattingClaim(suggestion: Suggestion): boolean {
