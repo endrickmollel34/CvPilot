@@ -137,3 +137,88 @@ describe('Analysis ATS scoring/grounding — real captured production-reproducin
     }
   });
 });
+
+/**
+ * RABBIT_NOTEBOOK.md §51 — the ACTUAL reported production incident (not a
+ * reproduction): both texts below were retrieved read-only from the real
+ * production database row for this exact analysis (authorized, one-off,
+ * read-only query — see §51's own "Evidence" section). `REAL_JD_TEXT` is
+ * the genuine Kilima Digital job description, which bundles multiple
+ * technologies in one bullet ("Develop responsive user interfaces using
+ * React, HTML and CSS."). The stored `ats_reports` row for this exact
+ * analysis had `keyword_hits: []` and an 11-entry `missing_keywords` list
+ * containing neither "HTML" nor "CSS" — proving, by elimination through
+ * this file's own classification logic (HTML/CSS are HARD_SKILL_TERMS,
+ * never GENERIC_OR_CONTEXTUAL, so they cannot vanish from both lists via
+ * any filtering step), that the model's own `ats_keywords` response never
+ * contained them — a keyword-SELECTION gap in ai.service.ts's prompt, not
+ * a matching gap in this file. `POST_FIX_MODEL_RESPONSE` is the real,
+ * unedited response from one further real gpt-4o call against these exact
+ * same two real texts, using the FIXED buildUserPrompt (ai.service.ts) —
+ * it now lists "HTML" and "CSS" as their own separate keywords.
+ */
+const REAL_JD_TEXT =
+  'We are looking for a Junior Full-Stack Developer to help build and maintain web applications ' +
+  'for small and medium-sized businesses. You will work with experienced developers to deliver ' +
+  'reliable features, troubleshoot problems and improve application performance.\n' +
+  'Responsibilities\n' +
+  '- Develop responsive user interfaces using React, HTML and CSS.\n' +
+  '- Build and maintain REST APIs using Node.js and TypeScript.\n' +
+  '- Design and query PostgreSQL databases.\n' +
+  '- Use Git and collaborate through pull requests.\n' +
+  'Essential requirements\n' +
+  '- Practical experience with JavaScript or TypeScript.\n' +
+  '- Experience building web interfaces with React.\n' +
+  '- Working knowledge of SQL and relational databases.\n' +
+  '- Familiarity with Git.\n' +
+  'Desirable skills\n' +
+  '- Familiarity with Docker and CI/CD.\n' +
+  '- Experience writing tests with Jest or a similar framework.';
+
+const REAL_PRODUCTION_CV_TEXT =
+  '5.0 \tSUMMARY \tOF \tSKILLS \tAND \tQUALIFICATIONS\n' +
+  ' \tProgramming \tLanguages: \tHtml, \tCSS, \tJava, \tC++, \tPython\n' +
+  ' \tDevelopment \ttools: \tAndroid \tstudio, \tFlutter';
+
+// The real, unedited ats_keywords array from one real gpt-4o call using the
+// FIXED prompt against REAL_JD_TEXT and the real, full CV text (the excerpt
+// above is the only part relevant to what's being asserted).
+const POST_FIX_ATS_KEYWORDS = [
+  { keyword: 'React', found: false },
+  { keyword: 'HTML', found: true },
+  { keyword: 'CSS', found: true },
+  { keyword: 'Node.js', found: false },
+  { keyword: 'TypeScript', found: false },
+  { keyword: 'PostgreSQL', found: false },
+  { keyword: 'REST API', found: false },
+  { keyword: 'Git', found: false },
+  { keyword: 'JavaScript', found: false },
+  { keyword: 'SQL', found: false },
+  { keyword: 'Docker', found: false },
+  { keyword: 'CI/CD', found: false },
+  { keyword: 'Jest', found: false },
+];
+
+describe('Analysis ATS scoring — actual reported production incident, post-fix (§51)', () => {
+  it('lists HTML and CSS as their own separate keywords (not bundled into/dropped alongside React), and scores them correctly', () => {
+    // Confirms the JD text used in this fixture is the real one, and that
+    // it genuinely bundles React/HTML/CSS in a single bullet — the
+    // confirmed trigger condition, not an assumption.
+    expect(REAL_JD_TEXT).toContain('React, HTML and CSS');
+
+    const classified = classifyAndVerifyKeywords(POST_FIX_ATS_KEYWORDS, REAL_PRODUCTION_CV_TEXT);
+    const html = classified.find((k) => k.keyword === 'HTML');
+    const css = classified.find((k) => k.keyword === 'CSS');
+    expect(html).toMatchObject({ found: true, category: 'HARD_SKILL' });
+    expect(css).toMatchObject({ found: true, category: 'HARD_SKILL' });
+
+    const score = computeAtsScore(classified);
+    // The real, reported incident's actual score was 0 (confirmed via the
+    // production database). Once the model lists HTML/CSS at all, this
+    // file's own existing, unmodified scoring logic already handles them
+    // correctly — this asserts the real incident's own numbers, not a
+    // fixed target invented for this test.
+    expect(score).toBeGreaterThan(0);
+    expect(score).toBe(17);
+  });
+});

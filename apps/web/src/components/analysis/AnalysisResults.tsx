@@ -79,18 +79,24 @@ export function AnalysisResults({ analysis, onNewAnalysis }: AnalysisResultsProp
           {atsReport?.atsScore != null && (
             <>
               <p className="mt-1 text-xs text-gray-400">ATS keyword score: {atsReport.atsScore}%</p>
-              {/* Fix (RABBIT_NOTEBOOK.md §49): the match score above is the
-                  AI's own holistic read (experience depth, seniority fit,
-                  overall narrative); this score is a separate, deterministic
-                  count of exact keyword matches only. The two are computed
+              {/* Fix (RABBIT_NOTEBOOK.md §49, wording corrected in §51): the
+                  match score above is the AI's own holistic read (experience
+                  depth, seniority fit, overall narrative); this score is a
+                  separate, deterministic keyword audit. The two are computed
                   independently by design (see AnalysisService.process()) and
                   can reasonably differ — but the page previously never said
                   so, so a low keyword score next to a much higher match
                   score read as contradictory or alarming rather than
-                  expected. */}
+                  expected.
+                  §51 correction: the original wording ("exact keyword
+                  matches only") was inaccurate — ats-keyword.util.ts's
+                  matching is alias-aware (e.g. "Postgres"/"PostgreSQL",
+                  "REST API"/"REST APIs", "HTML5"/"HTML"), not a literal
+                  string match, so this no longer claims otherwise. */}
               <p className="mt-0.5 text-xs text-gray-400">
-                Based on exact keyword matches only — it is calculated separately from the match
-                score above, so the two can differ.
+                Based on job-description requirements matched against your CV (recognising common
+                equivalent phrasings, e.g. abbreviations or version numbers) — it is calculated
+                separately from the match score above, so the two can differ.
               </p>
             </>
           )}

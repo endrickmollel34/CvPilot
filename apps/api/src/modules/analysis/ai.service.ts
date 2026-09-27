@@ -15,7 +15,9 @@ import { resolveOptionalApiKey } from '../../common/utils/optional-api-key.util'
 // against CV_CONTENT after this call returns (see
 // recommendation-grounding.util.ts) — this prompt is the first line of
 // defense, not the only one.
-const ANALYSIS_SYSTEM_PROMPT =
+// Exported (RABBIT_NOTEBOOK.md §51) for the same reason as buildUserPrompt
+// below.
+export const ANALYSIS_SYSTEM_PROMPT =
   'You are an expert CV/resume analyst. CV_CONTENT is the only source of truth about what the candidate has ' +
   'actually done. JOB_DESCRIPTION describes what the employer wants — mentioning a term there is NEVER, by ' +
   'itself, evidence the candidate has it. ' +
@@ -34,7 +36,12 @@ const ANALYSIS_SYSTEM_PROMPT =
   'or gap. ' +
   'Respond with ONLY valid JSON — no markdown fences, no explanation, no preamble.';
 
-function buildUserPrompt(cvText: string, jobDescription: string): string {
+// Exported (RABBIT_NOTEBOOK.md §51) so a sentinel test can assert on its
+// exact wording, and so a real, evidence-grounded verification script can
+// send the byte-for-byte real prompt without hand-duplicating it — the
+// same pattern already used for prefill-extraction.service.ts's
+// SYSTEM_PROMPT/JSON_SCHEMA_HINT.
+export function buildUserPrompt(cvText: string, jobDescription: string): string {
   return `<CV_CONTENT>
 ${cvText}
 </CV_CONTENT>
@@ -61,7 +68,8 @@ Rules:
 - ats_keywords must reflect genuine, job-specific requirements ATS software actually screens for — prioritize: programming languages, frameworks/libraries, databases, cloud platforms, infrastructure/DevOps tools, protocols and API technologies, security/authentication concepts, architecture patterns, testing technologies/practices, explicit domain expertise, certifications, and other concrete role-specific technical requirements.
 - Do NOT list a bare generic verb (e.g. "developing", "maintaining", "designing", "testing", "supporting", "building") as its own keyword unless it is part of a specific technical phrase.
 - Do NOT list a verbose contextual fragment (e.g. "good communication skills", "dynamic development team", "reliable backend services") as its own keyword — use the shortest normalized form of the underlying concept instead (e.g. "communication", "backend engineering").
-- Use the shortest common canonical form for each keyword (e.g. "REST API" not "REST APIs"; "PostgreSQL" not "Postgres/PostgreSQL"; "CI/CD" not "CI/CD pipeline") and never list the same underlying requirement twice under different wording.`;
+- Use the shortest common canonical form for each keyword (e.g. "REST API" not "REST APIs"; "PostgreSQL" not "Postgres/PostgreSQL"; "CI/CD" not "CI/CD pipeline") and never list the same underlying requirement twice under different wording.
+- When a single sentence or bullet point names several distinct technologies, languages, frameworks, or tools together (e.g. "using React, HTML and CSS", separated by commas or "and"), extract EVERY one of them as its own separate keyword — never bundle them into one representative term, and never drop one just because a more prominent one is named alongside it. Each named technology is independently something ATS software screens for, regardless of how many others share its sentence.`;
 }
 
 export const AnalysisResponseSchema = z.object({

@@ -64,6 +64,18 @@ describe('AnalysisResults', () => {
     expect(container.textContent).toContain('calculated separately from the match score above');
   });
 
+  // Fix (RABBIT_NOTEBOOK.md §51): the original §49 wording ("exact keyword
+  // matches only") was inaccurate — the underlying matcher recognises known
+  // equivalent phrasings (aliases, version numbers) rather than doing a
+  // literal string comparison — so the caption must not claim otherwise.
+  it('(§51) no longer claims the score is based on "exact keyword matches only", and instead mentions recognised equivalent phrasings', () => {
+    const analysis = baseAnalysis({ atsReport: { atsScore: 17 } });
+    root = renderInto(container, analysis);
+
+    expect(container.textContent).not.toContain('exact keyword matches only');
+    expect(container.textContent).toContain('recognising common equivalent phrasings');
+  });
+
   it('does not render the ATS explanation when there is no ATS report at all', () => {
     const analysis = baseAnalysis({ atsReport: undefined });
     root = renderInto(container, analysis);

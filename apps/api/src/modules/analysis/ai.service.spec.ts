@@ -2,7 +2,7 @@ import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 
-import { AiService } from './ai.service';
+import { AiService, buildUserPrompt } from './ai.service';
 
 // openai and @anthropic-ai/sdk are real HTTP clients constructed directly in
 // AiService's constructor — mocked here so tests never make network calls.
@@ -187,5 +187,31 @@ describe('AiService', () => {
       expect(result.modelUsed).toBe('gpt-4o');
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
     });
+  });
+});
+
+// RABBIT_NOTEBOOK.md §51 — the confirmed root cause of the reported
+// production incident: a job description bullet naming several distinct
+// technologies together (the real posting's own "Develop responsive user
+// interfaces using React, HTML and CSS") caused gpt-4o's own `ats_keywords`
+// extraction to list "React" but silently drop "HTML" and "CSS" — a
+// keyword-SELECTION gap, not a matching gap (ats-keyword.util.ts's §49/§50
+// matching fixes never even ran on these two terms, since they were never
+// in the model's own response at all — confirmed via a real, authorized,
+// read-only production-database query showing `keyword_hits: []` and
+// `missing_keywords` with 11 entries, neither list containing HTML/CSS).
+// This sentinel test guards the added prompt rule's exact wording — it
+// cannot and does not prove gpt-4o will always extract every bundled
+// technology for every real job description; that was verified separately
+// via one real, evidence-grounded (not synthetic) gpt-4o call against the
+// actual real job description and CV retrieved from that same production
+// row, both before and after this prompt change — see §51 for that
+// evidence. No production verification is claimed from this file.
+describe('buildUserPrompt() — ats_keywords extraction completeness', () => {
+  it('(§51) instructs the model to extract every technology named together in one sentence/bullet separately, never bundling or dropping one', () => {
+    const prompt = buildUserPrompt('irrelevant cv text', 'irrelevant job description');
+    expect(prompt).toMatch(/extract EVERY one of them as its own separate keyword/i);
+    expect(prompt).toMatch(/never bundle them into one representative term/i);
+    expect(prompt).toMatch(/never drop one just because a more prominent one/i);
   });
 });
