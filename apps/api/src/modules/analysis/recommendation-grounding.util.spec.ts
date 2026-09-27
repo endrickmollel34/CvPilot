@@ -110,6 +110,29 @@ describe('groundSuggestions()', () => {
     expect(suggestions[0]).toBe(original);
   });
 
+  // Fix (RABBIT_NOTEBOOK.md §50): the ACTUAL confirmed root cause of the
+  // reported production incident — a job description phrasing "HTML5"
+  // against a real CV that only ever writes bare "Html" (the opposite
+  // direction from the §49 test above) previously caused this module's own
+  // alias-blind containsWholePhrase to treat an already-supported skill as
+  // ungrounded. Now reuses ats-keyword.util.ts's alias-aware
+  // isKeywordSupportedByCv instead.
+  it('(§50) does not rewrite a MISSING_KEYWORD suggestion naming a versioned term when the CV uses the bare form', () => {
+    const keywords: AtsKeyword[] = [{ keyword: 'HTML5', found: true }];
+    // Deliberately UNCONDITIONAL phrasing — proves this is grounded via the
+    // alias-aware CV-support check itself, not via the separate
+    // already-conditional shortcut groundSingleSuggestion also has.
+    const original = suggestion({
+      category: 'MISSING_KEYWORD',
+      text: 'Add HTML5 to your CV to match the job description.',
+    });
+    const cvWithBareTerm = 'Programming Languages: Html, CSS, Java, C++, Python';
+    const { suggestions, stats } = groundSuggestions([original], cvWithBareTerm, keywords);
+
+    expect(stats.rewritten).toBe(0);
+    expect(suggestions[0]).toBe(original);
+  });
+
   it('does not rewrite a suggestion that names no key term at all', () => {
     const original = suggestion({
       category: 'STRUCTURE',

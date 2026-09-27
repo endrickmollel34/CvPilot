@@ -1,5 +1,5 @@
 import type { AtsKeyword, Suggestion } from '@cvpilot/shared';
-import { classifyKeyword } from './ats-keyword.util';
+import { classifyKeyword, isKeywordSupportedByCv } from './ats-keyword.util';
 
 /**
  * Deterministic, non-LLM post-processing for analysis recommendations.
@@ -168,7 +168,16 @@ function groundSingleSuggestion(
   const mentioned = mentionedKeywords(suggestion.text, keywords);
   if (mentioned.length === 0) return suggestion;
 
-  const ungrounded = mentioned.filter((kw) => !containsWholePhrase(cvText, kw));
+  // Fix (RABBIT_NOTEBOOK.md §50): was the local, alias-blind
+  // containsWholePhrase — missed that a JD-phrased "HTML5"/"CSS3" (etc.)
+  // is genuinely supported by a CV that only ever writes bare "HTML"/
+  // "CSS", wrongly rewriting an already-grounded suggestion into the
+  // generic "doesn't clearly appear on your CV" template. Reuses
+  // ats-keyword.util.ts's own alias-aware check (the actual "is this
+  // genuinely on the CV" question) instead of duplicating its alias
+  // table here — this file's own containsWholePhrase is unchanged and
+  // still used for its other, unrelated concerns below.
+  const ungrounded = mentioned.filter((kw) => !isKeywordSupportedByCv(kw, cvText));
   if (ungrounded.length === 0) return suggestion; // every mentioned term is genuinely on the CV
 
   if (isConditionallyPhrased(suggestion.text)) return suggestion; // already safely worded

@@ -226,18 +226,69 @@ describe('classifyAndVerifyKeywords() — normalization, aliasing, deterministic
     expect(result[0]?.found).toBe(false);
   });
 
-  it('(§49) also matches in the reverse direction: JD lists a versioned term, CV uses the bare one', () => {
+  it('(§49) also matches in the reverse direction: JD lists a versioned term, CV uses the bare one — for an UNALIASED term', () => {
     const result = classifyAndVerifyKeywords(
       [{ keyword: 'Python3', found: false }],
       'Proficient in Python, building data pipelines.',
     );
     // "python3" (JD, versioned) has no matching whole word in a CV that
     // only ever writes bare "python" — this direction is NOT expected to
-    // match (the CV never contains the literal token "python3"), unlike
-    // the other direction above. Recorded as a deliberate boundary, not a
-    // bug: only "known base term + bare trailing digits found in the
-    // haystack" is treated as equivalent, never the reverse.
+    // match for a term with no curated alias (unlike HTML5/CSS3 below,
+    // which §50 deliberately DOES alias — see that fix's own reasoning for
+    // why Python 2 vs 3 is a real, meaningful distinction this codebase
+    // must not paper over, while HTML5 vs bare HTML is not). Recorded as a
+    // deliberate boundary, not a bug: only "known base term + bare
+    // trailing digits found in the haystack" is treated as equivalent via
+    // the boundary-regex fix, never the reverse, UNLESS a specific,
+    // curated alias says otherwise.
     expect(result[0]?.found).toBe(false);
+  });
+
+  // Fix (RABBIT_NOTEBOOK.md §50): the ACTUAL confirmed root cause of the
+  // reported production incident (0% ATS score for a real CV that lists
+  // bare "Html, CSS" against a real Kilima Digital job description) — not
+  // §49's own fix, which turned out NOT to explain this specific case once
+  // the real CV became available (that CV never uses a version suffix at
+  // all; §49's fix remains independently valid for OTHER CVs that do).
+  // Reproduced with a real gpt-4o call: given a job description phrasing
+  // "HTML5, CSS3" (at least as common a JD convention as the bare form),
+  // the model correctly self-reported both as `found: true` against this
+  // real CV — but the OLD classifyAndVerifyKeywords required the literal
+  // token "html5"/"css3" in the CV text, which will never exist for a CV
+  // that only ever writes bare "Html"/"CSS", so it overrode an ALREADY-
+  // CORRECT model judgment with a false negative on every run.
+  it('(§50) JD "HTML5"/"CSS3" matches a CV that only ever writes bare "Html"/"CSS", and classifies as HARD_SKILL', () => {
+    const result = classifyAndVerifyKeywords(
+      [
+        { keyword: 'HTML5', found: true },
+        { keyword: 'CSS3', found: true },
+      ],
+      'Programming Languages: Html, CSS, Java, C++, Python',
+    );
+    const html = result.find((k) => k.keyword === 'HTML5');
+    const css = result.find((k) => k.keyword === 'CSS3');
+    expect(html?.found).toBe(true);
+    expect(html?.category).toBe('HARD_SKILL');
+    expect(css?.found).toBe(true);
+    expect(css?.category).toBe('HARD_SKILL');
+  });
+
+  it('(§50) is a specific, curated pair of aliases, never a general "strip trailing digits" rule — AWS "S3" does not match a bare "S" mention', () => {
+    // Guards the reasoning in §50's own KEYWORD_ALIASES comment: a general
+    // digit-stripping rule would be dangerous (conflating the AWS S3
+    // storage service with some bare, near-meaningless single-letter "S"
+    // requirement). Only "html5"/"css3" are aliased — "S3" has no alias at
+    // all, so it must match only the literal whole word "s3", never "s".
+    const result = classifyAndVerifyKeywords(
+      [{ keyword: 'S3', found: false }],
+      'Comfortable working with s3 buckets for file storage.',
+    );
+    expect(result[0]?.found).toBe(true); // "s3" itself is genuinely present
+    const noS3 = classifyAndVerifyKeywords(
+      [{ keyword: 'S3', found: false }],
+      'No cloud storage experience mentioned anywhere in this CV.',
+    );
+    expect(noS3[0]?.found).toBe(false); // no "s3" here — must not match some stripped/bare fallback
   });
 });
 

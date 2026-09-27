@@ -149,6 +149,24 @@ const KEYWORD_ALIASES: Record<string, string> = {
   'integrating third party apis': 'api integration',
   'ci cd pipeline': 'ci cd',
   'ci cd pipelines': 'ci cd',
+  // Fix (RABBIT_NOTEBOOK.md §50): confirmed against a real production CV
+  // and a real gpt-4o call — a job description phrasing "HTML5"/"CSS3"
+  // (a job-description convention at least as common as the bare form)
+  // against a CV that only ever writes bare "Html"/"CSS" produced a
+  // reproducible 0% ATS score: the model's OWN `found: true` for both was
+  // correctly self-reported, but this module's independent re-verification
+  // (isKeywordSupportedByCv, below) required the literal token "html5"/
+  // "css3" to appear in the CV text, which it never will for a CV that
+  // only ever writes the bare, unversioned form — overriding an ALREADY-
+  // CORRECT model judgment with a false negative. HTML5/CSS3 are, for job-
+  // matching purposes, the same underlying requirement as bare HTML/CSS
+  // (HTML5 has been the single living standard for years; unlike e.g.
+  // Python 2 vs 3, there is no meaningful compatibility-breaking version
+  // split to preserve here) — a deliberately narrow, curated alias, not a
+  // general "strip trailing digits from any keyword" rule (which would be
+  // dangerous: e.g. it would wrongly conflate AWS "S3" with a bare "S").
+  html5: 'html',
+  css3: 'css',
 };
 
 function canonicalize(rawKeyword: string): string {
@@ -168,7 +186,16 @@ function searchPhrases(rawKeyword: string): string[] {
   return [...phrases];
 }
 
-function isKeywordSupportedByCv(rawKeyword: string, cvText: string): boolean {
+// Exported (RABBIT_NOTEBOOK.md §50) so recommendation-grounding.util.ts's
+// own "is this keyword actually on the CV" check can reuse this exact,
+// alias-aware logic instead of its own bare, alias-blind containsWholePhrase
+// call — the same false negative confirmed above (ATS score) also caused
+// that module to treat an already-supported keyword as ungrounded and
+// silently rewrite its suggestion into a generic template. That module's
+// own containsWholePhrase copy is otherwise untouched — it still handles
+// its own unrelated concerns (whether suggestion TEXT names a keyword,
+// formatting-term checks) exactly as before.
+export function isKeywordSupportedByCv(rawKeyword: string, cvText: string): boolean {
   return searchPhrases(rawKeyword).some((phrase) => containsWholePhrase(cvText, phrase));
 }
 
