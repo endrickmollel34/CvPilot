@@ -42,7 +42,18 @@ const MOCK_CONTENT: CvContent = {
       bullets: ['Built REST APIs', 'Managed deployments'],
     },
   ],
-  education: [],
+  // Deliberately includes one year-only date (RABBIT_NOTEBOOK.md §53) so
+  // the apply()-path tests below can confirm it survives untouched, byte
+  // for byte, when only an unrelated (summary) suggestion is accepted.
+  education: [
+    {
+      id: 'edu-1',
+      institution: 'Tech University',
+      degree: 'BSc Computer Science',
+      startDate: '2021',
+      endDate: '2024',
+    },
+  ],
   skills: [{ id: 'sk-1', name: 'TypeScript' }],
   languages: [],
   certifications: [],
@@ -559,6 +570,10 @@ describe('TailoringService', () => {
           summary: 'Results-driven engineer with 3+ years in backend development.',
           workExperience: MOCK_CONTENT.workExperience,
           skills: MOCK_CONTENT.skills,
+          // (§53) including a year-only education date here specifically —
+          // apply() must never reformat or "correct" a date it isn't even
+          // touching.
+          education: MOCK_CONTENT.education,
         }),
         'Backend Engineer',
       );

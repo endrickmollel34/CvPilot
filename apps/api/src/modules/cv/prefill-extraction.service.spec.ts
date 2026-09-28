@@ -1,6 +1,10 @@
 import { ConfigService } from '@nestjs/config';
 
-import { PrefillExtractionService, SYSTEM_PROMPT } from './prefill-extraction.service';
+import {
+  PrefillExtractionService,
+  SYSTEM_PROMPT,
+  JSON_SCHEMA_HINT,
+} from './prefill-extraction.service';
 
 /**
  * RABBIT_NOTEBOOK.md §47 — regression coverage for the confirmed root
@@ -224,5 +228,69 @@ describe('PrefillExtractionService', () => {
     // This fix only asks the model to stop INFERRING a title — it must not
     // regress the ordinary case of a CV that genuinely states one.
     expect(result.content.personalDetails.jobTitle).toBe('Senior Backend Engineer');
+  });
+
+  // Fix (RABBIT_NOTEBOOK.md §53): confirmed against a real production CV —
+  // an education entry whose source text gave only years ("2021 - 2024",
+  // no month anywhere) came back from the model as "2021-01"/"2024-01", a
+  // fabricated month. Root cause was JSON_SCHEMA_HINT's own literal
+  // "YYYY-MM" type example overriding this prompt's looser "YYYY if only
+  // the year is known" prose rule. Reproduced and confirmed fixed with a
+  // real gpt-4o-mini call against synthetic CV text carrying the same
+  // shape (year-only education, explicit-month work experience) — see §53.
+  // Sentinel guards the exact wording of the new rule.
+  it('(§53) still asks the model never to invent a month to force a year-only date into YYYY-MM', () => {
+    expect(SYSTEM_PROMPT).toMatch(/never invent, guess, or default a month/i);
+    expect(JSON_SCHEMA_HINT).toMatch(/YYYY-MM or YYYY/);
+  });
+
+  it('(§53) carries a year-only education date through unchanged (does not pad in a fabricated month)', async () => {
+    mockModelResponse({
+      personalDetails: { fullName: 'Alex Johnson', email: 'alex@example.com' },
+      workExperience: [],
+      education: [
+        {
+          institution: 'Riverside College',
+          degree: 'Diploma in Information Technology',
+          startDate: '2021',
+          endDate: '2024',
+        },
+      ],
+      skills: [],
+      languages: [],
+      certifications: [],
+    });
+
+    const service = new PrefillExtractionService(mockConfig);
+    const result = await service.extract('irrelevant for this mock');
+
+    expect(result.content.education[0]?.startDate).toBe('2021');
+    expect(result.content.education[0]?.endDate).toBe('2024');
+  });
+
+  it('(§53) still carries a genuine month/year work-experience date through unchanged', async () => {
+    mockModelResponse({
+      personalDetails: { fullName: 'Alex Johnson', email: 'alex@example.com' },
+      workExperience: [
+        {
+          company: 'Initech Ltd',
+          title: 'Support Technician',
+          startDate: '2024-10',
+          endDate: '2025-09',
+          current: false,
+          bullets: [],
+        },
+      ],
+      education: [],
+      skills: [],
+      languages: [],
+      certifications: [],
+    });
+
+    const service = new PrefillExtractionService(mockConfig);
+    const result = await service.extract('irrelevant for this mock');
+
+    expect(result.content.workExperience[0]?.startDate).toBe('2024-10');
+    expect(result.content.workExperience[0]?.endDate).toBe('2025-09');
   });
 });
