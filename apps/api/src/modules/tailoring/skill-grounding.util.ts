@@ -105,6 +105,35 @@ function buildCvGroundingCorpus(content: CvContent): string {
 }
 
 /**
+ * Fix (RABBIT_NOTEBOOK.md §52): confirmed against a real production
+ * tailoring result — a CV saved from prefill extraction had its entire
+ * "Programming Languages: Html, CSS, Java, C++, Python" line stored as ONE
+ * skill entry's name (a separate, pre-existing prefill-extraction quality
+ * issue, out of THIS task's own scope to fix at the source), rather than
+ * five atomic entries. Tailoring's own skill-grounding correctly saw "HTML"
+ * and "CSS" as genuinely evidenced (they are, textually) and NOT
+ * `alreadyPresent` (no skill entry's name equals "html"/"css" exactly), so
+ * it suggested adding them as new, separate entries — technically true,
+ * but the result reads as a confusing, visually redundant duplicate once
+ * shown next to the original compound entry that already names them.
+ *
+ * This checks whether `skillName` already appears, as a whole word/phrase,
+ * inside an EXISTING skill or language entry's name — even one that is not
+ * its own atomic entry — so a suggestion to "add" something already spelled
+ * out inside a longer existing entry can be recognised as a no-op rather
+ * than a genuine new addition. Deliberately narrow (whole-word containment,
+ * same `containsWholePhrase` primitive already used throughout this file),
+ * not a fuzzy/substring match — "Java" must not match inside "JavaScript".
+ */
+export function isSkillAlreadyCovered(skillName: string, content: CvContent): boolean {
+  const targetNorm = normalize(skillName);
+  if (!targetNorm) return false;
+  return [...content.skills, ...content.languages].some((existing) =>
+    containsWholePhrase(normalize(existing.name), targetNorm),
+  );
+}
+
+/**
  * Returns true only if adding `skillName` to the CV's skills/languages is
  * justified:
  *  - it already exists there (not really a new addition), or

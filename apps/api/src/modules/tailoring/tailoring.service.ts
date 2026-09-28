@@ -24,7 +24,7 @@ import { BillingService } from '../billing/billing.service';
 import { CvService } from '../cv/cv.service';
 import { AuditService } from '../audit/audit.service';
 import { TailoringAiService } from './tailoring-ai.service';
-import { isNewSkillGrounded } from './skill-grounding.util';
+import { isNewSkillGrounded, isSkillAlreadyCovered } from './skill-grounding.util';
 import { classifySuggestionGrounding } from './tailoring-grounding.util';
 import type { CreateTailoringDto } from './dto/create-tailoring.dto';
 import type { ApplySuggestionsDto } from './dto/apply-suggestions.dto';
@@ -349,9 +349,16 @@ function applyDecisions(
         // Second grounding check (defense in depth) — re-verify against the
         // pristine master CV even if this suggestion was somehow persisted
         // ungrounded (e.g. stored before this check existed), so it still
-        // cannot be written into the tailored CV.
+        // cannot be written into the tailored CV. Fix (RABBIT_NOTEBOOK.md
+        // §52): also re-checks isSkillAlreadyCovered — the exact-name-only
+        // duplicate check below never caught "HTML" already being spelled
+        // out inside a compound existing entry like "Programming Languages:
+        // HTML, CSS, ..." — same defense-in-depth pairing as the grounding
+        // check itself, for a suggestion that was somehow persisted before
+        // this specific guard existed.
         if (
           isNewSkillGrounded(text, suggestion.evidence, masterContent) &&
+          !isSkillAlreadyCovered(text, masterContent) &&
           !content.skills.some((s) => s.name.toLowerCase() === text.toLowerCase())
         ) {
           content.skills.push({ id: randomUUID(), name: text });
@@ -361,6 +368,7 @@ function applyDecisions(
       case 'languages':
         if (
           isNewSkillGrounded(text, suggestion.evidence, masterContent) &&
+          !isSkillAlreadyCovered(text, masterContent) &&
           !content.languages.some((l) => l.name.toLowerCase() === text.toLowerCase())
         ) {
           content.languages.push({ id: randomUUID(), name: text });

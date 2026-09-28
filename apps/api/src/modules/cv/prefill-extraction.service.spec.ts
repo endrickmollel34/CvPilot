@@ -188,4 +188,41 @@ describe('PrefillExtractionService', () => {
     expect(SYSTEM_PROMPT).toMatch(/education entries whenever the CV shows one/i);
     expect(SYSTEM_PROMPT).toMatch(/never as jobTitle/i);
   });
+
+  // Fix (RABBIT_NOTEBOOK.md §52): confirmed against a real production CV —
+  // personalDetails.jobTitle (NOT a reference's own jobTitle field, guarded
+  // above) was fabricated as "Computer Science Graduate" for a CV with no
+  // job-title/headline line anywhere, by summarising the candidate's own
+  // degree/self-description. Every downstream consumer (the CV builder,
+  // Analysis, Tailoring) then treated this invented field as an established
+  // fact. Sentinel guards the exact wording; the real behavioural fix (the
+  // model now omitting jobTitle for this real CV) was verified separately
+  // via one real, local-dev (not production) gpt-4o-mini call against the
+  // actual retrieved CV text — see §52 for that evidence.
+  it('(§52) still asks the model not to infer/construct personalDetails.jobTitle from the summary or degree', () => {
+    expect(SYSTEM_PROMPT).toMatch(/personalDetails\.jobTitle/);
+    expect(SYSTEM_PROMPT).toMatch(/never infer, construct, or summarise a title/i);
+  });
+
+  it('(§52) still carries an explicit personalDetails.jobTitle through unchanged when the model DOES find one explicitly stated', async () => {
+    mockModelResponse({
+      personalDetails: {
+        fullName: 'Alex Johnson',
+        email: 'alex@example.com',
+        jobTitle: 'Senior Backend Engineer',
+      },
+      workExperience: [],
+      education: [],
+      skills: [],
+      languages: [],
+      certifications: [],
+    });
+
+    const service = new PrefillExtractionService(mockConfig);
+    const result = await service.extract('irrelevant for this mock');
+
+    // This fix only asks the model to stop INFERRING a title — it must not
+    // regress the ordinary case of a CV that genuinely states one.
+    expect(result.content.personalDetails.jobTitle).toBe('Senior Backend Engineer');
+  });
 });

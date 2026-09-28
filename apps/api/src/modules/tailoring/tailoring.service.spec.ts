@@ -523,6 +523,47 @@ describe('TailoringService', () => {
       expect(result).toEqual({ tailoredCvId: 'cv-tailored-1' });
     });
 
+    // Fix (RABBIT_NOTEBOOK.md §52 — verification, not a bug found): confirms
+    // "applying creates the promised tailored copy without changing the
+    // original CV" directly, against a deep snapshot, rather than relying
+    // only on the mock surface's own shape (mockCvService exposes no
+    // update()/save() at all, so the master CV was already structurally
+    // unwritable — this test proves the actual VALUE is untouched too, not
+    // just that no such call happened to be wired up). Isolated mock data
+    // (MOCK_CONTENT/MOCK_CV), never the real production CV.
+    it('(§52) never mutates the master CV content — the original object is deep-equal to a pre-apply snapshot afterwards', async () => {
+      const originalSnapshot = JSON.parse(JSON.stringify(MOCK_CONTENT));
+
+      await service.apply('clerk-1', 'tailor-1', validDto);
+
+      expect(MOCK_CV.content).toEqual(originalSnapshot);
+      expect(mockCvService.createTailored).toHaveBeenCalled();
+      // The content object handed to createTailored is a genuinely separate
+      // object from the master CV's own — never the same reference.
+      const [, tailoredContentArg] = mockCvService.createTailored.mock.calls[0];
+      expect(tailoredContentArg).not.toBe(MOCK_CV.content);
+    });
+
+    // Fix (RABBIT_NOTEBOOK.md §52 — verification): "accepting a suggestion
+    // changes the intended field only" — accepting just the summary
+    // suggestion must leave workExperience/skills exactly as they were on
+    // the master CV, not just correctly update the summary itself.
+    it('(§52) accepting only the summary suggestion leaves workExperience and skills untouched', async () => {
+      await service.apply('clerk-1', 'tailor-1', {
+        decisions: [{ suggestionId: 's1', decision: 'accepted' }],
+      });
+
+      expect(mockCvService.createTailored).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          summary: 'Results-driven engineer with 3+ years in backend development.',
+          workExperience: MOCK_CONTENT.workExperience,
+          skills: MOCK_CONTENT.skills,
+        }),
+        'Backend Engineer',
+      );
+    });
+
     it('replaces bullet text when workExperience suggestion is accepted', async () => {
       await service.apply('clerk-1', 'tailor-1', {
         decisions: [{ suggestionId: 's2', decision: 'accepted' }],
@@ -1007,6 +1048,46 @@ describe('TailoringService', () => {
             suggestedContent: MOCK_CONTENT.summary!,
             reason: 'No change needed.',
             priority: 'LOW',
+          },
+        ],
+        modelUsed: 'gpt-4o',
+        tokensUsed: 100,
+      });
+
+      await service.runTailoring('tailor-1');
+
+      const saved = (mockManager.update.mock.calls[0] as unknown[])[2] as {
+        suggestions: TailoringSuggestion[];
+      };
+      expect(saved.suggestions).toHaveLength(0);
+    });
+
+    // Fix (RABBIT_NOTEBOOK.md §52): confirmed against a real production
+    // tailoring result — a compound skill entry ("Programming Languages:
+    // HTML, CSS, ...") produced "Suggested: HTML"/"Suggested: CSS" cards
+    // that read as confusing duplicates. End-to-end, isolated mock CV
+    // (never the real production CV) with its own compound skill entry.
+    it('(§52) drops a skill suggestion already spelled out inside an existing compound skill entry, end-to-end', async () => {
+      mockCvService.findById.mockResolvedValue({
+        ...MOCK_CV,
+        content: {
+          ...MOCK_CONTENT,
+          skills: [
+            ...MOCK_CONTENT.skills,
+            { id: 'sk-compound', name: 'Programming Languages: HTML, CSS, Ruby' },
+          ],
+        },
+      });
+      mockTailoringAiService.runTailoring.mockResolvedValue({
+        suggestions: [
+          {
+            id: 'g7',
+            section: 'skills',
+            originalContent: '',
+            suggestedContent: 'HTML',
+            evidence: 'Programming Languages: HTML, CSS, Ruby',
+            reason: 'Highlights HTML as a key skill.',
+            priority: 'HIGH',
           },
         ],
         modelUsed: 'gpt-4o',

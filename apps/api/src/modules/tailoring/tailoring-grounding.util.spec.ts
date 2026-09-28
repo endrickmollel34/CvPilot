@@ -298,6 +298,76 @@ describe('classifySuggestionGrounding()', () => {
     expect(verdict.allowed).toBe(true);
     expect(verdict.level).toBe('EXACT');
   });
+
+  // Fix (RABBIT_NOTEBOOK.md §52): confirmed against a real production
+  // tailoring result — a work-experience suggestion whose only effect was
+  // removing parentheses ("IT Officer (Intern)" -> "IT Officer Intern")
+  // was shown as a genuine improvement card. Isolated synthetic data below
+  // (the module's own existing CONTENT fixture), not the real CV.
+  it('(§52) treats a punctuation-only reformat as EXACT (a no-op), not a genuine improvement', () => {
+    const verdict = classifySuggestionGrounding(
+      suggestion({
+        section: 'workExperience',
+        originalContent: 'Debugged software issues (across backend services)',
+        suggestedContent: 'Debugged software issues across backend services',
+      }),
+      CONTENT,
+    );
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.level).toBe('EXACT');
+  });
+
+  it('(§52) a genuine wording change to the same bullet is NOT treated as a punctuation-only no-op', () => {
+    const verdict = classifySuggestionGrounding(
+      suggestion({
+        section: 'workExperience',
+        originalContent: 'Debugged software issues across backend services',
+        suggestedContent: 'Resolved software issues across backend services',
+      }),
+      CONTENT,
+    );
+    expect(verdict.level).not.toBe('EXACT');
+  });
+
+  // Fix (RABBIT_NOTEBOOK.md §52): confirmed against a real production
+  // tailoring result — see isSkillAlreadyCovered's own doc comment
+  // (skill-grounding.util.ts). Isolated synthetic data, not the real CV.
+  it('(§52) treats a skill addition already spelled out inside a compound existing entry as EXACT (a no-op)', () => {
+    const contentWithCompoundSkill: CvContent = {
+      ...CONTENT,
+      skills: [
+        ...CONTENT.skills,
+        { id: 'sk-compound', name: 'Programming Languages: HTML, CSS, Ruby' },
+      ],
+    };
+    const verdict = classifySuggestionGrounding(
+      suggestion({
+        section: 'skills',
+        originalContent: '',
+        suggestedContent: 'HTML',
+        evidence: 'Programming Languages: HTML, CSS, Ruby',
+      }),
+      contentWithCompoundSkill,
+    );
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.level).toBe('EXACT');
+  });
+
+  it('(§52) still allows a genuinely new, uncovered skill addition after the dedup check', () => {
+    const verdict = classifySuggestionGrounding(
+      suggestion({
+        section: 'skills',
+        originalContent: '',
+        suggestedContent: 'REST APIs',
+        evidence: 'REST APIs',
+      }),
+      CONTENT,
+    );
+    // "REST APIs" already exists as its own atomic entry in CONTENT — this
+    // exercises the pre-existing exact-name alreadyPresent path, confirming
+    // the new dedup check doesn't interfere with it.
+    expect(verdict.allowed).toBe(true);
+  });
 });
 
 // ─── Cross-entry evidence scoping (multi-entry CV) ───────────────────────────

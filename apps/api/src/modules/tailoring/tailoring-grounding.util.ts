@@ -4,7 +4,7 @@ import type {
   CvWorkEntry,
   TailoringSuggestion,
 } from '@cvpilot/shared';
-import { isNewSkillGrounded } from './skill-grounding.util';
+import { isNewSkillGrounded, isSkillAlreadyCovered } from './skill-grounding.util';
 
 /**
  * Tailoring Grounding V2 — per-suggestion evidence-level classification.
@@ -683,6 +683,14 @@ export function classifySuggestionGrounding(
     if (!isNewSkillGrounded(suggestion.suggestedContent, suggestion.evidence, content)) {
       return { level: 'UNSUPPORTED', allowed: false };
     }
+    // Fix (RABBIT_NOTEBOOK.md §52): see isSkillAlreadyCovered's own doc
+    // comment — a suggestion to "add" a skill already spelled out inside an
+    // existing (possibly compound) skill/language entry is a no-op, not a
+    // genuine new addition; treated as EXACT so TailoringService.
+    // runTailoring's existing no-op counter drops it before it's ever shown.
+    if (isSkillAlreadyCovered(suggestion.suggestedContent, content)) {
+      return allow('EXACT', suggestion, fullCorpus);
+    }
     for (const term of SCOPE_BROADENING_TERMS) {
       if (
         containsWholePhrase(suggestion.suggestedContent, term) &&
@@ -714,6 +722,21 @@ export function classifySuggestionGrounding(
     suggestion.section === 'summary' ? fullCorpus : resolveEntryCorpus(suggestion, content);
 
   if (proposed.trim() === original.trim()) {
+    return allow('EXACT', suggestion, fullCorpus);
+  }
+  // Fix (RABBIT_NOTEBOOK.md §52): confirmed against a real production
+  // tailoring result — a work-experience suggestion whose ONLY effect was
+  // removing the parentheses around "(Intern)" ("IT Officer (Intern)" ->
+  // "IT Officer Intern") was shown as a genuine "LOW" priority suggestion,
+  // occupying a card slot with zero actual improvement (the normalized,
+  // punctuation-stripped text is byte-identical). Reuses this module's own
+  // `normalize()` (lowercase, strip punctuation, collapse whitespace) —
+  // already used below for term-list matching — so a purely
+  // punctuation/casing/whitespace-only edit is treated as the same no-op
+  // EXACT level as a byte-identical one, rather than being shown as if it
+  // were a genuine improvement. A suggestion with any real wording change
+  // still normalizes differently and is unaffected.
+  if (original && normalize(proposed) === normalize(original)) {
     return allow('EXACT', suggestion, fullCorpus);
   }
   if (original && isSameWordsReordered(original, proposed)) {

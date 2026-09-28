@@ -44,7 +44,30 @@ import type { CvContent } from '@cvpilot/shared';
 // prompt-reliability gaps, addressed with two added, general rules below
 // (no institution/employer names hardcoded, no location inferred from
 // outside knowledge — see §48 for the full trace).
-const EXTRACTION_VERSION = 3;
+//
+// Fix (RABBIT_NOTEBOOK.md §52): bumped 3 -> 4. Investigating a downstream
+// CV-tailoring quality complaint traced back to THIS service: a real saved
+// CV's `personalDetails.jobTitle` was `"Computer Science Graduate"`, even
+// though the real source CV has no job-title/headline line anywhere — a
+// traditional "CURRICULUM VITAE" document whose own Profile paragraph
+// opens "Driven computer engineering student..." (a different discipline
+// — Engineering, not Science — AND a different status — student, not
+// graduate). The model had fabricated a plausible-sounding "current title"
+// by summarising the candidate's own degree/self-description, a direct
+// violation of this prompt's own pre-existing "do not infer, guess, or
+// fabricate" rule that specifically slipped through for this one field.
+// Every downstream consumer (the CV builder display, Analysis, Tailoring)
+// then treats this invented field as an established fact — confirmed
+// directly: Tailoring's own serializeCvContent feeds it to the model as
+// "Current title: Computer Science Graduate", so a tailoring suggestion
+// that echoed it back into the summary was, from that service's own
+// perspective, faithfully grounded in what it was told — the actual
+// defect is upstream, here. Fixed with one explicit, general rule for
+// this one field (below) — no discipline/institution name hardcoded, and
+// none of §47/§48's own already-fixed fields (summary, Qualities,
+// References, nationality, education location, reference attribution)
+// touched.
+const EXTRACTION_VERSION = 4;
 const MAX_ATTEMPTS = 3;
 
 // Exported so prefill-extraction.service.spec.ts's sentinel test can assert
@@ -65,6 +88,7 @@ export const SYSTEM_PROMPT = [
   '- If the CV states that references are "available upon request" (or equivalent) instead of listing named referees, set referencesAvailableUponRequest to true and leave references empty. Otherwise extract each individual reference actually listed, capturing every line shown for them: jobTitle (their job title) and company are usually on one line, often as "Job Title, Company"; relationship is their relationship to the candidate (e.g. "Manager", "Supervisor", "Colleague", "Lecturer") and is usually shown on its own separate line below that — do not confuse the two, and do not drop jobTitle/company just because a relationship label is also present.',
   '- Apply that SAME reference layout convention consistently to every reference in the CV. If one reference clearly shows a short relationship word (e.g. "Manager") on its own line separate from a job-title/company line, treat every other reference\'s own standalone short line the same way — as relationship, never as jobTitle — even if that other reference\'s job-title/company line itself is ambiguous or hard to split. Never move a standalone relationship line into the jobTitle field.',
   '- Extract the location for BOTH work experience AND education entries whenever the CV shows one (e.g. "Institution · City, Country" or "Institution, City, Country") — do not omit an education entry\'s location just because it is shown after a separator, the same way you would not omit a work entry\'s location shown the same way.',
+  '- For personalDetails.jobTitle: only extract it if the CV explicitly and literally presents a professional title or headline as such — e.g. printed directly beneath the candidate\'s name, or on a clearly labelled "Job Title" / "Current Role" / "Position" line. Never infer, construct, or summarise a title from the candidate\'s summary/profile paragraph, objective statement, degree, or job history, even if it seems like a reasonable description of them — if the CV has no such explicit title/headline line, omit personalDetails.jobTitle entirely rather than guessing one.',
 ].join('\n');
 
 // Exported for the same reason as SYSTEM_PROMPT above, and so a real,
