@@ -6,6 +6,7 @@ import type {
   CvEducationEntry,
   CvCertificationEntry,
   CvReferenceEntry,
+  CvProjectEntry,
 } from '../types/cv.types';
 import { MINIMAL_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -190,6 +191,37 @@ function CertificationsSection({ certs }: { certs: CvCertificationEntry[] }) {
   );
 }
 
+// Modelled on WorkEntries' title/date/bullets shape (RABBIT_NOTEBOOK.md
+// §54) — see classic-document.tsx's ProjectsSection for the full rationale.
+function ProjectsSection({ entries }: { entries: CvProjectEntry[] }) {
+  if (!entries.length) return null;
+  return (
+    <>
+      <SectionHeading title="Projects" />
+      {entries.map((p) => (
+        <div key={p.id} className="cvmin-entry">
+          <div className="cvmin-entry-row">
+            <span className="cvmin-entry-title">{p.title}</span>
+            <span className="cvmin-entry-date">{formatDateRange(p.startDate, p.endDate)}</span>
+          </div>
+          {p.link && (
+            <div className="cvmin-entry-org">
+              <ContactItem href={p.link} />
+            </div>
+          )}
+          {p.bullets.length > 0 && (
+            <ul className="cvmin-bullets">
+              {p.bullets.map((b, i) => (
+                <li key={i}>{b}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
 function ReferencesSection({
   entries,
   availableUponRequest,
@@ -239,6 +271,8 @@ function renderSection(content: CvContent, section: CvSection) {
       );
     case 'workExperience':
       return <WorkEntries key="work" entries={content.workExperience} />;
+    case 'projects':
+      return <ProjectsSection key="projects" entries={content.projects ?? []} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
     case 'skills':

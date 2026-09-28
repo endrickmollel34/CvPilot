@@ -8,8 +8,8 @@ import type { CvEntity } from '../../entities/cv.entity';
  * external AI provider, with direct personal identifiers removed wherever
  * that's genuinely safe to do, while preserving everything the AI actually
  * needs to do its job: job titles, employers, dates, responsibilities,
- * achievements, education, certifications, skills, languages, and summary
- * content are never touched.
+ * achievements, education, certifications, skills, languages, projects, and
+ * summary content are never touched.
  *
  * Two independent code paths, because CVPilot's own CV data has two shapes:
  *
@@ -84,6 +84,7 @@ function hasUsableStructuredContent(content: CvContent | undefined): content is 
     !!content.personalDetails?.fullName?.trim() ||
     !!content.summary?.trim() ||
     content.workExperience.length > 0 ||
+    (content.projects?.length ?? 0) > 0 ||
     content.education.length > 0 ||
     content.skills.length > 0 ||
     content.languages.length > 0 ||
@@ -106,6 +107,7 @@ function serializeCvContentForAi(content: CvContent, options: AiSafeTextOptions)
     languages,
     certifications,
   } = content;
+  const projects = content.projects ?? [];
   const lines: string[] = [];
 
   if (options.includeFullName && pd.fullName) lines.push(`Name: ${pd.fullName}`);
@@ -125,6 +127,17 @@ function serializeCvContentForAi(content: CvContent, options: AiSafeTextOptions)
       // candidate's own contact address. Never redacted.
       lines.push(`  ${e.title} at ${e.company}${e.location ? ` (${e.location})` : ''} [${range}]`);
       for (const b of e.bullets) lines.push(`    • ${b}`);
+    }
+  }
+
+  // A project's `link` is genuine evidence (a portfolio/repo URL), not a
+  // contact identifier — never redacted, same reasoning as e.location above.
+  if (projects.length) {
+    lines.push('\nPROJECTS:');
+    for (const p of projects) {
+      const range = [p.startDate, p.endDate].filter(Boolean).join(' – ');
+      lines.push(`  ${p.title}${range ? ` [${range}]` : ''}${p.link ? ` (${p.link})` : ''}`);
+      for (const b of p.bullets) lines.push(`    • ${b}`);
     }
   }
 

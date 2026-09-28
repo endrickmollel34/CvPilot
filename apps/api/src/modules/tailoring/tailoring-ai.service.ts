@@ -82,6 +82,12 @@ export const TailoringResponseSchema = z.object({
     .array(
       z.object({
         id: z.string().min(1),
+        // Deliberately no 'projects' member (RABBIT_NOTEBOOK.md §54) —
+        // project content is fed to the model as context (see
+        // serializeCvContent's PROJECTS block) so it can inform/ground
+        // suggestions elsewhere, but is never itself a suggestion target;
+        // this keeps the feature's tailoring surface small and avoids the
+        // added risk of an invented "improvement" to a project's claims.
         section: z.enum([
           'summary',
           'workExperience',
@@ -226,6 +232,7 @@ export class TailoringAiService {
 // CV text is never logged — it goes directly into the prompt and is discarded.
 function serializeCvContent(content: CvContent): string {
   const { personalDetails: pd, summary, workExperience, education, skills, languages } = content;
+  const projects = content.projects ?? [];
   const lines: string[] = [];
 
   lines.push(`Name: ${pd.fullName}`);
@@ -242,6 +249,21 @@ function serializeCvContent(content: CvContent): string {
       const range = e.current ? `${e.startDate} – Present` : `${e.startDate} – ${e.endDate ?? ''}`;
       lines.push(`  ${e.title} at ${e.company}${e.location ? ` (${e.location})` : ''} [${range}]`);
       for (const b of e.bullets) lines.push(`    • ${b}`);
+    }
+  }
+
+  // Context only (RABBIT_NOTEBOOK.md §54) — `projects` is deliberately NOT
+  // one of TailoringResponseSchema's suggestable sections (see its own
+  // comment): this only makes the model AWARE of the candidate's projects
+  // so it can ground/inform suggestions in other sections against them; it
+  // is never itself a target the model can propose editing, avoiding the
+  // added risk of an invented "improvement" to project claims.
+  if (projects.length) {
+    lines.push('\nPROJECTS:');
+    for (const p of projects) {
+      const range = [p.startDate, p.endDate].filter(Boolean).join(' – ');
+      lines.push(`  ${p.title}${range ? ` [${range}]` : ''}${p.link ? ` (${p.link})` : ''}`);
+      for (const b of p.bullets) lines.push(`    • ${b}`);
     }
   }
 

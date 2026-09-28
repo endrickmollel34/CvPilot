@@ -735,6 +735,162 @@ describe('CvService — References validation (updateContent)', () => {
   });
 });
 
+// ─── Projects (RABBIT_NOTEBOOK.md §54) — updateContent() server-side
+// validation — same targeted, defense-in-depth approach as References
+// validation above, reusing this block's own BASE_CONTENT/mocks.
+describe('CvService — Projects validation (updateContent)', () => {
+  let service: CvService;
+
+  const mockCvRepo = {
+    findOne: jest.fn(),
+    update: jest.fn(),
+    findOneByOrFail: jest.fn(),
+  };
+  const mockQueue = { add: jest.fn() };
+  const mockUserService = { findByClerkId: jest.fn() };
+  const mockBillingService = { canPerformAction: jest.fn() };
+  const mockPrefillService = {};
+  const mockPrefillLockService = {
+    acquire: jest.fn().mockResolvedValue('token'),
+    renew: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
+    startHeartbeat: jest.fn().mockReturnValue(() => {}),
+  };
+  const mockPdfService = {};
+  const mockPhotoService = { getPhotoBytes: jest.fn() };
+
+  const BASE_CONTENT: CvContent = {
+    version: 1,
+    personalDetails: { fullName: 'Jane Doe', email: 'jane@example.com' },
+    workExperience: [],
+    education: [],
+    skills: [],
+    languages: [],
+    certifications: [],
+    sectionOrder: [
+      'summary',
+      'workExperience',
+      'projects',
+      'education',
+      'skills',
+      'languages',
+      'certifications',
+    ],
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CvService,
+        { provide: getRepositoryToken(CvEntity), useValue: mockCvRepo },
+        { provide: getQueueToken('cv-parsing'), useValue: mockQueue },
+        { provide: ConfigService, useValue: makeConfig() },
+        { provide: UserService, useValue: mockUserService },
+        { provide: BillingService, useValue: mockBillingService },
+        { provide: PrefillExtractionService, useValue: mockPrefillService },
+        { provide: PrefillLockService, useValue: mockPrefillLockService },
+        { provide: PdfGenerationService, useValue: mockPdfService },
+        { provide: CvPhotoService, useValue: mockPhotoService },
+        { provide: R2StorageService, useValue: { deleteObject: jest.fn() } },
+        { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
+      ],
+    }).compile();
+
+    service = module.get<CvService>(CvService);
+    mockUserService.findByClerkId.mockResolvedValue(MOCK_USER);
+    mockCvRepo.findOne.mockResolvedValue({
+      id: 'cv-1',
+      userId: MOCK_USER.id,
+      source: 'builder',
+      content: BASE_CONTENT,
+    });
+    mockCvRepo.findOneByOrFail.mockImplementation(() =>
+      Promise.resolve({ id: 'cv-1', content: mockCvRepo.update.mock.calls.at(-1)?.[1]?.content }),
+    );
+  });
+
+  it('accepts a CV with no projects at all (projects key absent — an existing pre-feature CV)', async () => {
+    const content = { ...BASE_CONTENT };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('accepts a CV with one valid project, link/dates/bullets all present', async () => {
+    const content: CvContent = {
+      ...BASE_CONTENT,
+      projects: [
+        {
+          id: 'proj-1',
+          title: 'Muniverse Application',
+          link: 'github.com/example/muniverse',
+          startDate: '2023',
+          endDate: '2024',
+          bullets: ['Campus social media app.'],
+        },
+      ],
+    };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('accepts a project with only the required title and empty bullets', async () => {
+    const content: CvContent = {
+      ...BASE_CONTENT,
+      projects: [{ id: 'proj-1', title: 'Minimal Project', bullets: [] }],
+    };
+    await service.updateContent('clerk-1', 'cv-1', { content });
+    expect(mockCvRepo.update).toHaveBeenCalledWith('cv-1', { content });
+  });
+
+  it('rejects a project with a missing/empty title', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      projects: [{ id: 'proj-1', title: '   ', bullets: [] }],
+    } as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payload where projects is not an array', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      projects: { id: 'proj-1', title: 'Muniverse Application' },
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a project entry that is missing an id', async () => {
+    const content = {
+      ...BASE_CONTENT,
+      projects: [{ title: 'Muniverse Application', bullets: [] }],
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a project entry whose bullets isn't an array", async () => {
+    const content = {
+      ...BASE_CONTENT,
+      projects: [
+        { id: 'proj-1', title: 'Muniverse Application', bullets: 'Campus social media app.' },
+      ],
+    } as unknown as CvContent;
+    await expect(service.updateContent('clerk-1', 'cv-1', { content })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(mockCvRepo.update).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Profile template (Phase 7) — updateContent() server-side validation ──
 // Same targeted, defense-in-depth approach as References validation above —
 // only the fields Profile actually adds (`qualities`, `personalDetails.

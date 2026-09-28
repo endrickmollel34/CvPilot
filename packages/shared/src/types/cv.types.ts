@@ -1,6 +1,7 @@
 export type CvSection =
   | 'summary'
   | 'workExperience'
+  | 'projects'
   | 'education'
   | 'skills'
   | 'languages'
@@ -73,6 +74,22 @@ export interface CvCertificationEntry {
   url?: string;
 }
 
+export interface CvProjectEntry {
+  id: string;
+  title: string;
+  /** Project URL (repo, live demo, portfolio page, ...) — free text,
+   *  normalized/linked for display the same way personalDetails.website is
+   *  (see format.ts's normalizeExternalUrl). Optional. */
+  link?: string;
+  startDate?: string;
+  endDate?: string;
+  /** Same shape as CvWorkEntry.bullets — a short one-line description (e.g.
+   *  "Campus social media app.") is stored as a single-item array, not a
+   *  separate free-text field, so every renderer only needs one code path
+   *  for project content. */
+  bullets: string[];
+}
+
 export interface CvReferenceEntry {
   id: string;
   fullName: string;
@@ -89,6 +106,12 @@ export interface CvContent {
   personalDetails: CvPersonalDetails;
   summary?: string;
   workExperience: CvWorkEntry[];
+  // Added after the original schema (RABBIT_NOTEBOOK.md §54) — same
+  // "absent on every CV saved before this feature existed" convention as
+  // `references` above: optional, and every consumer must treat a missing
+  // `projects` as "no projects" (`?? []`) rather than assuming it's always
+  // present.
+  projects?: CvProjectEntry[];
   education: CvEducationEntry[];
   skills: CvSkillEntry[];
   languages: CvLanguageEntry[];

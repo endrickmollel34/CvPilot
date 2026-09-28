@@ -33,6 +33,16 @@ const STRUCTURED_CONTENT: CvContent = {
       ],
     },
   ],
+  projects: [
+    {
+      id: 'proj-1',
+      title: 'Muniverse Application',
+      link: 'github.com/example/muniverse',
+      startDate: '2023',
+      endDate: '2024',
+      bullets: ['Campus social media app.'],
+    },
+  ],
   education: [
     {
       id: 'ed-1',
@@ -197,6 +207,21 @@ describe('resolveAiSafeCvText()', () => {
       expect(text).toContain('BSc Computer Science');
       expect(text).toContain('TypeScript');
       expect(text).toContain('AWS Certified Solutions Architect');
+    });
+
+    // Fix (RABBIT_NOTEBOOK.md §54): project content must feed Analysis
+    // (and Cover Letter — see the next describe block) the same as every
+    // other structured field; a project's own `link` is genuine evidence
+    // (a portfolio/repo URL), never redacted.
+    it('(§54) preserves project title, link, dates, and bullets', () => {
+      const text = resolveAiSafeCvText(cv({ content: STRUCTURED_CONTENT }), {
+        includeFullName: false,
+      });
+
+      expect(text).toContain('PROJECTS:');
+      expect(text).toContain('Muniverse Application');
+      expect(text).toContain('github.com/example/muniverse');
+      expect(text).toContain('Campus social media app.');
     });
   });
 

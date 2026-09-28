@@ -6,6 +6,7 @@ import type {
   CvEducationEntry,
   CvCertificationEntry,
   CvReferenceEntry,
+  CvProjectEntry,
 } from '../types/cv.types';
 import { SIGNATURE_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -222,6 +223,33 @@ function EducationEntries({ entries }: { entries: CvEducationEntry[] }) {
   );
 }
 
+// Modelled on WorkEntries' title/date/bullets shape (RABBIT_NOTEBOOK.md
+// §54) — see classic-document.tsx's ProjectsSection for the full rationale.
+function ProjectsSection({ entries }: { entries: CvProjectEntry[] }) {
+  if (!entries.length) return null;
+  return (
+    <>
+      <SectionHeading title="Projects" />
+      {entries.map((p) => (
+        <div key={p.id} className="cvs-entry">
+          <div className="cvs-entry-row">
+            <span className="cvs-entry-role">{p.title}</span>
+            <span className="cvs-entry-date">{formatDateRange(p.startDate, p.endDate)}</span>
+          </div>
+          {p.link && <ContactLine href={p.link} />}
+          {p.bullets.length > 0 && (
+            <ul className="cvs-bullets">
+              {p.bullets.map((b, i) => (
+                <li key={i}>{b}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
 // Main flow, never SIGNATURE_TEMPLATE.sidebarSections (the label:value
 // detail panel) — each entry carries far more text than a skill/language/
 // certification row, so it stays in the main narrative flow rather than a
@@ -277,6 +305,8 @@ function renderMainSection(content: CvContent, section: CvSection) {
       );
     case 'workExperience':
       return <WorkEntries key="work" entries={content.workExperience} />;
+    case 'projects':
+      return <ProjectsSection key="projects" entries={content.projects ?? []} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
     case 'references':

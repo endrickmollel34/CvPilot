@@ -317,6 +317,7 @@ export class CvService {
     }
     this.validateReferencesContent(dto.content);
     this.validateProfileFields(dto.content);
+    this.validateProjectsContent(dto.content);
     await this.cvRepo.update(cvId, { content: dto.content });
     return this.cvRepo.findOneByOrFail({ id: cvId });
   }
@@ -437,6 +438,63 @@ export class CvService {
         if (typeof email !== 'string' || email.length > MAX_FIELD_LENGTH || !EMAIL_RE.test(email)) {
           throw new BadRequestException(`references[${i}].email is not a valid email address.`);
         }
+      }
+    });
+  }
+
+  /**
+   * Same targeted, defense-in-depth approach as validateReferencesContent
+   * (RABBIT_NOTEBOOK.md §54) — `projects` must be an array of objects each
+   * carrying a non-empty `title` (the one required field, per
+   * CvProjectEntry) and, when present, a `link`/`startDate`/`endDate`
+   * within a generous length cap; `bullets`, when present, must be an
+   * array of strings each within the same cap.
+   */
+  private validateProjectsContent(content: CvContent): void {
+    const raw = content as unknown as Record<string, unknown>;
+    const projects = raw['projects'];
+    if (projects === undefined) return;
+    if (!Array.isArray(projects)) {
+      throw new BadRequestException('projects must be an array.');
+    }
+
+    const MAX_FIELD_LENGTH = 255;
+    const MAX_BULLET_LENGTH = 2000;
+    const OPTIONAL_STRING_FIELDS = ['link', 'startDate', 'endDate'] as const;
+
+    projects.forEach((entry: unknown, i: number) => {
+      if (!entry || typeof entry !== 'object') {
+        throw new BadRequestException(`projects[${i}] must be an object.`);
+      }
+      const p = entry as Record<string, unknown>;
+
+      if (typeof p['id'] !== 'string' || !p['id']) {
+        throw new BadRequestException(`projects[${i}].id is required.`);
+      }
+      if (typeof p['title'] !== 'string' || !(p['title'] as string).trim()) {
+        throw new BadRequestException(`projects[${i}].title is required.`);
+      }
+      if ((p['title'] as string).length > MAX_FIELD_LENGTH) {
+        throw new BadRequestException(`projects[${i}].title is too long.`);
+      }
+
+      for (const field of OPTIONAL_STRING_FIELDS) {
+        const v = p[field];
+        if (v !== undefined && (typeof v !== 'string' || v.length > MAX_FIELD_LENGTH)) {
+          throw new BadRequestException(`projects[${i}].${field} is invalid.`);
+        }
+      }
+
+      const bullets = p['bullets'];
+      if (bullets !== undefined) {
+        if (!Array.isArray(bullets)) {
+          throw new BadRequestException(`projects[${i}].bullets must be an array.`);
+        }
+        bullets.forEach((b: unknown, j: number) => {
+          if (typeof b !== 'string' || b.length > MAX_BULLET_LENGTH) {
+            throw new BadRequestException(`projects[${i}].bullets[${j}] is invalid.`);
+          }
+        });
       }
     });
   }

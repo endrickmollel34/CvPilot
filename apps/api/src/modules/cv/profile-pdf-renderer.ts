@@ -7,6 +7,7 @@ import type {
   CvReferenceEntry,
   CvSkillEntry,
   CvLanguageEntry,
+  CvProjectEntry,
 } from '@cvpilot/shared';
 import {
   applyProfileDensity,
@@ -929,6 +930,70 @@ function renderWorkEntry(
   doc.fillColor(t.colors.text);
 }
 
+/** Modelled on renderWorkEntry's title/date/bullets shape
+ *  (RABBIT_NOTEBOOK.md §54) — `link`, when present, renders as a real
+ *  clickable PDF link in the accent-colored subtitle slot renderWorkEntry
+ *  uses for its company line. */
+function renderProjectEntry(
+  doc: PDFKit.PDFDocument,
+  entry: CvProjectEntry,
+  column: ProfileColumn,
+  t: TemplateDefinition,
+  ensureSpace: (needed: number) => boolean,
+): void {
+  const dateStr = formatDateRange(entry.startDate, entry.endDate);
+  const dateGap = dateStr ? 10 : 0;
+  const dateColW = dateStr ? dateColWidth(doc, dateStr, t, column.width) : 0;
+  const titleColW = column.width - dateColW - dateGap;
+
+  doc.font('Heading').fontSize(t.typography.bodySize);
+  const titleH = doc.heightOfString(entry.title, { width: titleColW });
+  doc.font('Heading').fontSize(t.typography.bodySize - 0.3);
+  const linkH = entry.link ? doc.heightOfString(entry.link, { width: column.width }) : 0;
+  doc.font('Body').fontSize(t.typography.bodySize);
+  const bulletsH = entry.bullets
+    .filter((b) => b.trim())
+    .reduce(
+      (acc, b) => acc + doc.heightOfString(b, { width: column.width - 20 }) + t.spacing.bulletGap,
+      0,
+    );
+  const estimated = titleH + 2 + linkH + (bulletsH > 0 ? bulletsH + 6 : 0) + 12;
+  ensureSpace(estimated);
+
+  const rowY = doc.y;
+  doc
+    .font('Heading')
+    .fontSize(t.typography.bodySize)
+    .fillColor(t.colors.text)
+    .text(entry.title, column.x, rowY, { width: titleColW });
+  const afterTitle = doc.y;
+  if (dateStr) {
+    doc
+      .font('Body')
+      .fontSize(t.typography.metaSize)
+      .fillColor(t.colors.muted)
+      .text(dateStr, column.x + column.width - dateColW, rowY, { width: dateColW, align: 'right' });
+    if (doc.y < afterTitle) doc.y = afterTitle;
+  }
+
+  if (entry.link) {
+    doc.moveDown(0.1);
+    const linkY = doc.y;
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize - 0.3)
+      .fillColor(t.colors.accent)
+      .text(entry.link, column.x, linkY, { width: column.width });
+    const url = normalizeExternalUrl(entry.link);
+    if (url) doc.link(column.x, linkY, doc.widthOfString(entry.link), doc.currentLineHeight(), url);
+  }
+
+  renderBullets(doc, entry.bullets, column.x, column.width, t);
+
+  doc.moveDown(0.75);
+  doc.fillColor(t.colors.text);
+}
+
 function renderEducationEntry(
   doc: PDFKit.PDFDocument,
   entry: CvEducationEntry,
@@ -1150,6 +1215,14 @@ function renderMainSection(
       ensureSpace(60);
       profileHeading(doc, 'Employment', column.x, column.width, t);
       for (const e of content.workExperience) renderWorkEntry(doc, e, column, t, ensureSpace);
+      break;
+    }
+    case 'projects': {
+      const projects = content.projects ?? [];
+      if (!projects.length) return;
+      ensureSpace(60);
+      profileHeading(doc, 'Projects', column.x, column.width, t);
+      for (const p of projects) renderProjectEntry(doc, p, column, t, ensureSpace);
       break;
     }
     case 'education': {

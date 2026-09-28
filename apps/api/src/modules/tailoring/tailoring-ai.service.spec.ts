@@ -126,6 +126,34 @@ describe('TailoringAiService', () => {
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
   });
 
+  // Fix (RABBIT_NOTEBOOK.md §54): projects must reach the model as context
+  // (see serializeCvContent's own comment) so it can inform/ground
+  // suggestions in other sections, even though projects itself is never a
+  // suggestable section (TailoringResponseSchema has no 'projects' member).
+  it('(§54) includes projects in the serialized CV text sent to the model', async () => {
+    mockOpenAICreate.mockResolvedValue(openAiResponse({ suggestions: [] }));
+    const contentWithProjects: CvContent = {
+      ...CONTENT,
+      projects: [
+        {
+          id: 'proj-1',
+          title: 'Muniverse Application',
+          link: 'github.com/example/muniverse',
+          startDate: '2023',
+          endDate: '2024',
+          bullets: ['Campus social media app.'],
+        },
+      ],
+    };
+
+    await service.runTailoring(contentWithProjects, 'Job description text.');
+
+    const sentPrompt = mockOpenAICreate.mock.calls[0]?.[0]?.messages?.[1]?.content as string;
+    expect(sentPrompt).toContain('PROJECTS:');
+    expect(sentPrompt).toContain('Muniverse Application');
+    expect(sentPrompt).toContain('Campus social media app.');
+  });
+
   it('still returns non-empty suggestions on the normal path', async () => {
     const suggestions = [
       {

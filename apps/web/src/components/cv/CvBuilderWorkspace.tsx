@@ -28,6 +28,7 @@ import { updateCvContent, updateCvTemplate, downloadCvPdf, getPhotoPreviewUrl } 
 import { PersonalDetails } from './sections/PersonalDetails';
 import { Summary } from './sections/Summary';
 import { WorkExperience } from './sections/WorkExperience';
+import { Projects } from './sections/Projects';
 import { Education } from './sections/Education';
 import { Skills } from './sections/Skills';
 import { Languages } from './sections/Languages';
@@ -75,6 +76,14 @@ function stripUncertaintyPrefixes(content: CvContent): CvContent {
       endDate: stripOpt(e.endDate),
       bullets: e.bullets.map(strip),
     })),
+    projects: content.projects?.map((p) => ({
+      ...p,
+      title: strip(p.title),
+      link: stripOpt(p.link),
+      startDate: stripOpt(p.startDate),
+      endDate: stripOpt(p.endDate),
+      bullets: p.bullets.map(strip),
+    })),
     education: content.education.map((e) => ({
       ...e,
       institution: strip(e.institution),
@@ -110,6 +119,7 @@ function stripUncertaintyPrefixes(content: CvContent): CvContent {
 const SECTION_LABELS: Record<CvSection, string> = {
   summary: 'Summary',
   workExperience: 'Work Experience',
+  projects: 'Projects',
   education: 'Education',
   skills: 'Skills',
   languages: 'Languages',
@@ -120,6 +130,7 @@ const SECTION_LABELS: Record<CvSection, string> = {
 const ALL_SECTIONS: CvSection[] = [
   'summary',
   'workExperience',
+  'projects',
   'education',
   'skills',
   'languages',
@@ -145,6 +156,7 @@ const EMPTY_CONTENT: CvContent = {
   version: 1,
   personalDetails: { fullName: '', email: '' },
   workExperience: [],
+  projects: [],
   education: [],
   skills: [],
   languages: [],
@@ -224,6 +236,12 @@ function SectionPanel({
             <WorkExperience
               entries={content.workExperience}
               onChange={(entries) => onContentChange({ ...content, workExperience: entries })}
+            />
+          )}
+          {section === 'projects' && (
+            <Projects
+              entries={content.projects ?? []}
+              onChange={(entries) => onContentChange({ ...content, projects: entries })}
             />
           )}
           {section === 'education' && (

@@ -9,6 +9,7 @@ import type {
   CvEducationEntry,
   CvCertificationEntry,
   CvReferenceEntry,
+  CvProjectEntry,
   TemplateId,
 } from '@cvpilot/shared';
 import {
@@ -249,6 +250,15 @@ export class PdfGenerationService {
         for (const e of content.workExperience) this.workEntry(doc, e, lm, pageW, t);
         doc.moveDown(0.2);
         break;
+
+      case 'projects': {
+        const projects = content.projects ?? [];
+        if (!projects.length) return;
+        this.heading(doc, 'Projects', lm, pageW, t);
+        for (const p of projects) this.projectEntry(doc, p, lm, pageW, t);
+        doc.moveDown(0.2);
+        break;
+      }
 
       case 'education':
         if (!content.education.length) return;
@@ -549,6 +559,82 @@ export class PdfGenerationService {
         .fontSize(t.typography.bodySize - 1)
         .fillColor(t.colors.muted)
         .text(companyLine, lm, doc.y, { width: pageW });
+    }
+
+    const bullets = entry.bullets.filter((b) => b.trim());
+    if (bullets.length) {
+      doc.moveDown(0.2);
+      for (const b of bullets) {
+        doc
+          .font('Body')
+          .fontSize(t.typography.bodySize)
+          .fillColor(t.colors.text)
+          .text(`•  ${b}`, lm + 4, doc.y, { width: pageW - 4, lineGap: t.spacing.lineGap - 1 });
+      }
+    }
+
+    doc.moveDown(0.65);
+    doc.fillColor(t.colors.text);
+  }
+
+  /** Modelled on workEntry's title/date/bullets shape (RABBIT_NOTEBOOK.md
+   *  §54) — `link`, when present, renders as a real clickable PDF link in
+   *  the subtitle slot workEntry uses for its company line, using the same
+   *  measureEntryHeight primitive (link text passed as `subtitle`) so
+   *  page-break decisions stay consistent with every other repeating
+   *  entry. */
+  private projectEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvProjectEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+  ): void {
+    const dateStr = formatDateRange(entry.startDate, entry.endDate);
+    const dateColW = 100;
+    const titleColW = pageW - dateColW;
+
+    this.ensureSpace(
+      doc,
+      t,
+      this.measureEntryHeight(
+        doc,
+        titleColW,
+        pageW,
+        entry.title,
+        entry.link,
+        undefined,
+        entry.bullets,
+        t,
+      ),
+    );
+
+    const rowY = doc.y;
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.title, lm, rowY, { width: titleColW });
+    const afterTitle = doc.y;
+
+    if (dateStr) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(dateStr, lm + titleColW, rowY, { width: dateColW, align: 'right' });
+      if (doc.y < afterTitle) doc.y = afterTitle;
+    }
+
+    if (entry.link) {
+      const linkY = doc.y;
+      doc
+        .font('Body')
+        .fontSize(t.typography.bodySize - 1)
+        .fillColor(t.colors.muted)
+        .text(entry.link, lm, linkY, { width: pageW });
+      const url = normalizeExternalUrl(entry.link);
+      if (url) doc.link(lm, linkY, doc.widthOfString(entry.link), doc.currentLineHeight(), url);
     }
 
     const bullets = entry.bullets.filter((b) => b.trim());
@@ -1114,6 +1200,15 @@ export class PdfGenerationService {
         for (const e of content.workExperience) this.modernWorkEntry(doc, e, column, lm, pageW, t);
         break;
 
+      case 'projects': {
+        const projects = content.projects ?? [];
+        if (!projects.length) return;
+        this.modernEnsureSpace(doc, t, HEADING_MIN_SPACE, column, lm, pageW);
+        this.modernHeading(doc, 'Projects', column.x, column.width, t);
+        for (const p of projects) this.modernProjectEntry(doc, p, column, lm, pageW, t);
+        break;
+      }
+
       case 'education':
         if (!content.education.length) return;
         this.modernEnsureSpace(doc, t, HEADING_MIN_SPACE, column, lm, pageW);
@@ -1300,6 +1395,93 @@ export class PdfGenerationService {
         // Explicit inter-bullet gap (spacing.bulletGap) — text() calls back
         // to back have zero gap between them by default; without this,
         // bullets read as visually cramped on content-dense CVs.
+        if (i > 0) doc.y += t.spacing.bulletGap;
+        doc
+          .font('Body')
+          .fontSize(t.typography.bodySize)
+          .fillColor(t.colors.text)
+          .text(`•  ${b}`, column.x + 5, doc.y, {
+            width: column.width - 5,
+            lineGap: t.spacing.lineGap - 1,
+          });
+      });
+    }
+
+    doc.moveDown(0.8);
+    doc.fillColor(t.colors.text);
+  }
+
+  /** Modelled on modernWorkEntry's title/date/bullets shape
+   *  (RABBIT_NOTEBOOK.md §54) — see classicRender's projectEntry doc
+   *  comment for the shared `link`-as-subtitle rationale. */
+  private modernProjectEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvProjectEntry,
+    column: ModernColumn,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+  ): void {
+    const dateStr = formatDateRange(entry.startDate, entry.endDate);
+    const dateGap = dateStr ? 8 : 0;
+    const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, column.width) : 0;
+    const titleColW = column.width - dateColW - dateGap;
+
+    this.modernEnsureSpace(
+      doc,
+      t,
+      this.measureEntryHeight(
+        doc,
+        titleColW,
+        column.width,
+        entry.title,
+        entry.link,
+        undefined,
+        entry.bullets,
+        t,
+      ),
+      column,
+      lm,
+      pageW,
+    );
+
+    const rowY = doc.y;
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.title, column.x, rowY, { width: titleColW });
+    const afterTitle = doc.y;
+
+    if (dateStr) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(dateStr, column.x + column.width - dateColW, rowY, {
+          width: dateColW,
+          align: 'right',
+        });
+      if (doc.y < afterTitle) doc.y = afterTitle;
+    }
+
+    if (entry.link) {
+      doc.moveDown(0.08);
+      const linkY = doc.y;
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.7)
+        .fillColor(t.colors.accent)
+        .text(entry.link, column.x, linkY, { width: column.width, characterSpacing: 0.1 });
+      const url = normalizeExternalUrl(entry.link);
+      if (url)
+        doc.link(column.x, linkY, doc.widthOfString(entry.link), doc.currentLineHeight(), url);
+    }
+
+    const bullets = entry.bullets.filter((b) => b.trim());
+    if (bullets.length) {
+      doc.moveDown(0.3);
+      bullets.forEach((b, i) => {
         if (i > 0) doc.y += t.spacing.bulletGap;
         doc
           .font('Body')
@@ -1548,6 +1730,8 @@ export class PdfGenerationService {
         return Boolean(content.summary);
       case 'workExperience':
         return content.workExperience.length > 0;
+      case 'projects':
+        return (content.projects?.length ?? 0) > 0;
       case 'education':
         return content.education.length > 0;
       case 'skills':
@@ -1671,6 +1855,26 @@ export class PdfGenerationService {
             orgLine,
             undefined,
             e.bullets,
+            t,
+          );
+        }
+        return h;
+      }
+      case 'projects': {
+        let h = headingOverhead;
+        for (const p of content.projects ?? []) {
+          const dateStr = formatDateRange(p.startDate, p.endDate);
+          const dateGap = dateStr ? 10 : 0;
+          const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, pageW) : 0;
+          const titleColW = pageW - dateColW - dateGap;
+          h += this.measureEntryHeight(
+            doc,
+            titleColW,
+            pageW,
+            p.title,
+            p.link,
+            undefined,
+            p.bullets,
             t,
           );
         }
@@ -1941,6 +2145,17 @@ export class PdfGenerationService {
         }
         break;
 
+      case 'projects': {
+        const projects = content.projects ?? [];
+        if (!projects.length) return;
+        this.minimalEnsureSpace(doc, t, MINIMAL_HEADING_MIN_SPACE, lm, pageW, candidateName);
+        this.minimalHeading(doc, 'Projects', lm, pageW, t);
+        for (const p of projects) {
+          this.minimalProjectEntry(doc, p, lm, pageW, t, candidateName);
+        }
+        break;
+      }
+
       case 'education':
         if (!content.education.length) return;
         this.minimalEnsureSpace(doc, t, MINIMAL_HEADING_MIN_SPACE, lm, pageW, candidateName);
@@ -2190,6 +2405,86 @@ export class PdfGenerationService {
           .fillColor(t.colors.text)
           // An en dash, not Modern's bullet dot — a quieter, more
           // editorial marker consistent with Minimal's identity.
+          .text(`–  ${b}`, lm + 4, doc.y, { width: pageW - 4, lineGap: t.spacing.lineGap - 1 });
+      });
+    }
+
+    doc.moveDown(0.9);
+    doc.fillColor(t.colors.text);
+  }
+
+  /** Modelled on minimalWorkEntry's title/date/bullets shape
+   *  (RABBIT_NOTEBOOK.md §54) — see classicRender's projectEntry doc
+   *  comment for the shared `link`-as-subtitle rationale. */
+  private minimalProjectEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvProjectEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+    candidateName: string,
+  ): void {
+    const dateStr = formatDateRange(entry.startDate, entry.endDate);
+    const dateGap = dateStr ? 10 : 0;
+    const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, pageW) : 0;
+    const titleColW = pageW - dateColW - dateGap;
+
+    this.minimalEnsureSpace(
+      doc,
+      t,
+      this.measureEntryHeight(
+        doc,
+        titleColW,
+        pageW,
+        entry.title,
+        entry.link,
+        undefined,
+        entry.bullets,
+        t,
+      ),
+      lm,
+      pageW,
+      candidateName,
+    );
+
+    const rowY = doc.y;
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.title, lm, rowY, { width: titleColW });
+    const afterTitle = doc.y;
+
+    if (dateStr) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(dateStr, lm + pageW - dateColW, rowY, { width: dateColW, align: 'right' });
+      if (doc.y < afterTitle) doc.y = afterTitle;
+    }
+
+    if (entry.link) {
+      doc.moveDown(0.12);
+      const linkY = doc.y;
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.5)
+        .fillColor(t.colors.accent)
+        .text(entry.link, lm, linkY, { width: pageW });
+      const url = normalizeExternalUrl(entry.link);
+      if (url) doc.link(lm, linkY, doc.widthOfString(entry.link), doc.currentLineHeight(), url);
+    }
+
+    const bullets = entry.bullets.filter((b) => b.trim());
+    if (bullets.length) {
+      doc.moveDown(0.4);
+      bullets.forEach((b, i) => {
+        if (i > 0) doc.y += t.spacing.bulletGap;
+        doc
+          .font('Body')
+          .fontSize(t.typography.bodySize)
+          .fillColor(t.colors.text)
           .text(`–  ${b}`, lm + 4, doc.y, { width: pageW - 4, lineGap: t.spacing.lineGap - 1 });
       });
     }
@@ -2645,6 +2940,8 @@ export class PdfGenerationService {
         return Boolean(content.summary);
       case 'workExperience':
         return content.workExperience.length > 0;
+      case 'projects':
+        return (content.projects?.length ?? 0) > 0;
       case 'education':
         return content.education.length > 0;
       case 'references':
@@ -2696,6 +2993,26 @@ export class PdfGenerationService {
             orgLine,
             undefined,
             e.bullets,
+            t,
+          );
+        }
+        return h;
+      }
+      case 'projects': {
+        let h = headingOverhead;
+        for (const p of content.projects ?? []) {
+          const dateStr = formatDateRange(p.startDate, p.endDate);
+          const dateGap = dateStr ? 10 : 0;
+          const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, pageW) : 0;
+          const titleColW = pageW - dateColW - dateGap;
+          h += this.measureEntryHeight(
+            doc,
+            titleColW,
+            pageW,
+            p.title,
+            p.link,
+            undefined,
+            p.bullets,
             t,
           );
         }
@@ -2806,6 +3123,17 @@ export class PdfGenerationService {
           this.professionalWorkEntry(doc, e, column, lm, pageW, t);
         }
         break;
+
+      case 'projects': {
+        const projects = content.projects ?? [];
+        if (!projects.length) return;
+        this.professionalMainEnsureSpace(doc, t, PROFESSIONAL_HEADING_MIN_SPACE, column, lm, pageW);
+        this.professionalHeading(doc, 'Projects', column.x, column.width, t);
+        for (const p of projects) {
+          this.professionalProjectEntry(doc, p, column, lm, pageW, t);
+        }
+        break;
+      }
 
       case 'education':
         if (!content.education.length) return;
@@ -2976,6 +3304,98 @@ export class PdfGenerationService {
         // Marker drawn separately from the body text so wrapped
         // continuation lines hang under the text (start at
         // column.x + 4 + bulletIndent) instead of under the marker.
+        doc
+          .font('Body')
+          .fontSize(t.typography.bodySize)
+          .fillColor(t.colors.text)
+          .text('•', column.x + 4, bulletY, { lineBreak: false });
+        doc.y = bulletY;
+        doc.text(b, column.x + 4 + bulletIndent, bulletY, {
+          width: column.width - 4 - bulletIndent,
+          lineGap: t.spacing.lineGap - 1,
+        });
+      });
+    }
+
+    doc.moveDown(0.75);
+    doc.fillColor(t.colors.text);
+  }
+
+  /** Modelled on professionalWorkEntry's title/date/bullets shape
+   *  (RABBIT_NOTEBOOK.md §54) — see classicRender's projectEntry doc
+   *  comment for the shared `link`-as-subtitle rationale. */
+  private professionalProjectEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvProjectEntry,
+    column: ProfessionalColumn,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+  ): void {
+    const dateStr = formatDateRange(entry.startDate, entry.endDate);
+    const dateGap = dateStr ? 10 : 0;
+    const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, column.width) : 0;
+    const titleColW = column.width - dateColW - dateGap;
+
+    this.professionalMainEnsureSpace(
+      doc,
+      t,
+      this.measureEntryHeight(
+        doc,
+        titleColW,
+        column.width,
+        entry.title,
+        entry.link,
+        undefined,
+        entry.bullets,
+        t,
+      ),
+      column,
+      lm,
+      pageW,
+    );
+
+    const rowY = doc.y;
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.title, column.x, rowY, { width: titleColW });
+    const afterTitle = doc.y;
+
+    if (dateStr) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(dateStr, column.x + column.width - dateColW, rowY, {
+          width: dateColW,
+          align: 'right',
+        });
+      if (doc.y < afterTitle) doc.y = afterTitle;
+    }
+
+    if (entry.link) {
+      doc.moveDown(0.1);
+      const linkY = doc.y;
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.3)
+        .fillColor(t.colors.accent)
+        .text(entry.link, column.x, linkY, { width: column.width });
+      const url = normalizeExternalUrl(entry.link);
+      if (url)
+        doc.link(column.x, linkY, doc.widthOfString(entry.link), doc.currentLineHeight(), url);
+    }
+
+    const bullets = entry.bullets.filter((b) => b.trim());
+    if (bullets.length) {
+      doc.moveDown(0.35);
+      doc.font('Body').fontSize(t.typography.bodySize);
+      const bulletIndent = doc.widthOfString('•  ');
+      bullets.forEach((b, i) => {
+        if (i > 0) doc.y += t.spacing.bulletGap;
+        const bulletY = doc.y;
         doc
           .font('Body')
           .fontSize(t.typography.bodySize)
@@ -3495,6 +3915,8 @@ export class PdfGenerationService {
         return Boolean(content.summary);
       case 'workExperience':
         return content.workExperience.length > 0;
+      case 'projects':
+        return (content.projects?.length ?? 0) > 0;
       case 'education':
         return content.education.length > 0;
       case 'references':
@@ -3585,6 +4007,26 @@ export class PdfGenerationService {
             orgLine,
             undefined,
             e.bullets,
+            t,
+          );
+        }
+        return h;
+      }
+      case 'projects': {
+        let h = headingOverhead;
+        for (const p of content.projects ?? []) {
+          const dateStr = formatDateRange(p.startDate, p.endDate);
+          const dateGap = dateStr ? 8 : 0;
+          const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, pageW) : 0;
+          const titleColW = pageW - dateColW - dateGap;
+          h += this.measureEntryHeight(
+            doc,
+            titleColW,
+            pageW,
+            p.title,
+            p.link,
+            undefined,
+            p.bullets,
             t,
           );
         }
@@ -3838,6 +4280,17 @@ export class PdfGenerationService {
         }
         break;
 
+      case 'projects': {
+        const projects = content.projects ?? [];
+        if (!projects.length) return;
+        this.compactMainEnsureSpace(doc, t, COMPACT_HEADING_MIN_SPACE, lm, pageW, candidateName);
+        this.compactHeading(doc, 'Projects', lm, pageW, t);
+        for (const p of projects) {
+          this.compactProjectEntry(doc, p, lm, pageW, t, candidateName);
+        }
+        break;
+      }
+
       case 'education':
         if (!content.education.length) return;
         this.compactMainEnsureSpace(doc, t, COMPACT_HEADING_MIN_SPACE, lm, pageW, candidateName);
@@ -4013,6 +4466,88 @@ export class PdfGenerationService {
           // A plain hyphen, not Modern/Professional's bullet dot or
           // Minimal's en dash — the smallest, most utilitarian marker of
           // any template, fitting Compact's efficiency-first identity.
+          .text(`-  ${b}`, lm + 3, doc.y, { width: pageW - 3, lineGap: t.spacing.lineGap - 0.5 });
+      });
+    }
+
+    doc.moveDown(0.5);
+    doc.fillColor(t.colors.text);
+  }
+
+  /** Modelled on compactWorkEntry's title/date/bullets shape
+   *  (RABBIT_NOTEBOOK.md §54) — see classicRender's projectEntry doc
+   *  comment for the shared `link`-as-subtitle rationale. Bold charcoal
+   *  link line, not accent-colored, matching compactWorkEntry's own
+   *  restrained-accent convention (see its comment). */
+  private compactProjectEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvProjectEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+    candidateName: string,
+  ): void {
+    const dateStr = formatDateRange(entry.startDate, entry.endDate);
+    const dateGap = dateStr ? 8 : 0;
+    const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, pageW) : 0;
+    const titleColW = pageW - dateColW - dateGap;
+
+    this.compactMainEnsureSpace(
+      doc,
+      t,
+      this.measureEntryHeight(
+        doc,
+        titleColW,
+        pageW,
+        entry.title,
+        entry.link,
+        undefined,
+        entry.bullets,
+        t,
+      ),
+      lm,
+      pageW,
+      candidateName,
+    );
+
+    const rowY = doc.y;
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.text)
+      .text(entry.title, lm, rowY, { width: titleColW });
+    const afterTitle = doc.y;
+
+    if (dateStr) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(dateStr, lm + pageW - dateColW, rowY, { width: dateColW, align: 'right' });
+      if (doc.y < afterTitle) doc.y = afterTitle;
+    }
+
+    if (entry.link) {
+      doc.moveDown(0.06);
+      const linkY = doc.y;
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.2)
+        .fillColor(t.colors.text)
+        .text(entry.link, lm, linkY, { width: pageW });
+      const url = normalizeExternalUrl(entry.link);
+      if (url) doc.link(lm, linkY, doc.widthOfString(entry.link), doc.currentLineHeight(), url);
+    }
+
+    const bullets = entry.bullets.filter((b) => b.trim());
+    if (bullets.length) {
+      doc.moveDown(0.25);
+      bullets.forEach((b, i) => {
+        if (i > 0) doc.y += t.spacing.bulletGap;
+        doc
+          .font('Body')
+          .fontSize(t.typography.bodySize)
+          .fillColor(t.colors.text)
           .text(`-  ${b}`, lm + 3, doc.y, { width: pageW - 3, lineGap: t.spacing.lineGap - 0.5 });
       });
     }
@@ -4472,6 +5007,8 @@ export class PdfGenerationService {
         return Boolean(content.summary);
       case 'workExperience':
         return content.workExperience.length > 0;
+      case 'projects':
+        return (content.projects?.length ?? 0) > 0;
       case 'education':
         return content.education.length > 0;
       case 'references':
@@ -4562,6 +5099,26 @@ export class PdfGenerationService {
             orgLine,
             undefined,
             e.bullets,
+            t,
+          );
+        }
+        return h;
+      }
+      case 'projects': {
+        let h = headingOverhead;
+        for (const p of content.projects ?? []) {
+          const dateStr = formatDateRange(p.startDate, p.endDate);
+          const dateGap = dateStr ? 8 : 0;
+          const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, pageW) : 0;
+          const titleColW = pageW - dateColW - dateGap;
+          h += this.measureEntryHeight(
+            doc,
+            titleColW,
+            pageW,
+            p.title,
+            p.link,
+            undefined,
+            p.bullets,
             t,
           );
         }
@@ -4886,6 +5443,24 @@ export class PdfGenerationService {
         }
         break;
 
+      case 'projects': {
+        const projects = content.projects ?? [];
+        if (!projects.length) return;
+        this.signatureMainEnsureSpace(
+          doc,
+          t,
+          SIGNATURE_HEADING_MIN_SPACE,
+          lm,
+          pageW,
+          candidateName,
+        );
+        this.signatureHeading(doc, 'Projects', lm, pageW, t);
+        for (const p of projects) {
+          this.signatureProjectEntry(doc, p, lm, pageW, t, candidateName);
+        }
+        break;
+      }
+
       case 'education':
         if (!content.education.length) return;
         this.signatureMainEnsureSpace(
@@ -5063,6 +5638,87 @@ export class PdfGenerationService {
       .fontSize(t.typography.bodySize - 0.3)
       .fillColor(t.colors.accent)
       .text(orgLine, lm, doc.y, { width: pageW });
+
+    const bullets = entry.bullets.filter((b) => b.trim());
+    if (bullets.length) {
+      doc.moveDown(0.35);
+      bullets.forEach((b, i) => {
+        if (i > 0) doc.y += t.spacing.bulletGap;
+        doc
+          .font('Body')
+          .fontSize(t.typography.bodySize)
+          .fillColor(t.colors.text)
+          .text(`»  ${b}`, lm + 3, doc.y, { width: pageW - 3, lineGap: t.spacing.lineGap - 1 });
+      });
+    }
+
+    doc.moveDown(0.6);
+    doc.fillColor(t.colors.text);
+  }
+
+  /** Modelled on signatureWorkEntry's title/date/bullets shape
+   *  (RABBIT_NOTEBOOK.md §54) — see classicRender's projectEntry doc
+   *  comment for the shared `link`-as-subtitle rationale. Wine-accented
+   *  link line, matching signatureWorkEntry's own org-line convention. */
+  private signatureProjectEntry(
+    doc: PDFKit.PDFDocument,
+    entry: CvProjectEntry,
+    lm: number,
+    pageW: number,
+    t: TemplateDefinition,
+    candidateName: string,
+  ): void {
+    const dateStr = formatDateRange(entry.startDate, entry.endDate);
+    const dateGap = dateStr ? 8 : 0;
+    const dateColW = dateStr ? this.modernDateColWidth(doc, dateStr, t, pageW) : 0;
+    const titleColW = pageW - dateColW - dateGap;
+
+    this.signatureMainEnsureSpace(
+      doc,
+      t,
+      this.measureEntryHeight(
+        doc,
+        titleColW,
+        pageW,
+        entry.title,
+        entry.link,
+        undefined,
+        entry.bullets,
+        t,
+      ),
+      lm,
+      pageW,
+      candidateName,
+    );
+
+    const rowY = doc.y;
+    doc
+      .font('Heading')
+      .fontSize(t.typography.bodySize)
+      .fillColor(t.colors.heading)
+      .text(entry.title, lm, rowY, { width: titleColW });
+    const afterTitle = doc.y;
+
+    if (dateStr) {
+      doc
+        .font('Body')
+        .fontSize(t.typography.metaSize)
+        .fillColor(t.colors.muted)
+        .text(dateStr, lm + pageW - dateColW, rowY, { width: dateColW, align: 'right' });
+      if (doc.y < afterTitle) doc.y = afterTitle;
+    }
+
+    if (entry.link) {
+      doc.moveDown(0.1);
+      const linkY = doc.y;
+      doc
+        .font('Heading')
+        .fontSize(t.typography.bodySize - 0.3)
+        .fillColor(t.colors.accent)
+        .text(entry.link, lm, linkY, { width: pageW });
+      const url = normalizeExternalUrl(entry.link);
+      if (url) doc.link(lm, linkY, doc.widthOfString(entry.link), doc.currentLineHeight(), url);
+    }
 
     const bullets = entry.bullets.filter((b) => b.trim());
     if (bullets.length) {

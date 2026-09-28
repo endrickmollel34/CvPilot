@@ -42,6 +42,20 @@ const MOCK_CONTENT: CvContent = {
       bullets: ['Built REST APIs', 'Managed deployments'],
     },
   ],
+  // Included so the apply()-path tests below can confirm a project survives
+  // untouched, byte for byte, when only an unrelated (summary) suggestion
+  // is accepted — RABBIT_NOTEBOOK.md §54's own explicit requirement that
+  // applying unrelated tailoring suggestions must preserve projects.
+  projects: [
+    {
+      id: 'proj-1',
+      title: 'Muniverse Application',
+      link: 'github.com/example/muniverse',
+      startDate: '2023',
+      endDate: '2024',
+      bullets: ['Campus social media app.'],
+    },
+  ],
   // Deliberately includes one year-only date (RABBIT_NOTEBOOK.md §53) so
   // the apply()-path tests below can confirm it survives untouched, byte
   // for byte, when only an unrelated (summary) suggestion is accepted.
@@ -574,6 +588,10 @@ describe('TailoringService', () => {
           // apply() must never reformat or "correct" a date it isn't even
           // touching.
           education: MOCK_CONTENT.education,
+          // (§54) projects is not a tailorable section at all (see
+          // tailoring-ai.service.ts's TailoringResponseSchema comment) —
+          // it must always survive an unrelated suggestion untouched.
+          projects: MOCK_CONTENT.projects,
         }),
         'Backend Engineer',
       );

@@ -6,6 +6,7 @@ import type {
   CvSkillEntry,
   CvCertificationEntry,
   CvReferenceEntry,
+  CvProjectEntry,
 } from '../types/cv.types';
 import { CLASSIC_TEMPLATE } from './template-types';
 import type { TemplateDefinition } from './template-types';
@@ -140,6 +141,41 @@ function CertificationsSection({ certs }: { certs: CvCertificationEntry[] }) {
   );
 }
 
+// Modelled on WorkEntries' title/date/bullets shape (RABBIT_NOTEBOOK.md
+// §54) — a project entry is structurally closest to a work-experience
+// entry (a title, an optional date range, a list of bullets) rather than
+// education/references. `link`, when present, renders as a clickable
+// subtitle line in the same visual slot WorkEntries uses for its company
+// line.
+function ProjectsSection({ entries }: { entries: CvProjectEntry[] }) {
+  if (!entries.length) return null;
+  return (
+    <>
+      <SectionHeading title="Projects" />
+      {entries.map((p) => (
+        <div key={p.id} className="cv-entry">
+          <div className="cv-entry-row">
+            <span className="cv-entry-title">{p.title}</span>
+            <span className="cv-entry-date">{formatDateRange(p.startDate, p.endDate)}</span>
+          </div>
+          {p.link && (
+            <div className="cv-entry-subtitle">
+              <ContactLink href={p.link} label={p.link} />
+            </div>
+          )}
+          {p.bullets.length > 0 && (
+            <ul className="cv-bullets">
+              {p.bullets.map((b, i) => (
+                <li key={i}>{b}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
 // Modelled on EducationEntries' title/subtitle/meta shape — the closest
 // existing precedent for a compact, mostly-optional repeating record.
 // `availableUponRequest` is checked here (not just at the call site) so
@@ -196,6 +232,8 @@ function renderSection(content: CvContent, section: CvSection) {
       );
     case 'workExperience':
       return <WorkEntries key="work" entries={content.workExperience} />;
+    case 'projects':
+      return <ProjectsSection key="projects" entries={content.projects ?? []} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
     case 'skills':
@@ -266,6 +304,7 @@ export function ClassicCvDocument({ content }: { content: CvContent }) {
 export const DEFAULT_SECTION_ORDER: CvSection[] = [
   'summary',
   'workExperience',
+  'projects',
   'education',
   'skills',
   'languages',
@@ -282,21 +321,28 @@ export const DEFAULT_SECTION_ORDER: CvSection[] = [
  * Two cases:
  *  1. `sectionOrder` is empty (never-saved/new content) — use
  *     DEFAULT_SECTION_ORDER outright, same as before this helper existed.
- *  2. `sectionOrder` is non-empty but predates References — a real CV
- *     saved before this feature has a complete, deliberately-ordered list
- *     of the OTHER sections with no 'references' entry at all (there is no
- *     migration that backfills it). Falling back to DEFAULT_SECTION_ORDER
- *     in this case would silently discard the user's own section order;
- *     instead 'references' is appended once at the end, exactly like a
- *     brand-new CV's DEFAULT_SECTION_ORDER already places it. This is what
- *     makes References actually appear in the preview/PDF for existing
- *     CVs the moment a user adds one — CvBuilderWorkspace.tsx's own
- *     `sections` list does the equivalent for the *editor UI*, but only
- *     this function governs what's actually rendered.
+ *  2. `sectionOrder` is non-empty but predates References and/or Projects
+ *     (RABBIT_NOTEBOOK.md §54) — a real CV saved before one of these
+ *     features existed has a complete, deliberately-ordered list of the
+ *     OTHER sections with no 'references'/'projects' entry at all (there
+ *     is no migration that backfills either). Falling back to
+ *     DEFAULT_SECTION_ORDER in this case would silently discard the user's
+ *     own section order; instead each missing section is appended once at
+ *     the end (in DEFAULT_SECTION_ORDER's own relative order — projects
+ *     before references — when a CV is missing both), exactly like a
+ *     brand-new CV's DEFAULT_SECTION_ORDER already places them. This is
+ *     what makes a newly-added section actually appear in the preview/PDF
+ *     for existing CVs the moment a user adds one to it —
+ *     CvBuilderWorkspace.tsx's own `sections` list does the equivalent for
+ *     the *editor UI*, but only this function governs what's actually
+ *     rendered.
  */
 export function resolveSectionOrder(sectionOrder: CvSection[]): CvSection[] {
-  const base = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
-  return base.includes('references') ? base : [...base, 'references'];
+  let base = sectionOrder.length > 0 ? sectionOrder : DEFAULT_SECTION_ORDER;
+  for (const section of ['projects', 'references'] as const) {
+    if (!base.includes(section)) base = [...base, section];
+  }
+  return base;
 }
 
 /**

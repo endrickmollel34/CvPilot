@@ -8,6 +8,7 @@ import type {
   CvReferenceEntry,
   CvSkillEntry,
   CvLanguageEntry,
+  CvProjectEntry,
 } from '../types/cv.types';
 import { PROFILE_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -660,6 +661,44 @@ function WorkEntries({ entries }: { entries: CvWorkEntry[] }) {
   );
 }
 
+/** One project entry — same rationale as WorkEntryItem (RABBIT_NOTEBOOK.md
+ *  §54): modelled on its title/date/bullets shape, with `link` rendered as
+ *  a clickable subtitle line in the slot WorkEntryItem uses for company. */
+export function ProjectEntryItem({ entry }: { entry: CvProjectEntry }) {
+  return (
+    <div className="cvpf-entry">
+      <div className="cvpf-entry-row">
+        <span className="cvpf-entry-title">{entry.title}</span>
+        <span className="cvpf-entry-date">{formatDateRange(entry.startDate, entry.endDate)}</span>
+      </div>
+      {entry.link && (
+        <div className="cvpf-entry-org">
+          <ContactLink href={entry.link} label={entry.link} />
+        </div>
+      )}
+      {entry.bullets.length > 0 && (
+        <ul className="cvpf-bullets">
+          {entry.bullets.map((b, i) => (
+            <li key={i}>{b}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ProjectsSection({ entries }: { entries: CvProjectEntry[] }) {
+  if (!entries.length) return null;
+  return (
+    <>
+      <SectionHeading title="Projects" />
+      {entries.map((p) => (
+        <ProjectEntryItem key={p.id} entry={p} />
+      ))}
+    </>
+  );
+}
+
 /** One education entry — same rationale as WorkEntryItem. */
 export function EducationEntryItem({ entry }: { entry: CvEducationEntry }) {
   return (
@@ -786,6 +825,8 @@ function renderMainSection(content: CvContent, section: CvSection) {
       );
     case 'workExperience':
       return <WorkEntries key="work" entries={content.workExperience} />;
+    case 'projects':
+      return <ProjectsSection key="projects" entries={content.projects ?? []} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
     case 'certifications':

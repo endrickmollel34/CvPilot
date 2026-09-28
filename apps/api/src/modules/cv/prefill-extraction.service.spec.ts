@@ -293,4 +293,64 @@ describe('PrefillExtractionService', () => {
     expect(result.content.workExperience[0]?.startDate).toBe('2024-10');
     expect(result.content.workExperience[0]?.endDate).toBe('2025-09');
   });
+
+  // Fix (RABBIT_NOTEBOOK.md §54): confirmed against a real production CV —
+  // a "6.0 PROJECTS" section ("Muniverse Application; Campus social media
+  // app.") was present in the raw parsed text but had nowhere to go, since
+  // CvContent had no `projects` field/prompt/schema support at all — the
+  // same class of gap §47 already fixed once for Qualities/References.
+  it('(§54) still asks the model to extract a Projects section without inventing technologies, contributions, or achievements', () => {
+    expect(SYSTEM_PROMPT).toMatch(/extract a "Projects" section/i);
+    expect(SYSTEM_PROMPT).toMatch(/never invent a technology, contribution, achievement, or date/i);
+  });
+
+  it('(§54) carries a project through unchanged when the model returns one', async () => {
+    mockModelResponse({
+      personalDetails: { fullName: 'Alex Johnson', email: 'alex@example.com' },
+      workExperience: [],
+      projects: [
+        {
+          title: 'Muniverse Application',
+          link: 'github.com/example/muniverse',
+          startDate: '2023',
+          endDate: '2024',
+          bullets: ['Campus social media app.'],
+        },
+      ],
+      education: [],
+      skills: [],
+      languages: [],
+      certifications: [],
+    });
+
+    const service = new PrefillExtractionService(mockConfig);
+    const result = await service.extract('irrelevant for this mock');
+
+    expect(result.content.projects).toHaveLength(1);
+    expect(result.content.projects?.[0]).toMatchObject({
+      title: 'Muniverse Application',
+      link: 'github.com/example/muniverse',
+      startDate: '2023',
+      endDate: '2024',
+      bullets: ['Campus social media app.'],
+    });
+    expect(result.content.projects?.[0]?.id).toEqual(expect.any(String));
+    expect(result.content.sectionOrder).toContain('projects');
+  });
+
+  it('(§54) defaults projects safely (no throw) when the model omits the section entirely', async () => {
+    mockModelResponse({
+      personalDetails: { fullName: 'Alex Johnson', email: 'alex@example.com' },
+      workExperience: [],
+      education: [],
+      skills: [],
+      languages: [],
+      certifications: [],
+    });
+
+    const service = new PrefillExtractionService(mockConfig);
+    const result = await service.extract('irrelevant for this mock');
+
+    expect(result.content.projects).toEqual([]);
+  });
 });

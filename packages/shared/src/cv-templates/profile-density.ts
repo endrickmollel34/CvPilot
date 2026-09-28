@@ -206,6 +206,16 @@ function estimateMainHeight(content: CvContent, width: number, t: TemplateDefini
         }
         h += t.spacing.entryGap + 14;
       }
+    } else if (section === 'projects' && (content.projects?.length ?? 0) > 0) {
+      h += HEADING_OVERHEAD_PT;
+      for (const p of content.projects ?? []) {
+        h += textHeight(p.title, width * 0.6, t.typography.bodySize) + 2;
+        if (p.link) h += textHeight(p.link, width, t.typography.bodySize - 0.3);
+        for (const b of p.bullets.filter((x) => x.trim())) {
+          h += textHeight(b, width - 20, t.typography.bodySize) + t.spacing.bulletGap;
+        }
+        h += t.spacing.entryGap + 14;
+      }
     } else if (section === 'education' && content.education.length) {
       h += HEADING_OVERHEAD_PT;
       for (const e of content.education) {

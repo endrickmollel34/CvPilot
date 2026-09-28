@@ -6,6 +6,7 @@ import type {
   CvEducationEntry,
   CvCertificationEntry,
   CvReferenceEntry,
+  CvProjectEntry,
 } from '../types/cv.types';
 import { PROFESSIONAL_TEMPLATE, type TemplateDefinition } from './template-types';
 import {
@@ -170,6 +171,37 @@ function EducationEntries({ entries }: { entries: CvEducationEntry[] }) {
   );
 }
 
+// Modelled on WorkEntries' title/date/bullets shape (RABBIT_NOTEBOOK.md
+// §54) — see classic-document.tsx's ProjectsSection for the full rationale.
+function ProjectsSection({ entries }: { entries: CvProjectEntry[] }) {
+  if (!entries.length) return null;
+  return (
+    <>
+      <SectionHeading title="Projects" />
+      {entries.map((p) => (
+        <div key={p.id} className="cvp-entry">
+          <div className="cvp-entry-row">
+            <span className="cvp-entry-title">{p.title}</span>
+            <span className="cvp-entry-date">{formatDateRange(p.startDate, p.endDate)}</span>
+          </div>
+          {p.link && (
+            <div className="cvp-entry-org">
+              <ContactItem href={p.link} />
+            </div>
+          )}
+          {p.bullets.length > 0 && (
+            <ul className="cvp-bullets">
+              {p.bullets.map((b, i) => (
+                <li key={i}>{b}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
 // Main column, never PROFESSIONAL_TEMPLATE.sidebarSections — same
 // reasoning as Modern: each entry is too text-dense for the narrow
 // secondary column. Reuses the existing entry/summary classes.
@@ -222,6 +254,8 @@ function renderMainSection(content: CvContent, section: CvSection) {
       );
     case 'workExperience':
       return <WorkEntries key="work" entries={content.workExperience} />;
+    case 'projects':
+      return <ProjectsSection key="projects" entries={content.projects ?? []} />;
     case 'education':
       return <EducationEntries key="edu" entries={content.education} />;
     case 'references':

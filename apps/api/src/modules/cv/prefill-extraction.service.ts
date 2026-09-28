@@ -93,7 +93,17 @@ import type { CvContent } from '@cvpilot/shared';
 // extracted when the CV actually states one (work experience's real
 // "October 2024 - September 2025" was already correct before this fix and
 // remains covered by its own regression test).
-const EXTRACTION_VERSION = 5;
+// Fix (RABBIT_NOTEBOOK.md §54): bumped 5 -> 6. Adds `projects` extraction
+// (schema-supported for the first time — CvContent.projects was previously
+// undefined for every CV, so a "PROJECTS" section on the source CV, no
+// matter how the model responded, was silently dropped by
+// ExtractionResponseSchema.parse() before mapToContent ever ran — the same
+// class of gap §47 already fixed once for Qualities/References). One added
+// prompt rule; JSON_SCHEMA_HINT/zod schema/mapToContent all extended
+// consistently with the existing workExperience-shaped fields (title,
+// optional link/dates, bullets) — see cv.types.ts's CvProjectEntry for the
+// shape decision. No existing field touched.
+const EXTRACTION_VERSION = 6;
 const MAX_ATTEMPTS = 3;
 
 // Exported so prefill-extraction.service.spec.ts's sentinel test can assert
@@ -115,6 +125,7 @@ export const SYSTEM_PROMPT = [
   '- Apply that SAME reference layout convention consistently to every reference in the CV. If one reference clearly shows a short relationship word (e.g. "Manager") on its own line separate from a job-title/company line, treat every other reference\'s own standalone short line the same way — as relationship, never as jobTitle — even if that other reference\'s job-title/company line itself is ambiguous or hard to split. Never move a standalone relationship line into the jobTitle field.',
   '- Extract the location for BOTH work experience AND education entries whenever the CV shows one (e.g. "Institution · City, Country" or "Institution, City, Country") — do not omit an education entry\'s location just because it is shown after a separator, the same way you would not omit a work entry\'s location shown the same way.',
   '- For personalDetails.jobTitle: only extract it if the CV explicitly and literally presents a professional title or headline as such — e.g. printed directly beneath the candidate\'s name, or on a clearly labelled "Job Title" / "Current Role" / "Position" line. Never infer, construct, or summarise a title from the candidate\'s summary/profile paragraph, objective statement, degree, or job history, even if it seems like a reasonable description of them — if the CV has no such explicit title/headline line, omit personalDetails.jobTitle entirely rather than guessing one.',
+  '- Extract a "Projects" section whenever the CV has one (e.g. under a heading like "Projects", "Personal Projects", or "Portfolio"): each project has a title and, when present, a link/URL and/or dates. Put every other detail about it (a description, achievements, technologies used) into bullets — VERBATIM, exactly as written, the same anti-rewrite rule as every other section. Never invent a technology, contribution, achievement, or date for a project that is not literally stated for it — a short one-line project description is a single bullet, not a reason to add invented detail to make it feel fuller.',
 ].join('\n');
 
 // Exported for the same reason as SYSTEM_PROMPT above, and so a real,
@@ -124,6 +135,7 @@ export const JSON_SCHEMA_HINT = `{
   "personalDetails": { "fullName": "string", "email": "string", "phone"?: "string", "location"?: "string", "linkedIn"?: "string", "website"?: "string", "jobTitle"?: "string", "nationality"?: "string" },
   "summary"?: "string",
   "workExperience": [{ "company": "string", "title": "string", "location"?: "string", "startDate": "YYYY-MM or YYYY (only if no month is shown)", "endDate"?: "YYYY-MM or YYYY (only if no month is shown)", "current": false, "bullets": ["string"] }],
+  "projects"?: [{ "title": "string", "link"?: "string", "startDate"?: "YYYY-MM or YYYY (only if no month is shown)", "endDate"?: "YYYY-MM or YYYY (only if no month is shown)", "bullets": ["string"] }],
   "education": [{ "institution": "string", "degree": "string", "field"?: "string", "location"?: "string", "startDate"?: "YYYY-MM or YYYY (only if no month is shown)", "endDate"?: "YYYY-MM or YYYY (only if no month is shown)", "grade"?: "string" }],
   "skills": [{ "name": "string", "level"?: "string" }],
   "languages": [{ "name": "string", "level"?: "string" }],
@@ -154,6 +166,17 @@ export const ExtractionResponseSchema = z.object({
         startDate: z.string(),
         endDate: z.string().optional(),
         current: z.boolean().default(false),
+        bullets: z.array(z.string()).default([]),
+      }),
+    )
+    .default([]),
+  projects: z
+    .array(
+      z.object({
+        title: z.string(),
+        link: z.string().optional(),
+        startDate: z.string().optional(),
+        endDate: z.string().optional(),
         bullets: z.array(z.string()).default([]),
       }),
     )
@@ -296,6 +319,14 @@ export class PrefillExtractionService {
         current: e.current,
         bullets: e.bullets,
       })),
+      projects: parsed.projects.map((p) => ({
+        id: randomUUID(),
+        title: p.title,
+        link: p.link,
+        startDate: p.startDate,
+        endDate: p.endDate,
+        bullets: p.bullets,
+      })),
       education: parsed.education.map((e) => ({
         id: randomUUID(),
         institution: e.institution,
@@ -333,6 +364,7 @@ export class PrefillExtractionService {
       sectionOrder: [
         'summary',
         'workExperience',
+        'projects',
         'education',
         'skills',
         'languages',

@@ -5,6 +5,7 @@ import type { CvSection } from '@cvpilot/shared';
 const VALID_SECTIONS = [
   'summary',
   'workExperience',
+  'projects',
   'education',
   'skills',
   'languages',
