@@ -29,9 +29,13 @@ const TEMPLATES: Array<[TemplateId, ComponentType<{ content: CvContent }>]> = [
   ['compact', CompactCvDocument],
   ['signature', SignatureCvDocument],
 ];
+// Deliberately does NOT contain the substring "project" anywhere in the
+// name — the legacy-compatibility test below asserts the rendered
+// text/HTML never mentions "projects" at all, so the fixture's own name
+// must not accidentally satisfy that check by coincidence.
 const LEGACY: CvContent = {
   version: 1,
-  personalDetails: { fullName: 'Projects QA Candidate', email: 'candidate@example.test' },
+  personalDetails: { fullName: 'Compatibility QA Candidate', email: 'candidate@example.test' },
   summary: 'Software engineer building reliable applications.',
   workExperience: [],
   education: [],
@@ -54,7 +58,7 @@ const PROJECTS = [
 
 async function pdfText(content: CvContent, id: TemplateId) {
   const chunks: Buffer[] = [];
-  const stream = new PdfGenerationService().generateStream(content, 'Projects QA', id);
+  const stream = new PdfGenerationService().generateStream(content, 'Compat QA', id);
   const data = await new Promise<Buffer>((resolve, reject) => {
     stream.on('data', (chunk: Buffer) => chunks.push(chunk));
     stream.on('end', () => resolve(Buffer.concat(chunks)));
@@ -73,8 +77,8 @@ describe.each(TEMPLATES)('Projects compatibility: %s', (id, Document) => {
   it('renders older CVs with no projects field in preview and PDF, and omits the Projects heading', async () => {
     const html = renderToStaticMarkup(createElement(Document, { content: LEGACY }));
     const pdf = await pdfText(LEGACY, id);
-    expect(html).toContain('Projects QA Candidate');
-    expect(compact(pdf.text)).toContain(compact('Projects QA Candidate'));
+    expect(html).toContain('Compatibility QA Candidate');
+    expect(compact(pdf.text)).toContain(compact('Compatibility QA Candidate'));
     expect(html.toLowerCase()).not.toContain('>projects<');
     expect(pdf.text.toLowerCase()).not.toContain('projects');
   });
