@@ -151,6 +151,16 @@ const KNOWN_TECH_TERMS: readonly string[] = [
   'postgres',
   'mysql',
   'sql',
+  // V3 (RABBIT_NOTEBOOK.md §56): added alongside 'sql' — NOT a generalization
+  // that "database experience" implies these; each remains its own
+  // independently-checked term, matched only against its own literal
+  // occurrence, exactly like every other entry in this list. Generic
+  // database-management work (e.g. this CV's real "managed internal
+  // databases") must never, by itself, satisfy a claim naming SQL or
+  // relational databases specifically — a candidate could equally have
+  // worked with a NoSQL store, a spreadsheet, or no database engine at all.
+  'relational database',
+  'relational databases',
   'database design',
   'git',
   'github',
@@ -203,12 +213,21 @@ const SOFT_SKILL_TERMS: readonly string[] = [
   'collaborative',
 ];
 
-const ALL_CHECKED_TERMS: readonly string[] = [...KNOWN_TECH_TERMS, ...SOFT_SKILL_TERMS];
-
 // See the module header's V3 comment. Deliberately a small, explicitly-
 // labelled supplement, not a replacement for the syntactic extraction below
 // — only for extremely common ordinary-cased framework/language names that
 // have no distinctive shape a regex could reliably identify on its own.
+//
+// Fix (RABBIT_NOTEBOOK.md §56): originally only consulted INSIDE
+// extractJobDescriptionTerms, so a term like "react" was only ever checked
+// when a job description happened to be supplied — an unnecessary and
+// fragile dependency. There is no principled reason a claim of possessing a
+// well-known technology should go unguarded just because no job
+// description was passed to this call; these are now part of the ALWAYS-
+// checked ALL_CHECKED_TERMS below, exactly like "python"/"docker" already
+// are. Only the SYNTACTIC shape-based extraction further below (dotted/
+// mixed-case/acronym) genuinely needs the job description's own text to
+// run against, since it finds terms that were never enumerated anywhere.
 const COMMON_FRAMEWORK_NAMES: readonly string[] = [
   'react',
   'vue',
@@ -239,6 +258,12 @@ const COMMON_FRAMEWORK_NAMES: readonly string[] = [
   'css',
 ];
 
+const ALL_CHECKED_TERMS: readonly string[] = [
+  ...KNOWN_TECH_TERMS,
+  ...SOFT_SKILL_TERMS,
+  ...COMMON_FRAMEWORK_NAMES,
+];
+
 // Framework/language names with a distinctive dotted suffix — Node.js,
 // Next.js, Vue.js, Nest.js, ASP.NET, .NET. Case-insensitive so "node.JS" or
 // "Node.Js" still matches; the shape (a word immediately followed by a
@@ -266,6 +291,12 @@ const ACRONYM_RE = /\b[A-Z]{2,6}\b/g;
  * KNOWN_TECH_TERMS list. See this module's header comment for the full
  * rationale and the deliberate safety property that makes over-extraction
  * harmless. Returns lowercase, deduplicated terms.
+ *
+ * §56: no longer also re-checks COMMON_FRAMEWORK_NAMES here — those are now
+ * part of the permanent, always-checked ALL_CHECKED_TERMS (see its own
+ * comment), so re-deriving them per job description would be redundant.
+ * This function now only covers what genuinely NEEDS the job description's
+ * own text: shapes that were never enumerated anywhere.
  */
 export function extractJobDescriptionTerms(jobDescription: string): string[] {
   const found = new Set<string>();
@@ -273,10 +304,6 @@ export function extractJobDescriptionTerms(jobDescription: string): string[] {
   for (const match of jobDescription.matchAll(DOTTED_SUFFIX_RE)) found.add(match[0].toLowerCase());
   for (const match of jobDescription.matchAll(MIXED_CASE_RE)) found.add(match[0].toLowerCase());
   for (const match of jobDescription.matchAll(ACRONYM_RE)) found.add(match[0].toLowerCase());
-
-  for (const name of COMMON_FRAMEWORK_NAMES) {
-    if (containsWholePhrase(jobDescription, name)) found.add(name);
-  }
 
   return [...found];
 }
@@ -293,6 +320,12 @@ const EXPERIENCE_CLAIM_PATTERNS: readonly RegExp[] = [
   /\b(developed|developing|develops|built|building|builds|designed|designing|designs|implemented|implementing|implements|delivered|delivering|delivers|deployed|deploying|deploys|architected|architecting|engineered|engineering|optimi[sz]ed|optimi[sz]ing|maintained|maintaining|maintains|debugged|debugging|automated|automating|configured|configuring|shipped|shipping)\b/i,
   /\b(prepared|equipped|enabled)\s+me\s+(\S+\s+){0,3}(to|for)\b/i,
   /\bresponsible for\b/i,
+  // V4 (RABBIT_NOTEBOOK.md §56): found via this fix's own real-call
+  // verification (not the original reported pair) — "this experience honed
+  // my ability to work with relational databases" for a CV whose real
+  // experience only ever says generic "managed internal databases," never
+  // "relational." Same shape as "prepared/equipped/enabled me to" above.
+  /\b(honed|sharpened|refined)\s+my\s+(\S+\s+){0,3}(ability|abilities|skills?)\b/i,
 ];
 
 // V2.1: present-tense/future CAPABILITY claims — "I can contribute to X,"
@@ -307,6 +340,26 @@ const CAPABILITY_CLAIM_PATTERNS: readonly RegExp[] = [
   /\b(can|could|am able to|is able to|am ready to|is ready to)\s+(\S+\s+){0,4}(contribute|implement|deliver|handle|lead|apply|build|help)\b/i,
 ];
 
+// V3 (RABBIT_NOTEBOOK.md §56): "further develop MY skills in X" — a second
+// production letter, generated AFTER the §55 fix deployed, claimed exactly
+// this for React/JavaScript. Distinct from CAPABILITY_CLAIM_PATTERNS (no
+// "can/ready to") and from the genuinely aspirational "develop further
+// experience with X" (an already-accepted good example — see this file's
+// own spec): here "further" modifies the VERB ("further develop" = CONTINUE
+// developing something already begun) and the object is POSSESSIVE ("my
+// skills," not "further experience") — together these presuppose an
+// existing capability being extended, not a clean statement of interest in
+// acquiring a new one. Held to the same strict, experienceText-only bar as
+// CAPABILITY_CLAIM_PATTERNS — a bare skills-list entry never satisfies it,
+// matching this module's existing "a skill only ever supports 'I'd like to
+// develop this,' never 'I can deliver this'" philosophy, extended to "I'm
+// continuing to develop my already-existing [X] skill."
+const IMPLIED_EXISTING_SKILL_PATTERNS: readonly RegExp[] = [
+  /\bfurther\s+(develop|expand|build|grow|strengthen|deepen)(ing)?\s+my\b/i,
+  /\bcontinue\s+to\s+(develop|build|grow|strengthen|deepen)\s+my\b/i,
+  /\bbuild(ing)?\s+(up\s+)?on\s+my\s+(existing\s+)?/i,
+];
+
 // Sentence matches ANY of these (and no EXPERIENCE/CAPABILITY_CLAIM_PATTERNS)
 // → a modest knowledge/familiarity claim — a skills-list entry alone is
 // sufficient grounding.
@@ -314,6 +367,12 @@ const KNOWLEDGE_CLAIM_PATTERNS: readonly RegExp[] = [
   /\b(proficient|skilled|fluent|competent)\s+(in|with)\b/i,
   /\bknowledge\s+of\b/i,
   /\bfamiliar(ity)?\s+with\b/i,
+  // V3 (RABBIT_NOTEBOOK.md §56): "my foundational understanding of SQL"
+  // slipped through entirely uncaught — "understanding of" was simply
+  // absent from every pattern list, so the sentence had NO claim span at
+  // all and was skipped before any term was even checked, regardless of
+  // whether "sql" itself was a recognised checked term (it already was).
+  /\bunderstanding\s+of\b/i,
   /\b(my|the)\s+(technical\s+)?skills\s+(include|encompass|comprise)\b/i,
   // "I have excellent problem-solving skills" / "I have strong X skills" — a
   // self-assessed trait/skill claim, not a claim of having done the work on
@@ -325,10 +384,15 @@ const KNOWLEDGE_CLAIM_PATTERNS: readonly RegExp[] = [
 // (V2.1) it must NOT exempt a sentence that also asserts an experience or
 // capability claim: aspirational language can otherwise be used to smuggle
 // in an unearned capability claim later in the same sentence (see the
-// module header comment).
+// module header comment). V3 (§56): the growth-verb pattern below now
+// excludes "further VERB my ..." specifically (negative lookbehind) — that
+// exact construction is handled by IMPLIED_EXISTING_SKILL_PATTERNS above
+// instead, at the stricter bar; plain "develop my skills in X" (no
+// "further") and "develop further experience with X" (further modifying
+// the NOUN, not the verb) are unaffected and remain safely aspirational.
 const ASPIRATIONAL_OVERRIDE_PATTERNS: readonly RegExp[] = [
   /\b(interested in|keen to|eager to|excited to|hope to|hoping to|looking to|aim to|would love to|would welcome the opportunity to|look forward to)\b/i,
-  /\b(develop|expand|build|grow|strengthen|deepen)(ing)?\s+(my\s+)?(knowledge|skills?|experience|understanding)\b/i,
+  /\b(?<!further\s)(develop|expand|build|grow|strengthen|deepen)(ing)?\s+(my\s+)?(knowledge|skills?|experience|understanding)\b/i,
   /\bnew to\b/i,
   /\bstill learning\b/i,
 ];
@@ -457,6 +521,7 @@ function findClaimSpans(sentence: string): ClaimSpan[] {
   collect(ASPIRATIONAL_OVERRIDE_PATTERNS, 'aspirational');
   collect(EXPERIENCE_CLAIM_PATTERNS, 'experience');
   collect(CAPABILITY_CLAIM_PATTERNS, 'experience');
+  collect(IMPLIED_EXISTING_SKILL_PATTERNS, 'experience');
   collect(KNOWLEDGE_CLAIM_PATTERNS, 'knowledge');
 
   const exemptSpans = rawSpans.filter((s) => isExemptTier(s.tier));

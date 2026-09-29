@@ -21,10 +21,11 @@ describe('extractJobDescriptionTerms() (RABBIT_NOTEBOOK.md §55)', () => {
     expect(terms).toEqual(expect.arrayContaining(['sql', 'aws']));
   });
 
-  it('extracts an ordinary-cased common framework name with no distinctive shape', () => {
-    const terms = extractJobDescriptionTerms('Experience building web interfaces with React.');
-    expect(terms).toContain('react');
-  });
+  // §56: ordinary-cased common framework names (react, node, html, css, ...)
+  // moved OUT of this function's own responsibility into the permanent,
+  // always-checked ALL_CHECKED_TERMS list (see findUnsupportedPossessionClaims's
+  // own describe block below for coverage of that) — this function now only
+  // covers shapes that genuinely need the job description's own text.
 
   it('does not extract ordinary sentence words', () => {
     const terms = extractJobDescriptionTerms(
@@ -536,12 +537,137 @@ describe('findUnsupportedPossessionClaims()', () => {
       expect(violations).toEqual([]);
     });
 
-    it('behaves identically to before when no job description is supplied (backward compatible)', () => {
+    // Updated in §56: "react"/"node" moved from being conditionally added
+    // only when a job description was supplied to the permanent, always-
+    // checked list (see ALL_CHECKED_TERMS's own comment) — there is no
+    // principled reason a common technology should go unguarded just
+    // because no job description happened to be passed. This still proves
+    // the JD-specific SYNTACTIC extraction mechanism (dotted/mixed-case/
+    // acronym) is additive on top of that permanent baseline, not a
+    // replacement for it: dropping the job description argument entirely
+    // does not weaken coverage for these already-common names.
+    it('still flags common framework names even when no job description is supplied at all', () => {
       const violations = findUnsupportedPossessionClaims(
-        'I am also familiar with React and Node.js.',
+        'I am also familiar with React and Node.',
         SKILL_ONLY_EVIDENCE,
       );
+      expect(violations.some((v) => v.includes('react'))).toBe(true);
+      expect(violations.some((v) => v.includes('node'))).toBe(true);
+    });
+  });
+
+  // ─── V4 (RABBIT_NOTEBOOK.md §56): a second production letter, generated
+  // AFTER the §55 fix deployed, still claimed two unsupported technologies —
+  // "understanding of" was never a recognised claim pattern at all, and
+  // "further develop MY skills in X" was fully exempted by the same
+  // aspirational-growth pattern that correctly protects genuine learning
+  // wording like "develop further experience with X". Both are fixed here.
+  describe('V4 — "understanding of" claims and implied-existing-skill phrasing', () => {
+    // The CV genuinely supports only generic database WORK, never SQL or
+    // relational databases by name — reproduces this task's own explicit
+    // "generic database experience must not substantiate a specific
+    // technology automatically" requirement.
+    const DATABASE_WORK_EVIDENCE: CvEvidence = {
+      experienceText:
+        'IT Officer Intern at Toyota Tanzania. Managed internal databases and kept accurate ' +
+        'logs of system incidents.',
+      skillsOnlyTerms: ['HTML', 'CSS', 'Java', 'Python'],
+    };
+
+    it('flags the exact real "foundational understanding of SQL" sentence', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I believe my foundational understanding of SQL and relational databases, combined ' +
+          'with my willingness to learn and grow, makes me a suitable candidate for this role.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('sql'))).toBe(true);
+      expect(violations.some((v) => v.includes('relational database'))).toBe(true);
+    });
+
+    it('flags the exact real "further develop my skills in JavaScript and React" sentence', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am eager to apply my technical knowledge in a practical setting and to further ' +
+          'develop my skills in JavaScript and React, which are integral to the ' +
+          'responsibilities at Kilima Digital.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('javascript'))).toBe(true);
+      expect(violations.some((v) => v.includes('react'))).toBe(true);
+    });
+
+    it('does not flag "understanding of X" when the CV genuinely supports X', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'My understanding of Python is a strong foundation for this role.',
+        DATABASE_WORK_EVIDENCE,
+      );
       expect(violations).toEqual([]);
+    });
+
+    it('does not flag plain "develop my skills in X" (no "further") — genuine learning intent is preserved', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I would like to develop my skills in Kubernetes.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('does not flag the existing accepted "develop further experience with X" phrasing (further modifies the noun, not the verb)', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am eager to develop further experience with cloud platforms.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('flags "further develop my knowledge of X" the same way as "skills"', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I want to further develop my knowledge of Kubernetes.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('kubernetes'))).toBe(true);
+    });
+
+    it('a mixed sentence with genuine learning intent AND an unsupported claim still flags only the unsupported part', () => {
+      const violations = findUnsupportedPossessionClaims(
+        "I'm keen to learn Docker, and I can also further develop my skills in Kubernetes.",
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('docker'))).toBe(false);
+      expect(violations.some((v) => v.includes('kubernetes'))).toBe(true);
+    });
+
+    it('generic database work does not, by itself, substantiate SQL or relational databases specifically', () => {
+      // DATABASE_WORK_EVIDENCE's experienceText literally says "Managed
+      // internal databases" — confirms this alone is never treated as
+      // sufficient grounding for a claim naming SQL/relational databases.
+      const violations = findUnsupportedPossessionClaims(
+        'I have hands-on experience with SQL and relational databases.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('sql'))).toBe(true);
+      expect(violations.some((v) => v.includes('relational database'))).toBe(true);
+    });
+
+    // Found via this fix's own real-call verification (not the original
+    // reported pair) — confirms generic database work does not, by itself,
+    // substantiate a claim of having worked with relational databases
+    // SPECIFICALLY, even phrased as "honed my ability" rather than
+    // "experience with."
+    it('flags "this experience honed my ability to work with relational databases" for generic database work', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'This experience honed my ability to work with relational databases, a crucial part of ' +
+          'your role.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('relational database'))).toBe(true);
+    });
+
+    it('still flags a genuinely unsupported skill-only claim about a supported skill spelled differently (plural)', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I have a solid understanding of relational databases.',
+        DATABASE_WORK_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('relational database'))).toBe(true);
     });
   });
 });
