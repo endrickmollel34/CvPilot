@@ -432,7 +432,10 @@ describe('CoverLetterService', () => {
     // transaction as a whole threw — so the outer catch is what actually
     // determines the letter's final, externally-visible status: 'failed',
     // never 'generated'.
-    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      status: 'failed',
+      failureReason: 'other',
+    });
     expect(mockEventEmitter.emit).not.toHaveBeenCalledWith(
       'cover-letter.completed',
       expect.anything(),
@@ -555,7 +558,10 @@ describe('CoverLetterService', () => {
     ).resolves.toBeUndefined();
 
     expect(mockAiService.generateCoverLetter).not.toHaveBeenCalled();
-    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      status: 'failed',
+      failureReason: 'other',
+    });
     // Quota-refund fix: a failed generation must never log a usage record.
     expect(mockAuditService.logTransactional).not.toHaveBeenCalled();
     expect(mockAuditService.log).not.toHaveBeenCalled();
@@ -612,7 +618,10 @@ describe('CoverLetterService', () => {
       } as unknown as Job<CoverLetterJobData>),
     ).resolves.toBeUndefined(); // no re-throw
 
-    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      status: 'failed',
+      failureReason: 'other',
+    });
   });
 
   it('reports a failed cover letter job to Sentry (monitoring), without changing its swallow-and-mark-failed behavior', async () => {
@@ -638,7 +647,10 @@ describe('CoverLetterService', () => {
         extra: { coverLetterId: 'letter-1', cvId: 'cv-1' },
       }),
     );
-    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', { status: 'failed' });
+    expect(mockRepo.update).toHaveBeenCalledWith('letter-1', {
+      status: 'failed',
+      failureReason: 'other',
+    });
   });
 
   // Diagnostic-loss fix: process()'s catch must log the real underlying

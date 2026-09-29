@@ -112,6 +112,25 @@ function formatLetterDate(iso: string | undefined): string {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
+// RABBIT_NOTEBOOK.md §57 — production QA confirmed (via Railway logs) that
+// every real failed generation was an internal factual-accuracy check
+// rejecting every retry attempt — never a problem with anything the user
+// typed. The previous single generic message ("edit fields and retry")
+// wrongly implied the latter for every failure. `failureReason` (backend,
+// §57) lets this pick wording that matches the ACTUAL cause instead of
+// guessing; undefined (an older failed letter, or a genuinely
+// unanticipated cause) falls back to the original, still-accurate-enough
+// generic wording.
+function describeCoverLetterFailure(failureReason: CoverLetterDto['failureReason']): string {
+  if (failureReason === 'grounding') {
+    return "We couldn't generate a fully accurate letter for this CV and job in time. This isn't a problem with anything you entered — try regenerating.";
+  }
+  if (failureReason === 'provider_error') {
+    return 'Something went wrong reaching the AI provider. Please try again in a moment.';
+  }
+  return 'Generation failed. Please try again.';
+}
+
 const inputCls =
   'w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-50 disabled:text-gray-400';
 const labelCls = 'mb-1 block text-xs font-medium text-gray-600';
@@ -213,7 +232,7 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
             setContent(updated.content);
           } else if (updated.status === 'failed') {
             clearInterval(pollRef.current!);
-            formError.setMessage('Generation failed. Please try again.');
+            formError.setMessage(describeCoverLetterFailure(updated.failureReason));
           }
         } catch {
           /* keep polling */
@@ -722,7 +741,7 @@ export function CoverLetterWorkspace({ initialCvs, usage, initialLetter, prefill
                   <label className={labelCls}>Letter content</label>
                   {status === 'failed' && (
                     <span className="text-xs text-red-500">
-                      Generation failed — edit fields and retry.
+                      {describeCoverLetterFailure(letter?.failureReason)}
                     </span>
                   )}
                 </div>

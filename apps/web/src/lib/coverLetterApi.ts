@@ -25,6 +25,14 @@ export interface CoverLetterDto {
   content: string;
   tone: string;
   status: 'queued' | 'processing' | 'generated' | 'failed' | 'downloaded';
+  // RABBIT_NOTEBOOK.md §57 — set only when status === 'failed'. 'grounding'
+  // means every retry was rejected by the backend's factual-accuracy check
+  // (not a problem with anything typed in this form — regenerating samples
+  // the model again and may still succeed); 'provider_error' means a real
+  // AI-provider failure (timeout, rate limit, etc.); undefined on any
+  // letter that failed before this field existed, or for any non-'other'
+  // unanticipated cause.
+  failureReason?: 'grounding' | 'provider_error' | 'other';
   createdAt: string;
   generatedAt?: string;
   // Undefined when the source CV has since been deleted — always optional.

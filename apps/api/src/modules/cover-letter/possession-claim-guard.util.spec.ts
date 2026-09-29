@@ -2,6 +2,7 @@ import type { CvEvidence } from './cv-evidence.util';
 import {
   findUnsupportedPossessionClaims,
   extractJobDescriptionTerms,
+  computeUnestablishedJdTerms,
 } from './possession-claim-guard.util';
 
 describe('extractJobDescriptionTerms() (RABBIT_NOTEBOOK.md §55)', () => {
@@ -34,6 +35,53 @@ describe('extractJobDescriptionTerms() (RABBIT_NOTEBOOK.md §55)', () => {
     expect(terms).not.toContain('we');
     expect(terms).not.toContain('driven');
     expect(terms).not.toContain('collaborative');
+  });
+});
+
+// ─── §57: computeUnestablishedJdTerms() — proactive, pre-generation guidance ─
+//
+// Drives buildProactiveGuidance() in cover-letter-ai.service.ts. Must only
+// list terms that (a) the job description actually asks for and (b) the
+// candidate evidence does not establish — an earlier draft filtered the
+// entire ~70-entry ALL_CHECKED_TERMS list down to "absent from evidence",
+// which produced a long, mostly-irrelevant list for jobs that never
+// mentioned most of those terms. Caught in design review, not by a test.
+describe('computeUnestablishedJdTerms() (RABBIT_NOTEBOOK.md §57)', () => {
+  it('lists only terms the job description actually names, not the whole checked-term catalog', () => {
+    const terms = computeUnestablishedJdTerms('We need a backend engineer skilled in Kubernetes.', {
+      experienceText: '',
+      skillsOnlyTerms: [],
+    });
+    expect(terms).toContain('kubernetes');
+    // "agile", "docker", etc. are on ALL_CHECKED_TERMS but never mentioned
+    // in this job description — they must not appear in the guidance list.
+    expect(terms).not.toContain('agile');
+    expect(terms).not.toContain('docker');
+  });
+
+  it('excludes a job-description term the candidate evidence already establishes', () => {
+    const terms = computeUnestablishedJdTerms(
+      'We need a backend engineer skilled in Python and Kubernetes.',
+      { experienceText: 'Built services in Python for three years.', skillsOnlyTerms: [] },
+    );
+    expect(terms).not.toContain('python');
+    expect(terms).toContain('kubernetes');
+  });
+
+  it('returns an empty list when the job description names nothing the candidate lacks', () => {
+    const terms = computeUnestablishedJdTerms('We need a backend engineer skilled in Python.', {
+      experienceText: 'Built services in Python for three years.',
+      skillsOnlyTerms: [],
+    });
+    expect(terms).toEqual([]);
+  });
+
+  it('a bare skills-list entry is sufficient to establish a job-description term', () => {
+    const terms = computeUnestablishedJdTerms('We need a backend engineer skilled in Docker.', {
+      experienceText: '',
+      skillsOnlyTerms: ['Docker'],
+    });
+    expect(terms).not.toContain('docker');
   });
 });
 
@@ -668,6 +716,80 @@ describe('findUnsupportedPossessionClaims()', () => {
         DATABASE_WORK_EVIDENCE,
       );
       expect(violations.some((v) => v.includes('relational database'))).toBe(true);
+    });
+  });
+
+  // ─── V5 (RABBIT_NOTEBOOK.md §57): a third production letter, generated
+  // after the §56 fix deployed, still claimed JavaScript and React — this
+  // time hedged as "my ... experience with X is limited" (a word-order
+  // variant of "I have limited experience with X" the existing pattern
+  // didn't cover) paired with "expanding my proficiency in these areas"
+  // ("proficiency" was simply absent from every noun list). Both gaps are
+  // fixed in the EXPERIENCE_CLAIM_PATTERNS/ASPIRATIONAL_OVERRIDE_PATTERNS
+  // additions this section traces to.
+  describe('V5 — "experience ... is limited" and "proficiency" phrasing', () => {
+    const NO_JS_REACT_EVIDENCE: CvEvidence = {
+      experienceText:
+        'Recent Computer Science graduate with academic coursework in algorithms and data ' +
+        'structures. Completed a university group project building a simple inventory ' +
+        'tracking spreadsheet tool.',
+      skillsOnlyTerms: [],
+    };
+
+    const JS_REACT_EVIDENCE: CvEvidence = {
+      experienceText:
+        'Frontend Developer at Acme Ltd. Built and maintained production web applications ' +
+        'using JavaScript and React.',
+      skillsOnlyTerms: [],
+    };
+
+    // The exact real sentence from the §57 production recheck (113.pdf).
+    const REAL_SENTENCE =
+      'Though my professional experience with JavaScript and React is limited, I am ' +
+      'enthusiastic about expanding my proficiency in these areas.';
+
+    it('flags the exact real "experience ... is limited" + "expanding my proficiency" sentence when unsupported', () => {
+      const violations = findUnsupportedPossessionClaims(REAL_SENTENCE, NO_JS_REACT_EVIDENCE);
+      expect(violations.some((v) => v.includes('javascript'))).toBe(true);
+      expect(violations.some((v) => v.includes('react'))).toBe(true);
+    });
+
+    it('does not flag the same sentence when the CV genuinely establishes the experience', () => {
+      // A hedged ("limited") but genuine claim about real work-history
+      // evidence is not a fabrication — this proves the fix targets the
+      // missing pattern coverage, not "limited"/"proficiency" wording itself.
+      const violations = findUnsupportedPossessionClaims(REAL_SENTENCE, JS_REACT_EVIDENCE);
+      expect(violations).toEqual([]);
+    });
+
+    it('does not flag "expanding my proficiency in X" alone, with no hedge — genuine learning intent is preserved', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am enthusiastic about expanding my proficiency in Kubernetes.',
+        NO_JS_REACT_EVIDENCE,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('flags "my experience with X is limited" on its own (without the proficiency clause)', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'My experience with Kubernetes is limited.',
+        NO_JS_REACT_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('kubernetes'))).toBe(true);
+    });
+
+    // A mixed pair of SEPARATE sentences: genuine aspirational language about
+    // one unsupported technology must not exempt a hedged-but-unsupported
+    // experience claim about a different one elsewhere in the same letter.
+    it('a genuine learning-intent sentence does not exempt a separate hedged-experience claim about a different technology', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I would welcome the opportunity to learn Kubernetes. Though my professional ' +
+          'experience with Docker is limited, I am enthusiastic about expanding my ' +
+          'proficiency in this area.',
+        NO_JS_REACT_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('kubernetes'))).toBe(false);
+      expect(violations.some((v) => v.includes('docker'))).toBe(true);
     });
   });
 });

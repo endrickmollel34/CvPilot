@@ -3,9 +3,13 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 
-import { findUnsupportedPossessionClaims } from './possession-claim-guard.util';
+import {
+  findUnsupportedPossessionClaims,
+  computeUnestablishedJdTerms,
+} from './possession-claim-guard.util';
 import type { CvEvidence } from './cv-evidence.util';
 import { resolveOptionalApiKey } from '../../common/utils/optional-api-key.util';
+import type { CoverLetterFailureReason } from '../../entities/cover-letter.entity';
 
 // ─── Grounding ─────────────────────────────────────────────────────────────
 // Shared verbatim by both providers (OpenAI + Anthropic fallback) and all
@@ -280,6 +284,35 @@ function buildRepairInstruction(unsupportedTerms: string[]): string {
 }
 
 /**
+ * PROACTIVE grounding guidance (RABBIT_NOTEBOOK.md §57) — built ONCE per
+ * generateCoverLetter() call, from a deterministic, pre-generation check
+ * (computeUnestablishedJdTerms), and included on EVERY attempt from the
+ * very first one — unlike buildRepairInstruction above, which only ever
+ * fires REACTIVELY, after an actual rejection. Production QA found a CV
+ * with real gaps against a technology-dense job description could exhaust
+ * every retry attempt purely because each fresh attempt re-discovered the
+ * SAME unsupported items independently (the model has no way to know in
+ * advance which specific job requirements the CV doesn't support). Telling
+ * it upfront reduces how often the reactive repair loop is even needed,
+ * without changing what validateOutput() itself accepts or rejects — the
+ * check below runs exactly as before regardless of whether this guidance
+ * was included. Returns undefined when there is nothing to warn about
+ * (every job requirement is at least knowledge-tier supported), so callers
+ * add no extra message in that case.
+ */
+function buildProactiveGuidance(unestablishedTerms: string[]): string | undefined {
+  if (unestablishedTerms.length === 0) return undefined;
+  return (
+    `The following items from EMPLOYER_REQUIREMENTS are NOT established anywhere in ` +
+    `CANDIDATE_EVIDENCE: ${unestablishedTerms.join(', ')}. Do not claim the candidate has, knows, ` +
+    'is experienced with, is proficient in, or even has limited/basic experience with any of these — ' +
+    'that would be a fabrication. You may express genuine interest or willingness to learn them if it ' +
+    "genuinely improves the letter, or simply omit them. This doesn't mean the letter should ignore " +
+    'these requirements entirely — ground the letter in what CANDIDATE_EVIDENCE actually supports.'
+  );
+}
+
+/**
  * Merges a caught error's unsupported terms (if any) into the running,
  * deduplicated set accumulated across ALL attempts so far — a NEW rejection
  * must never make an EARLIER one's terms disappear from the repair
@@ -307,13 +340,34 @@ function repairInstructionFor(seen: Set<string>): string | undefined {
   return undefined;
 }
 
+/** Combines the (attempt-invariant) proactive guidance with the (attempt-
+ *  specific, only-present-after-a-real-rejection) reactive repair
+ *  instruction into the single extra system message callOpenAI/
+ *  callAnthropic accept — §57. Either half may be absent; returns
+ *  undefined only when both are. */
+function combineGuidance(
+  proactive: string | undefined,
+  repair: string | undefined,
+): string | undefined {
+  return [proactive, repair].filter((s): s is string => Boolean(s)).join('\n\n') || undefined;
+}
+
 export interface CoverLetterAiResult {
   content: string;
   modelUsed: string;
   tokensUsed: number;
 }
 
-const MAX_ATTEMPTS = 3;
+// RABBIT_NOTEBOOK.md §57: bumped 3 -> 4 (a small, still-bounded increase —
+// not unlimited retries, per this task's own explicit instruction). Real
+// production logs showed a CV/job pairing with genuine gaps sometimes
+// needing more than 3 OpenAI attempts to reach a fully honest letter,
+// especially with no Anthropic fallback configured (this production
+// environment's actual state) — one extra bounded attempt, combined with
+// the proactive guidance above (which should make each individual attempt
+// more likely to succeed on its own), reduces how often generation
+// exhausts its budget without weakening what validateOutput() accepts.
+const MAX_ATTEMPTS = 4;
 
 /**
  * Safe, log-friendly summary of a caught provider/validation error — name
@@ -332,6 +386,28 @@ const MAX_ATTEMPTS = 3;
 export function describeError(err: unknown): string {
   if (err instanceof Error) return `${err.name}: ${err.message}`;
   return typeof err === 'string' ? err : 'Unknown error';
+}
+
+/**
+ * Coarse, user-facing-safe classification of a final generateCoverLetter()
+ * rejection (RABBIT_NOTEBOOK.md §57) — used by CoverLetterService.process()
+ * to persist WHY generation failed, so the frontend can show a message
+ * appropriate to the actual cause instead of one generic message for every
+ * failure. `err` is expected to be the Error thrown by generateCoverLetter
+ * itself, whose `.cause` (see its own throw sites) is the real last-attempt
+ * error — a `CoverLetterValidationError` means every attempt was rejected
+ * by the possession-claim guard (a grounding exhaustion, never a field
+ * problem); anything else thrown by the OpenAI/Anthropic SDKs themselves
+ * (timeout, 5xx, network, rate limit) is a genuine provider error; anything
+ * that doesn't fit either shape (e.g. no `.cause` at all, an unexpected
+ * error from elsewhere in the pipeline) falls back to 'other' rather than
+ * guessing.
+ */
+export function classifyCoverLetterFailure(err: unknown): CoverLetterFailureReason {
+  const cause = err instanceof Error ? err.cause : undefined;
+  if (cause instanceof CoverLetterValidationError) return 'grounding';
+  if (cause instanceof Error) return 'provider_error';
+  return 'other';
 }
 
 @Injectable()
@@ -367,6 +443,13 @@ export class CoverLetterAiService {
       tone,
     );
     const guardEvidence = resolveGuardEvidence(cvText, evidence);
+    // §57: computed ONCE, reused on every attempt (including the first) —
+    // see buildProactiveGuidance's own doc comment for why this runs
+    // BEFORE any generation attempt, unlike the reactive repair
+    // instruction below.
+    const proactiveGuidance = buildProactiveGuidance(
+      computeUnestablishedJdTerms(jobDescription, guardEvidence),
+    );
 
     let lastError: unknown;
     // Repair-aware retries (see the module report): unsupportedTermsSeen
@@ -384,7 +467,7 @@ export class CoverLetterAiService {
           userPrompt,
           guardEvidence,
           jobDescription,
-          repairInstructionFor(unsupportedTermsSeen),
+          combineGuidance(proactiveGuidance, repairInstructionFor(unsupportedTermsSeen)),
         );
       } catch (err) {
         lastError = err;
@@ -397,7 +480,15 @@ export class CoverLetterAiService {
 
     if (!this.anthropic) {
       this.logger.warn('OpenAI exhausted — Anthropic fallback is not configured, failing');
-      throw new Error(`Cover letter generation failed after retries: ${describeError(lastError)}`);
+      // RABBIT_NOTEBOOK.md §57: `cause` preserves the real last-attempt
+      // error's TYPE (not just its already-included message string) so
+      // CoverLetterService.process()'s catch block can tell a grounding
+      // rejection (CoverLetterValidationError) apart from a genuine
+      // provider error, to show the user an appropriately-worded failure
+      // reason instead of one generic message for every cause.
+      throw new Error(`Cover letter generation failed after retries: ${describeError(lastError)}`, {
+        cause: lastError,
+      });
     }
 
     this.logger.warn('OpenAI exhausted — activating Anthropic fallback');
@@ -408,7 +499,7 @@ export class CoverLetterAiService {
           userPrompt,
           guardEvidence,
           jobDescription,
-          repairInstructionFor(unsupportedTermsSeen),
+          combineGuidance(proactiveGuidance, repairInstructionFor(unsupportedTermsSeen)),
         );
       } catch (err) {
         lastError = err;
@@ -419,23 +510,27 @@ export class CoverLetterAiService {
       }
     }
 
-    throw new Error(`Cover letter generation failed after retries: ${describeError(lastError)}`);
+    // Same `cause`-preserving rationale as the OpenAI-only throw above.
+    throw new Error(`Cover letter generation failed after retries: ${describeError(lastError)}`, {
+      cause: lastError,
+    });
   }
 
   private async callOpenAI(
     userPrompt: string,
     guardEvidence: CvEvidence,
     jobDescription: string,
-    repairInstruction?: string,
+    guidanceMessage?: string,
   ): Promise<CoverLetterAiResult> {
-    // The repair instruction (when present) rides as an additional system
-    // message rather than being appended to userPrompt — keeps it clearly
-    // separated as a developer-only correction, never mixed into the
-    // user-turn content the rest of buildUserPrompt() already constructed.
+    // The combined proactive/repair guidance (when present — see
+    // combineGuidance) rides as an additional system message rather than
+    // being appended to userPrompt — keeps it clearly separated as a
+    // developer-only instruction, never mixed into the user-turn content
+    // the rest of buildUserPrompt() already constructed.
     const messages: { role: 'system' | 'user'; content: string }[] = [
       { role: 'system', content: SYSTEM_PROMPT_V1 },
     ];
-    if (repairInstruction) messages.push({ role: 'system', content: repairInstruction });
+    if (guidanceMessage) messages.push({ role: 'system', content: guidanceMessage });
     messages.push({ role: 'user', content: userPrompt });
 
     const response = await this.openai.chat.completions.create({
@@ -458,7 +553,7 @@ export class CoverLetterAiService {
     userPrompt: string,
     guardEvidence: CvEvidence,
     jobDescription: string,
-    repairInstruction?: string,
+    guidanceMessage?: string,
   ): Promise<CoverLetterAiResult> {
     // Unreachable in practice — generateCoverLetter() never enters the
     // Anthropic retry loop when this.anthropic is undefined — kept as a
@@ -468,11 +563,9 @@ export class CoverLetterAiService {
     }
 
     // Anthropic's API takes a single top-level `system` string rather than
-    // multiple system-role messages — the repair instruction is appended
+    // multiple system-role messages — the combined guidance is appended
     // there instead of the messages array.
-    const system = repairInstruction
-      ? `${SYSTEM_PROMPT_V1}\n\n${repairInstruction}`
-      : SYSTEM_PROMPT_V1;
+    const system = guidanceMessage ? `${SYSTEM_PROMPT_V1}\n\n${guidanceMessage}` : SYSTEM_PROMPT_V1;
 
     const response = await this.anthropic.messages.create({
       model: 'claude-3-5-sonnet-20241022',

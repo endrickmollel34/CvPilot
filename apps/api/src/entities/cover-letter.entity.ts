@@ -15,6 +15,16 @@ import type { AnalysisEntity } from './analysis.entity';
 
 export type CoverLetterStatus = 'queued' | 'processing' | 'generated' | 'failed' | 'downloaded';
 
+// RABBIT_NOTEBOOK.md §57 — 'grounding': every retry attempt was rejected by
+// the possession-claim guard (never a field problem — the CV/job pairing
+// genuinely has little overlap; regenerating may still succeed, since each
+// attempt samples the model again). 'provider_error': a real OpenAI/
+// Anthropic failure (timeout, 5xx, network, rate limit) unrelated to
+// grounding. 'other': anything else (e.g. the linked CV losing its usable
+// content between submit and processing) — rare, kept as a safe fallback
+// category rather than leaving failureReason unset for an unanticipated case.
+export type CoverLetterFailureReason = 'grounding' | 'provider_error' | 'other';
+
 @Entity('cover_letters')
 export class CoverLetterEntity {
   @PrimaryGeneratedColumn('uuid')
@@ -83,6 +93,19 @@ export class CoverLetterEntity {
 
   @Column({ length: 20, default: 'queued' })
   status!: CoverLetterStatus;
+
+  // RABBIT_NOTEBOOK.md §57 — a coarse, machine-readable category set ONLY
+  // when status transitions to 'failed', so the frontend can show a
+  // message appropriate to the actual cause instead of one generic
+  // "edit fields and retry" for every failure (production QA found real
+  // failures were consistently internal grounding rejections, never a
+  // field problem). Never a free-text error message — see
+  // CoverLetterFailureReason's own value set (CoverLetterFailureReason
+  // type below) for exactly what this can hold; nullable because every
+  // pre-§57 row, and every 'queued'/'processing'/'generated'/'downloaded'
+  // row, has none.
+  @Column({ name: 'failure_reason', length: 30, nullable: true })
+  failureReason?: CoverLetterFailureReason;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

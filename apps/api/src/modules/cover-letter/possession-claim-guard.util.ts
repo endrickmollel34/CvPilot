@@ -313,8 +313,23 @@ export function extractJobDescriptionTerms(jobDescription: string): string[] {
 // never satisfied by a skills-list entry alone.
 const EXPERIENCE_CLAIM_PATTERNS: readonly RegExp[] = [
   /\b(experienced|well[- ]versed|expert)\s+(in|with)\b/i,
-  /\b(strong|solid|extensive|deep|thorough|proven|hands[- ]on|practical)\s+([a-z0-9/-]+\s+){0,3}(experience|expertise|knowledge|understanding|background|foundation)\b/i,
+  /\b(strong|solid|extensive|deep|thorough|proven|hands[- ]on|practical)\s+([a-z0-9/-]+\s+){0,3}(experience|expertise|knowledge|understanding|background|foundation|proficiency)\b/i,
   /\b(have|has|had)\s+([a-z0-9-]+\s+){0,3}experience\b/i,
+  // V5 (RABBIT_NOTEBOOK.md §57): "my professional experience with
+  // JavaScript and React is limited" — a REAL production sentence that
+  // slipped through both this and the §56 fix. Unlike "I have limited
+  // experience with X" (already caught by the "have ... experience"
+  // pattern above), this word order has no "have/has/had" verb at all — the
+  // term sits BETWEEN "experience with" and "is limited," with nothing
+  // matching any existing pattern. "Limited" experience still asserts SOME
+  // existing experience (as opposed to none) and must be grounded like any
+  // other experience-tier claim — a candidate with genuinely ZERO
+  // experience should say "I have no experience with X" (a NEGATION_OVERRIDE
+  // match) or express pure learning interest, never "my experience ... is
+  // limited." The non-greedy middle group spans across the named
+  // technologies between "experience with" and "is limited," so a term
+  // anywhere in that span is governed by this one claim.
+  /\b(my|our)\s+([a-z0-9/-]+\s+){0,2}(experience|knowledge|familiarity|proficiency|expertise)\s+(with|in|of)\s+.+?\s+is\s+(limited|minimal|basic|modest)\b/i,
   /\bexpertise\s+(in|with)\b/i,
   /\bbackground\s+in\b/i,
   /\b(developed|developing|develops|built|building|builds|designed|designing|designs|implemented|implementing|implements|delivered|delivering|delivers|deployed|deploying|deploys|architected|architecting|engineered|engineering|optimi[sz]ed|optimi[sz]ing|maintained|maintaining|maintains|debugged|debugging|automated|automating|configured|configuring|shipped|shipping)\b/i,
@@ -392,7 +407,13 @@ const KNOWLEDGE_CLAIM_PATTERNS: readonly RegExp[] = [
 // the NOUN, not the verb) are unaffected and remain safely aspirational.
 const ASPIRATIONAL_OVERRIDE_PATTERNS: readonly RegExp[] = [
   /\b(interested in|keen to|eager to|excited to|hope to|hoping to|looking to|aim to|would love to|would welcome the opportunity to|look forward to)\b/i,
-  /\b(?<!further\s)(develop|expand|build|grow|strengthen|deepen)(ing)?\s+(my\s+)?(knowledge|skills?|experience|understanding)\b/i,
+  // "proficiency" added in §57 — "expanding my proficiency in X" is the
+  // same genuine growth-language shape as "developing my skills in X",
+  // just a different noun; must stay exempt on its own (see the real
+  // production sentence this section traces, where it was the OTHER half —
+  // "experience ... is limited" above — that made the claim unsupported,
+  // not this clause).
+  /\b(?<!further\s)(develop|expand|build|grow|strengthen|deepen)(ing)?\s+(my\s+)?(knowledge|skills?|experience|understanding|proficiency)\b/i,
   /\bnew to\b/i,
   /\bstill learning\b/i,
 ];
@@ -609,6 +630,38 @@ function resolveGoverningTier(
  * — including the deliberate skills-list-only capability-claim strictness
  * (see the "day one" test in possession-claim-guard.util.spec.ts).
  */
+/**
+ * Lists every checked term (the permanent list plus whatever
+ * `extractJobDescriptionTerms` finds in this specific job description) that
+ * appears NOWHERE in `evidence` at all — neither tier (RABBIT_NOTEBOOK.md
+ * §57). Used PROACTIVELY, before the model ever generates a first draft, to
+ * tell it upfront exactly what it must not claim — reducing how often the
+ * REACTIVE repair-retry loop (buildRepairInstruction, triggered only after
+ * an actual rejection) is even needed, without changing what
+ * `findUnsupportedPossessionClaims` itself accepts or rejects. Deliberately
+ * the same loose, tier-agnostic "found in fullEvidenceText at all" check
+ * `findUnsupportedPossessionClaims` uses for its most permissive
+ * (knowledge-tier) bar — a term absent even from that loose check is
+ * absent under every stricter bar too, so this can never under-warn.
+ */
+export function computeUnestablishedJdTerms(
+  jobDescription: string,
+  evidence: CvEvidence,
+): string[] {
+  const fullEvidenceText = `${evidence.experienceText}\n${evidence.skillsOnlyTerms.join(', ')}`;
+  const checkedTerms = [
+    ...new Set([...ALL_CHECKED_TERMS, ...extractJobDescriptionTerms(jobDescription)]),
+  ];
+  return checkedTerms.filter(
+    // Restricted to terms the job description actually names — the static
+    // list alone (soft skills, every known framework, ...) would otherwise
+    // flood this with technologies this specific job never asked for,
+    // making the guidance noisy rather than targeted.
+    (term) =>
+      containsWholePhrase(jobDescription, term) && !containsWholePhrase(fullEvidenceText, term),
+  );
+}
+
 export function findUnsupportedPossessionClaims(
   letterText: string,
   evidence: CvEvidence,

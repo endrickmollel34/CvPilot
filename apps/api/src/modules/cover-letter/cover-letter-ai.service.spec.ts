@@ -2,7 +2,12 @@ import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 
-import { CoverLetterAiService, describeError } from './cover-letter-ai.service';
+import {
+  CoverLetterAiService,
+  describeError,
+  classifyCoverLetterFailure,
+  CoverLetterValidationError,
+} from './cover-letter-ai.service';
 import type { CvEvidence } from './cv-evidence.util';
 
 // openai and @anthropic-ai/sdk are real HTTP clients constructed directly in
@@ -156,8 +161,9 @@ describe('CoverLetterAiService', () => {
 
       // Both providers were tried and both were rejected — grounding is
       // enforced identically regardless of which provider answered.
-      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
-      expect(mockAnthropicCreate).toHaveBeenCalledTimes(3);
+      // §57: MAX_ATTEMPTS raised from 3 to 4 (see cover-letter-ai.service.ts).
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(4);
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(4);
     },
   );
 
@@ -208,7 +214,9 @@ describe('CoverLetterAiService', () => {
 
     expect(result.content).toBe(goodLetter);
     expect(result.modelUsed).toBe('claude-3-5-sonnet-20241022');
-    expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+    // §57: MAX_ATTEMPTS raised from 3 to 4 — OpenAI exhausts all 4 before
+    // falling back; Anthropic still succeeds on its own first attempt.
+    expect(mockOpenAICreate).toHaveBeenCalledTimes(4);
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
   });
 
@@ -334,7 +342,11 @@ describe('CoverLetterAiService', () => {
       const call = mockOpenAICreate.mock.calls[mockOpenAICreate.mock.calls.length - 1] as [
         { messages: { role: string; content: string }[] },
       ];
-      prompts.push(call[0].messages[1]!.content);
+      // §57: the user prompt is always the LAST message, regardless of how
+      // many system messages (grounding + optional proactive guidance)
+      // precede it — a fixed index broke the moment guidance became
+      // possible on attempt 1.
+      prompts.push(call[0].messages[call[0].messages.length - 1]!.content);
     }
 
     expect(prompts[0]).toMatch(/Tone: Professional/);
@@ -368,7 +380,8 @@ describe('CoverLetterAiService', () => {
       const call = mockOpenAICreate.mock.calls[mockOpenAICreate.mock.calls.length - 1] as [
         { messages: { role: string; content: string }[] },
       ];
-      prompts[tone] = call[0].messages[1]!.content;
+      // §57: same fixed-index fix as the test above.
+      prompts[tone] = call[0].messages[call[0].messages.length - 1]!.content;
     }
 
     // Formal: explicitly bans contractions and caps emotional intensity.
@@ -440,7 +453,9 @@ describe('CoverLetterAiService', () => {
     const call = mockOpenAICreate.mock.calls[0] as [
       { messages: { role: string; content: string }[] },
     ];
-    const userPrompt = call[0].messages[1]!.content;
+    // §57: last message is always the user prompt — see the two tone-prompt
+    // tests above for why a fixed index no longer works.
+    const userPrompt = call[0].messages[call[0].messages.length - 1]!.content;
 
     expect(userPrompt).toMatch(/verbatim at least once/i);
     expect(userPrompt).toContain('"Backend Software Engineer"');
@@ -626,7 +641,8 @@ describe('CoverLetterAiService', () => {
         // Diagnostic-loss fix: real reason (too-short output) preserved.
       ).rejects.toThrow(/Cover letter generation failed after retries: .*too short/);
 
-      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+      // §57: MAX_ATTEMPTS raised from 3 to 4.
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(4);
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
     });
 
@@ -644,7 +660,8 @@ describe('CoverLetterAiService', () => {
         ),
       ).rejects.toThrow('Cover letter generation failed after retries');
 
-      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
+      // §57: MAX_ATTEMPTS raised from 3 to 4.
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(4);
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
     });
 
@@ -861,17 +878,26 @@ describe('CoverLetterAiService', () => {
       );
 
       expect(result.content).toBe(goodLetter);
-      // (7) The repaired attempt succeeded — no need to exhaust all 3.
+      // (7) The repaired attempt succeeded — no need to exhaust all attempts.
       expect(mockOpenAICreate).toHaveBeenCalledTimes(2);
 
       const firstMessages = messagesFromCall(mockOpenAICreate.mock.calls[0]);
       const secondMessages = messagesFromCall(mockOpenAICreate.mock.calls[1]);
 
-      // Attempt 1 carries no repair note — nothing to repair yet.
-      expect(firstMessages).toHaveLength(2);
+      // §57: PRODUCTION_SKILL_EVIDENCE doesn't cover every JD requirement
+      // ("scalable system design", "database query optimization"), so
+      // attempt 1 already carries a proactive-guidance system message —
+      // it just doesn't yet name any of the terms this specific letter
+      // will go on to fabricate (python/java/postgresql/etc. are all
+      // skills-list-supported at the knowledge tier; they only become
+      // "unsupported" once the letter over-claims *experience* with them).
+      expect(firstMessages).toHaveLength(3);
       expect(firstMessages.every((m) => m.role !== 'system' || m.content.length > 0)).toBe(true);
+      expect(firstMessages[1]!.content).not.toContain('python');
+      expect(firstMessages[1]!.content).not.toContain('docker');
 
-      // Attempt 2 carries an extra system message with the repair instruction.
+      // Attempt 2's guidance message combines the same proactive guidance
+      // with the new repair instruction — still one extra system message.
       expect(secondMessages).toHaveLength(3);
       const repairMessage = secondMessages[1]!;
       expect(repairMessage.role).toBe('system');
@@ -933,8 +959,11 @@ describe('CoverLetterAiService', () => {
       const attempt2Messages = messagesFromCall(mockOpenAICreate.mock.calls[1]);
       const attempt3Messages = messagesFromCall(mockOpenAICreate.mock.calls[2]);
 
-      // Attempt 1: no repair note yet.
-      expect(attempt1Messages).toHaveLength(2);
+      // §57: attempt 1 already carries a proactive-guidance message (same
+      // reasoning as the test above) — but no repair terms yet.
+      expect(attempt1Messages).toHaveLength(3);
+      expect(attempt1Messages[1]!.content).not.toContain('python');
+      expect(attempt1Messages[1]!.content).not.toContain('docker');
 
       // Attempt 2: repair note names only attempt 1's rejected terms.
       expect(attempt2Messages).toHaveLength(3);
@@ -1066,8 +1095,9 @@ describe('CoverLetterAiService', () => {
         ),
       ).rejects.toThrow('Cover letter generation failed after retries');
 
-      expect(mockOpenAICreate).toHaveBeenCalledTimes(3);
-      expect(mockAnthropicCreate).toHaveBeenCalledTimes(3);
+      // §57: MAX_ATTEMPTS raised from 3 to 4.
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(4);
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(4);
 
       // Repair feedback carries over into the Anthropic fallback too — same
       // underlying CV/evidence, same rejection reason still applies.
@@ -1164,5 +1194,95 @@ describe('CoverLetterAiService', () => {
       expect(result.content).toBe(letter);
       expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
     });
+  });
+
+  // ─── §57: proactive guidance reaches the model before any rejection ───────
+  //
+  // Reliability fix for the production recheck where a CV/JD pair with very
+  // little genuine overlap exhausted every retry attempt on grounding
+  // rejections alone (see RABBIT_NOTEBOOK.md §57). Computed once, up front,
+  // from the JD and evidence — never from a model response — so it costs no
+  // extra attempt and cannot itself be a source of fabrication.
+  describe('proactive guidance (RABBIT_NOTEBOOK.md §57)', () => {
+    it('sends guidance naming an unestablished JD technology on attempt 1, before any rejection', async () => {
+      mockOpenAICreate.mockResolvedValueOnce(
+        openAiResponse(cleanLetter('Acme Corp', 'Backend Engineer')),
+      );
+
+      await service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        JOB_DESCRIPTION,
+        'Backend Engineer',
+        'Acme Corp',
+        'professional',
+      );
+
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(1);
+      const call = mockOpenAICreate.mock.calls[0] as [
+        { messages: { role: string; content: string }[] },
+      ];
+      const guidanceMessage = call[0].messages[1]!;
+      expect(guidanceMessage.role).toBe('system');
+      expect(guidanceMessage.content).toContain('NOT established anywhere in CANDIDATE_EVIDENCE');
+      expect(guidanceMessage.content).toContain('python');
+    });
+
+    it('sends no extra guidance message when the CV already establishes everything the JD asks for', async () => {
+      mockOpenAICreate.mockResolvedValueOnce(
+        openAiResponse(
+          'Dear Hiring Manager,\n\nI am writing to apply for the Frontend Engineer role at ' +
+            'Acme Corp. I am proficient in TypeScript, having spent three years building ' +
+            'production web applications with it.\n\nI look forward to bringing this ' +
+            'experience to Acme Corp. Sincerely',
+        ),
+      );
+
+      await service.generateCoverLetter(
+        TECH_CV_TEXT,
+        'We need a frontend engineer skilled in TypeScript.',
+        'Frontend Engineer',
+        'Acme Corp',
+        'professional',
+      );
+
+      const call = mockOpenAICreate.mock.calls[0] as [
+        { messages: { role: string; content: string }[] },
+      ];
+      // No unestablished JD terms → no guidance message → [system, user] only.
+      expect(call[0].messages).toHaveLength(2);
+    });
+  });
+});
+
+// ─── §57: classifyCoverLetterFailure() ─────────────────────────────────────
+//
+// Drives the CoverLetterFailureReason persisted on a failed letter (see
+// cover-letter.service.ts's process()), which in turn drives the frontend's
+// failure message — must never tell a user to "edit fields" when the real
+// cause was an internal grounding rejection or a provider outage.
+describe('classifyCoverLetterFailure() (RABBIT_NOTEBOOK.md §57)', () => {
+  it('classifies a grounding rejection (CoverLetterValidationError as .cause) as "grounding"', () => {
+    const cause = new CoverLetterValidationError(
+      'claims possession of technology/skill: "react"',
+      'unsupported_possession_claim',
+      ['react'],
+    );
+    const err = new Error('Cover letter generation failed after retries: ...', { cause });
+    expect(classifyCoverLetterFailure(err)).toBe('grounding');
+  });
+
+  it('classifies any other real Error as .cause as "provider_error"', () => {
+    const cause = new Error('Request timed out');
+    const err = new Error('Cover letter generation failed after retries: ...', { cause });
+    expect(classifyCoverLetterFailure(err)).toBe('provider_error');
+  });
+
+  it('classifies an error with no .cause as "other"', () => {
+    const err = new Error('CV has no usable content');
+    expect(classifyCoverLetterFailure(err)).toBe('other');
+  });
+
+  it('classifies a non-Error throw as "other"', () => {
+    expect(classifyCoverLetterFailure('a plain string throw')).toBe('other');
   });
 });

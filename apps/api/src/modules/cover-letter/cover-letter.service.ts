@@ -28,7 +28,7 @@ import { BillingService } from '../billing/billing.service';
 import { AnalysisService } from '../analysis/analysis.service';
 import { AuditService } from '../audit/audit.service';
 import { USAGE_ACTIONS } from '../../common/constants/usage-actions';
-import { CoverLetterAiService } from './cover-letter-ai.service';
+import { CoverLetterAiService, classifyCoverLetterFailure } from './cover-letter-ai.service';
 import { resolveCoverLetterCvText } from './cv-text-resolver.util';
 import { buildCvEvidenceFromContent, buildCvEvidenceFromPlainText } from './cv-evidence.util';
 import { generateCoverLetterPdf } from './cover-letter-pdf.util';
@@ -230,7 +230,17 @@ export class CoverLetterService extends WorkerHost {
         tags: { queue: 'cover-letter' },
         extra: { coverLetterId, cvId },
       });
-      await this.repo.update(coverLetterId, { status: 'failed' });
+      // RABBIT_NOTEBOOK.md §57: persists WHY this failed (grounding
+      // exhaustion vs a genuine provider error vs anything else) so the
+      // frontend can show a message appropriate to the actual cause —
+      // production QA found the UI previously showed the same "edit
+      // fields and retry" wording for every failure, even though real
+      // failures were confirmed to be entirely internal grounding
+      // rejections, never a field problem.
+      await this.repo.update(coverLetterId, {
+        status: 'failed',
+        failureReason: classifyCoverLetterFailure(err),
+      });
       this.eventEmitter.emit('cover-letter.failed', { coverLetterId });
     }
   }
