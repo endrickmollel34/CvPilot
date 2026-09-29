@@ -792,4 +792,67 @@ describe('findUnsupportedPossessionClaims()', () => {
       expect(violations.some((v) => v.includes('docker'))).toBe(true);
     });
   });
+
+  // ─── V6 (RABBIT_NOTEBOOK.md §58): "proficient in X" from a bare skills list
+  // — production QA follow-up, not a new fabricated letter. A real letter
+  // said "I am proficient in ... Java, C++, and Python" for a CV whose only
+  // mention of those languages is a bare "Programming Languages: Html, CSS,
+  // Java, C++, Python" skills-list entry, with no experience bullet
+  // describing actual work with any of them. "Proficient"/"skilled"/
+  // "fluent"/"competent" are self-assessed SKILL-LEVEL claims — the same
+  // shape as the already-strict "experienced in"/"expert in"/"well-versed
+  // in", not a modest "I have knowledge of X" — so these moved from
+  // KNOWLEDGE_CLAIM_PATTERNS into EXPERIENCE_CLAIM_PATTERNS.
+  describe('V6 — "proficient/skilled/fluent/competent in X" requires genuine experience, not just a bare list', () => {
+    // Mirrors the real production evidence shape exactly: a bare
+    // comma-separated language list as one skills-only entry, no experience
+    // bullet naming any of them.
+    const BARE_LANGUAGE_LIST_EVIDENCE: CvEvidence = {
+      experienceText:
+        'IT Officer at Toyota Tanzania. Managed internal databases and performed system updates.',
+      skillsOnlyTerms: ['Programming Languages: Html, CSS, Java, C++, Python'],
+    };
+
+    it('flags the exact real "I am proficient in ... Java, C++, and Python" sentence against a bare skills list', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am proficient in several programming languages, including Java, C++, and Python, ' +
+          'and have a working knowledge of HTML and CSS.',
+        BARE_LANGUAGE_LIST_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('python'))).toBe(true);
+      expect(violations.some((v) => v.includes('java'))).toBe(true);
+      // The co-occurring "working knowledge of HTML and CSS" is a modest
+      // knowledge-tier claim — a bare list entry remains sufficient for it,
+      // and it must NOT be flagged just because "proficient" appears earlier
+      // in the same sentence for different terms.
+      expect(violations.some((v) => v.includes('html'))).toBe(false);
+      expect(violations.some((v) => v.includes('css'))).toBe(false);
+    });
+
+    it('still accepts "proficient in X" when the CV genuinely describes experience using X', () => {
+      const violations = findUnsupportedPossessionClaims('I am proficient in Python.', {
+        experienceText: 'Built and maintained production services in Python for three years.',
+        skillsOnlyTerms: [],
+      });
+      expect(violations).toEqual([]);
+    });
+
+    it('a bare skills-list entry alone remains sufficient for the modest "knowledge of X" phrasing', () => {
+      const violations = findUnsupportedPossessionClaims('I have knowledge of Python.', {
+        experienceText: '',
+        skillsOnlyTerms: ['Python'],
+      });
+      expect(violations).toEqual([]);
+    });
+
+    it('flags "skilled in X" and "fluent in X" the same way as "proficient in X"', () => {
+      const evidence: CvEvidence = { experienceText: '', skillsOnlyTerms: ['Kubernetes'] };
+      expect(
+        findUnsupportedPossessionClaims('I am skilled in Kubernetes.', evidence).length,
+      ).toBeGreaterThan(0);
+      expect(
+        findUnsupportedPossessionClaims('I am fluent in Kubernetes.', evidence).length,
+      ).toBeGreaterThan(0);
+    });
+  });
 });

@@ -341,6 +341,16 @@ const EXPERIENCE_CLAIM_PATTERNS: readonly RegExp[] = [
   // experience only ever says generic "managed internal databases," never
   // "relational." Same shape as "prepared/equipped/enabled me to" above.
   /\b(honed|sharpened|refined)\s+my\s+(\S+\s+){0,3}(ability|abilities|skills?)\b/i,
+  // V6 (RABBIT_NOTEBOOK.md §58): moved here from KNOWLEDGE_CLAIM_PATTERNS —
+  // "I am proficient in Java, C++, and Python" for a CV whose only mention
+  // of those languages is a bare "Programming Languages: ..." list entry,
+  // with no experience bullet or proficiency qualifier anywhere. "Proficient
+  // in"/"skilled in"/"fluent in"/"competent in" are self-assessed SKILL-LEVEL
+  // claims — the same shape as the already-strict "experienced in"/"expert
+  // in"/"well-versed in" just above, not a modest "I have knowledge of X" —
+  // so a bare skills-list entry alone must not be enough to ground them;
+  // genuine experienceText evidence is required, exactly like its siblings.
+  /\b(proficient|skilled|fluent|competent)\s+(in|with)\b/i,
 ];
 
 // V2.1: present-tense/future CAPABILITY claims — "I can contribute to X,"
@@ -379,7 +389,6 @@ const IMPLIED_EXISTING_SKILL_PATTERNS: readonly RegExp[] = [
 // → a modest knowledge/familiarity claim — a skills-list entry alone is
 // sufficient grounding.
 const KNOWLEDGE_CLAIM_PATTERNS: readonly RegExp[] = [
-  /\b(proficient|skilled|fluent|competent)\s+(in|with)\b/i,
   /\bknowledge\s+of\b/i,
   /\bfamiliar(ity)?\s+with\b/i,
   // V3 (RABBIT_NOTEBOOK.md §56): "my foundational understanding of SQL"
