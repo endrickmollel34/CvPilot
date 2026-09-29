@@ -161,6 +161,37 @@ describe('CoverLetterAiService', () => {
     },
   );
 
+  // Fix (RABBIT_NOTEBOOK.md §55): confirmed against a real production letter
+  // that claimed "I am also familiar with React and Node.js" for a CV with
+  // neither anywhere in it — both are job-description requirements, not
+  // anything on the fixed KNOWN_TECH_TERMS list. This test proves the
+  // WIRING end-to-end through the real service methods (not just the pure
+  // guard function, already covered in possession-claim-guard.util.spec.ts):
+  // a job description naming a technology absent from that static list
+  // still gets the letter rejected when claimed as possessed.
+  it('rejects a letter claiming a job-description technology that is not on the fixed checked-term list (e.g. React)', async () => {
+    const jobDescriptionWithReact =
+      'We need a frontend engineer experienced building interfaces with React and Vue.';
+    const badLetter =
+      'Dear Hiring Manager,\n\nI am excited to apply for the Frontend Engineer role at Acme Corp. ' +
+      'My academic background in Computer Science, combined with hands-on project work building an ' +
+      'inventory tracking tool, has given me a solid foundation to build on. I am also familiar with ' +
+      'React and Vue, and I look forward to applying them here as part of the team.\n\n' +
+      `I look forward to contributing to Acme Corp. Sincerely`;
+    mockOpenAICreate.mockResolvedValue(openAiResponse(badLetter));
+    mockAnthropicCreate.mockResolvedValue(anthropicResponse(badLetter));
+
+    await expect(
+      service.generateCoverLetter(
+        NO_TECH_CV_TEXT,
+        jobDescriptionWithReact,
+        'Frontend Engineer',
+        'Acme Corp',
+        'professional',
+      ),
+    ).rejects.toThrow(/Cover letter generation failed after retries: .*claims possession of/);
+  });
+
   it('recovers via the Anthropic fallback when OpenAI hallucinates but Anthropic answers cleanly', async () => {
     const badLetter = HALLUCINATED_LETTERS.professional('Acme Corp', 'Backend Engineer');
     const goodLetter = cleanLetter('Acme Corp', 'Backend Engineer');

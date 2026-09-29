@@ -8,8 +8,9 @@ import type { CvContent } from '@cvpilot/shared';
  * ground a claim of having *done* the work).
  *
  *  - `experienceText`: work experience (titles, companies, bullets),
- *    education, certifications, and summary/current-title — text that can
- *    support a claim of genuinely demonstrated, hands-on experience.
+ *    projects (titles, bullets), education, certifications, and summary/
+ *    current-title — text that can support a claim of genuinely
+ *    demonstrated, hands-on experience.
  *  - `skillsOnlyTerms`: names pulled from a skills/languages list — can
  *    support a *knowledge/familiarity* claim ("I have knowledge of X"), but
  *    never an experience-level claim ("I developed X at Employer") on their
@@ -36,6 +37,18 @@ export function buildCvEvidenceFromContent(content: CvContent): CvEvidence {
 
   for (const entry of content.workExperience) {
     experienceParts.push(entry.title, entry.company, ...entry.bullets);
+  }
+  // Fix (RABBIT_NOTEBOOK.md §55): a project's title/bullets were never
+  // counted as experience-tier evidence at all — confirmed against a real
+  // production cover letter whose CV genuinely had a project (title +
+  // description) that this function silently ignored. This did not cause
+  // the React/Node.js fabrication itself (see the module report), but it
+  // means a real, demonstrated claim genuinely grounded only in project
+  // work (e.g. a technology actually named in a project bullet) could be
+  // wrongly rejected as unsupported. Same shape as work experience — no
+  // separate description field to special-case.
+  for (const entry of content.projects ?? []) {
+    experienceParts.push(entry.title, ...entry.bullets);
   }
   for (const entry of content.education) {
     experienceParts.push(entry.degree, entry.institution);

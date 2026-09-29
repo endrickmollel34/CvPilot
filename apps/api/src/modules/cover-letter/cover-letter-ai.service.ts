@@ -196,7 +196,7 @@ export class CoverLetterValidationError extends Error {
   }
 }
 
-function validateOutput(text: string, guardEvidence: CvEvidence): void {
+function validateOutput(text: string, guardEvidence: CvEvidence, jobDescription: string): void {
   if (text.length < 200) {
     throw new CoverLetterValidationError(
       'Generated cover letter is too short (min 200 chars)',
@@ -235,7 +235,10 @@ function validateOutput(text: string, guardEvidence: CvEvidence): void {
   // does NOT touch the possession-claim grounding guard immediately below,
   // which still fails a letter that fabricates unsupported experience.
 
-  const claims = findUnsupportedPossessionClaims(text, guardEvidence);
+  // jobDescription is used ONLY to widen which terms the guard checks FOR
+  // (RABBIT_NOTEBOOK.md §55) — never as evidence of what the candidate has;
+  // see findUnsupportedPossessionClaims's own doc comment.
+  const claims = findUnsupportedPossessionClaims(text, guardEvidence, jobDescription);
   if (claims.length > 0) {
     // Privacy-safe logging (unchanged from the diagnostic-loss fix): only
     // the unsupported term(s) are kept, never the full generated sentence
@@ -380,6 +383,7 @@ export class CoverLetterAiService {
         return await this.callOpenAI(
           userPrompt,
           guardEvidence,
+          jobDescription,
           repairInstructionFor(unsupportedTermsSeen),
         );
       } catch (err) {
@@ -403,6 +407,7 @@ export class CoverLetterAiService {
         return await this.callAnthropic(
           userPrompt,
           guardEvidence,
+          jobDescription,
           repairInstructionFor(unsupportedTermsSeen),
         );
       } catch (err) {
@@ -420,6 +425,7 @@ export class CoverLetterAiService {
   private async callOpenAI(
     userPrompt: string,
     guardEvidence: CvEvidence,
+    jobDescription: string,
     repairInstruction?: string,
   ): Promise<CoverLetterAiResult> {
     // The repair instruction (when present) rides as an additional system
@@ -439,7 +445,7 @@ export class CoverLetterAiService {
     });
 
     const content = response.choices[0]?.message?.content?.trim() ?? '';
-    validateOutput(content, guardEvidence);
+    validateOutput(content, guardEvidence, jobDescription);
 
     return {
       content,
@@ -451,6 +457,7 @@ export class CoverLetterAiService {
   private async callAnthropic(
     userPrompt: string,
     guardEvidence: CvEvidence,
+    jobDescription: string,
     repairInstruction?: string,
   ): Promise<CoverLetterAiResult> {
     // Unreachable in practice — generateCoverLetter() never enters the
@@ -481,7 +488,7 @@ export class CoverLetterAiService {
     }
 
     const content = block.text.trim();
-    validateOutput(content, guardEvidence);
+    validateOutput(content, guardEvidence, jobDescription);
 
     return {
       content,

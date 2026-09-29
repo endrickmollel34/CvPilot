@@ -1,5 +1,40 @@
 import type { CvEvidence } from './cv-evidence.util';
-import { findUnsupportedPossessionClaims } from './possession-claim-guard.util';
+import {
+  findUnsupportedPossessionClaims,
+  extractJobDescriptionTerms,
+} from './possession-claim-guard.util';
+
+describe('extractJobDescriptionTerms() (RABBIT_NOTEBOOK.md §55)', () => {
+  it('extracts a dotted framework name', () => {
+    expect(extractJobDescriptionTerms('Experience with Node.js and Next.js.')).toEqual(
+      expect.arrayContaining(['node.js', 'next.js']),
+    );
+  });
+
+  it('extracts a mixed-internal-capital compound name', () => {
+    const terms = extractJobDescriptionTerms('Design and query PostgreSQL and GraphQL APIs.');
+    expect(terms).toEqual(expect.arrayContaining(['postgresql', 'graphql']));
+  });
+
+  it('extracts a short all-caps acronym', () => {
+    const terms = extractJobDescriptionTerms('Working knowledge of SQL and AWS.');
+    expect(terms).toEqual(expect.arrayContaining(['sql', 'aws']));
+  });
+
+  it('extracts an ordinary-cased common framework name with no distinctive shape', () => {
+    const terms = extractJobDescriptionTerms('Experience building web interfaces with React.');
+    expect(terms).toContain('react');
+  });
+
+  it('does not extract ordinary sentence words', () => {
+    const terms = extractJobDescriptionTerms(
+      'We are looking for a driven and collaborative engineer.',
+    );
+    expect(terms).not.toContain('we');
+    expect(terms).not.toContain('driven');
+    expect(terms).not.toContain('collaborative');
+  });
+});
 
 const CV_TEXT =
   'Software engineer with 3 years of experience building web applications in TypeScript ' +
@@ -438,6 +473,72 @@ describe('findUnsupportedPossessionClaims()', () => {
     it('does not reinterpret Python/Java as professional experience merely because the sentence discusses future contribution generally', () => {
       const violations = findUnsupportedPossessionClaims(
         'My familiarity with Python and Java provides a foundation for tackling this role.',
+        SKILL_ONLY_EVIDENCE,
+      );
+      expect(violations).toEqual([]);
+    });
+  });
+
+  // ─── V3 (RABBIT_NOTEBOOK.md §55): job-description-derived checked terms ────
+  // Confirmed against a real production cover letter: "I am also familiar
+  // with React and Node.js" was never caught because neither term was on
+  // the fixed KNOWN_TECH_TERMS list — both are explicit job-description
+  // requirements, not anything genuinely on the CV. See
+  // extractJobDescriptionTerms's own doc comment for the general (not a
+  // React/Node.js-specific patch) fix.
+  describe('V3 — job-description-derived checked terms', () => {
+    // A real, unmodified excerpt of the actual job description involved in
+    // the production report — reused here as synthetic test input (no real
+    // candidate data), not because this specific wording is special.
+    const JOB_DESCRIPTION =
+      'Develop responsive user interfaces using React, HTML and CSS. ' +
+      'Build and maintain REST APIs using Node.js and TypeScript. ' +
+      'Design and query PostgreSQL databases.';
+
+    it('flags a technology present ONLY in the job description, absent from the whole CV, when claimed as possessed', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am also familiar with React and Node.js.',
+        SKILL_ONLY_EVIDENCE,
+        JOB_DESCRIPTION,
+      );
+      expect(violations.some((v) => v.includes('react'))).toBe(true);
+      expect(violations.some((v) => v.includes('node'))).toBe(true);
+    });
+
+    it('does not flag the same job-description technology when the CV genuinely supports it', () => {
+      const evidenceWithReact: CvEvidence = {
+        ...SKILL_ONLY_EVIDENCE,
+        skillsOnlyTerms: [...SKILL_ONLY_EVIDENCE.skillsOnlyTerms, 'React'],
+      };
+      const violations = findUnsupportedPossessionClaims(
+        'I am familiar with React.',
+        evidenceWithReact,
+        JOB_DESCRIPTION,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('does not flag honest learning-intent wording about a job-description-only technology', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am eager to learn React and Node.js, which are integral to this role.',
+        SKILL_ONLY_EVIDENCE,
+        JOB_DESCRIPTION,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('still does not flag a genuinely CV-supported claim when a job description is supplied', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'My familiarity with Python, as highlighted in my skill set, positions me well.',
+        SKILL_ONLY_EVIDENCE,
+        JOB_DESCRIPTION,
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('behaves identically to before when no job description is supplied (backward compatible)', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am also familiar with React and Node.js.',
         SKILL_ONLY_EVIDENCE,
       );
       expect(violations).toEqual([]);

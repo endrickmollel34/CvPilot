@@ -86,6 +86,45 @@ import type { CvEvidence } from './cv-evidence.util';
  * independently-graded claims about two different terms, even with no
  * clause-boundary punctuation between them.
  *
+ * V3 (RABBIT_NOTEBOOK.md §55): production found a real letter claiming "I am
+ * also familiar with React and Node.js" for a CV with neither anywhere in
+ * it — both names are explicit EMPLOYER_REQUIREMENTS (the job description
+ * literally says "Develop... using React" and "Build... using Node.js"), so
+ * this is exactly the class of bug this guard exists to catch. Root cause:
+ * KNOWN_TECH_TERMS below is a fixed, curated list, and "react"/"node"/
+ * "node.js" simply were not on it — so those specific terms were never
+ * checked at all, regardless of how clearly the sentence matched a
+ * KNOWLEDGE_CLAIM_PATTERN. Confirmed directly: the SAME generated letter
+ * correctly used honest, aspirational wording for "REST APIs" and
+ * "PostgreSQL" — both ARE on the list — proving the deterministic guard
+ * (not the prompt alone) is what enforces this, and that anything off the
+ * list is completely unguarded.
+ *
+ * A fixed list, however large, can only ever chase the specific
+ * technologies someone thought to add — the general fix is to derive
+ * checked terms from the SPECIFIC job description each letter is actually
+ * generated against, not a static vocabulary. `extractJobDescriptionTerms`
+ * below extracts technology-shaped tokens directly from EMPLOYER_REQUIREMENTS
+ * for that one generation call: dotted framework names (Node.js, Next.js),
+ * mixed-internal-capital compound names (PostgreSQL, GraphQL, TypeScript),
+ * and short all-caps acronyms (SQL, REST, AWS) — shapes that are
+ * overwhelmingly technology names in real English prose, so this needs no
+ * hardcoded vocabulary at all and automatically covers any future
+ * technology with one of these shapes. This is deliberately safe even when
+ * it over-extracts a non-technology token (e.g. a company-name acronym):
+ * an extracted term only ever causes a violation if the LETTER ALSO makes
+ * an unsupported possession/experience/capability claim ABOUT it — an
+ * innocuous over-extracted term that the letter never mentions in a claim
+ * position is completely inert.
+ *
+ * The one gap this can't close: ordinary-cased common framework names with
+ * no distinctive shape at all — "React" has no internal capital and isn't
+ * an acronym, so no syntactic rule catches it. COMMON_FRAMEWORK_NAMES below
+ * is a small, explicitly-labelled supplement for exactly this residual
+ * class (checked the same way, by simple presence in the job description) —
+ * not a replacement for the syntactic mechanism above, which remains the
+ * actual generalizing fix for anything with a distinctive shape.
+ *
  * This deliberately does NOT attempt general free-form factual verification
  * (that is a semantic-entailment problem regex cannot solve reliably — see
  * the investigation report). It only flags a sentence when BOTH:
@@ -165,6 +204,82 @@ const SOFT_SKILL_TERMS: readonly string[] = [
 ];
 
 const ALL_CHECKED_TERMS: readonly string[] = [...KNOWN_TECH_TERMS, ...SOFT_SKILL_TERMS];
+
+// See the module header's V3 comment. Deliberately a small, explicitly-
+// labelled supplement, not a replacement for the syntactic extraction below
+// — only for extremely common ordinary-cased framework/language names that
+// have no distinctive shape a regex could reliably identify on its own.
+const COMMON_FRAMEWORK_NAMES: readonly string[] = [
+  'react',
+  'vue',
+  'angular',
+  'svelte',
+  'ember',
+  'node',
+  'django',
+  'flask',
+  'rails',
+  'express',
+  'redux',
+  'jquery',
+  'bootstrap',
+  'tailwind',
+  'sass',
+  'webpack',
+  'vite',
+  'go',
+  'golang',
+  'rust',
+  'swift',
+  'kotlin',
+  'flutter',
+  'ruby',
+  'php',
+  'html',
+  'css',
+];
+
+// Framework/language names with a distinctive dotted suffix — Node.js,
+// Next.js, Vue.js, Nest.js, ASP.NET, .NET. Case-insensitive so "node.JS" or
+// "Node.Js" still matches; the shape (a word immediately followed by a
+// recognised dotted suffix) is what makes this safe, not the casing.
+const DOTTED_SUFFIX_RE = /\b[a-z][a-z0-9]*\.(?:js|net)\b/gi;
+
+// Compound names with an internal capital after a lowercase letter —
+// PostgreSQL, JavaScript, TypeScript, GitHub, GraphQL, MongoDB, WebSocket,
+// OAuth, NestJS. Ordinary English prose never capitalizes mid-word, so this
+// shape is inherently high-precision for real technology names without
+// needing a hardcoded list of them.
+const MIXED_CASE_RE = /\b[a-zA-Z]*[a-z][A-Z][a-zA-Z0-9]*\b/g;
+
+// Short all-caps acronyms — SQL, REST, API, AWS, JWT, ORM, CI, CD. Bounded
+// to 2-6 letters; an over-extracted non-technology acronym (e.g. a company
+// abbreviation) is harmless on its own — see the module header's safety
+// argument — so no stoplist is needed here.
+const ACRONYM_RE = /\b[A-Z]{2,6}\b/g;
+
+/**
+ * Extracts candidate technology-shaped tokens directly from a specific job
+ * description (RABBIT_NOTEBOOK.md §55) — the general mechanism that lets
+ * `findUnsupportedPossessionClaims` check a possession claim about ANY
+ * technology the employer actually asked for, not just the fixed
+ * KNOWN_TECH_TERMS list. See this module's header comment for the full
+ * rationale and the deliberate safety property that makes over-extraction
+ * harmless. Returns lowercase, deduplicated terms.
+ */
+export function extractJobDescriptionTerms(jobDescription: string): string[] {
+  const found = new Set<string>();
+
+  for (const match of jobDescription.matchAll(DOTTED_SUFFIX_RE)) found.add(match[0].toLowerCase());
+  for (const match of jobDescription.matchAll(MIXED_CASE_RE)) found.add(match[0].toLowerCase());
+  for (const match of jobDescription.matchAll(ACRONYM_RE)) found.add(match[0].toLowerCase());
+
+  for (const name of COMMON_FRAMEWORK_NAMES) {
+    if (containsWholePhrase(jobDescription, name)) found.add(name);
+  }
+
+  return [...found];
+}
 
 // Sentence matches ANY of these → a claim of genuinely demonstrated,
 // hands-on experience — must be grounded in experienceText specifically,
@@ -396,8 +511,14 @@ function resolveGoverningTier(
 /**
  * Returns a human-readable description of each unsupported possession claim
  * found in `letterText`, checked against `evidence` — the candidate's CV
- * split into experience vs skills-only tiers (see cv-evidence.util.ts), never
- * the job description. An empty array means no violation was found.
+ * split into experience vs skills-only tiers (see cv-evidence.util.ts). An
+ * empty array means no violation was found.
+ *
+ * V3 (RABBIT_NOTEBOOK.md §55): `jobDescription`, when supplied, is used
+ * ONLY to derive additional terms to CHECK for (via
+ * `extractJobDescriptionTerms`) — never as evidence that the candidate
+ * possesses anything (that would defeat the entire point of this guard).
+ * See the module header's V3 comment for the full rationale.
  *
  * V2.1.1: each checked-term OCCURRENCE is graded against the claim pattern
  * that actually governs *it* (by nearest position — see
@@ -426,15 +547,19 @@ function resolveGoverningTier(
 export function findUnsupportedPossessionClaims(
   letterText: string,
   evidence: CvEvidence,
+  jobDescription?: string,
 ): string[] {
   const violations: string[] = [];
   const fullEvidenceText = `${evidence.experienceText}\n${evidence.skillsOnlyTerms.join(', ')}`;
+  const checkedTerms = jobDescription
+    ? [...new Set([...ALL_CHECKED_TERMS, ...extractJobDescriptionTerms(jobDescription)])]
+    : ALL_CHECKED_TERMS;
 
   for (const sentence of splitIntoSentences(letterText)) {
     const spans = findClaimSpans(sentence);
     if (spans.length === 0) continue; // no claim pattern anywhere — nothing to check
 
-    for (const term of ALL_CHECKED_TERMS) {
+    for (const term of checkedTerms) {
       for (const termIndex of findWholePhraseIndices(sentence, term)) {
         const tier = resolveGoverningTier(termIndex, spans);
         if (tier === undefined || isExemptTier(tier)) continue;

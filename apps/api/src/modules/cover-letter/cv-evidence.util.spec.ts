@@ -24,6 +24,13 @@ describe('buildCvEvidenceFromContent()', () => {
         ],
       },
     ],
+    projects: [
+      {
+        id: 'proj-1',
+        title: 'Muniverse Application',
+        bullets: ['Campus social media app.'],
+      },
+    ],
     education: [
       {
         id: 'ed-1',
@@ -54,6 +61,16 @@ describe('buildCvEvidenceFromContent()', () => {
     expect(evidence.experienceText).toContain('Toyota Tanzania');
     expect(evidence.experienceText).toContain('Developed backend services');
     expect(evidence.experienceText).toContain('University of Dar es Salaam');
+  });
+
+  // Fix (RABBIT_NOTEBOOK.md §55): confirmed against a real production CV/
+  // cover letter — a project's title/bullets were previously invisible to
+  // this evidence split entirely, so a claim genuinely grounded only in
+  // project work could be wrongly rejected as unsupported.
+  it('(§55) puts project titles and bullets in experienceText', () => {
+    const evidence = buildCvEvidenceFromContent(CONTENT);
+    expect(evidence.experienceText).toContain('Muniverse Application');
+    expect(evidence.experienceText).toContain('Campus social media app.');
   });
 
   it('does not put skills-only terms in experienceText', () => {
