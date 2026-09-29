@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CVPilot is an AI-powered CV analysis and cover letter generation SaaS targeting university students and recent graduates. Users upload a CV, paste a job description, receive an AI-generated match score with inline feedback, and can generate a tailored cover letter in one click. Billing is handled via Stripe with Free, Pro (£9.99/mo), and Student Bundle (£4.99/mo for `.ac.uk` emails) tiers.
+CVPilot is an AI-powered CV analysis and cover letter generation SaaS targeting university students and recent graduates. Users upload a CV, paste a job description, receive an AI-generated match score with inline feedback, and can generate a tailored cover letter in one click. Billing is handled via Stripe (EUR-denominated) with three tiers: **Free** (€0), **Pro Monthly** (billed internally as `pro_monthly`, displayed publicly as "7-Day Pro Access": a one-time €2.99 introductory charge, then €14.99/mo after a 7-day paid trial — never described as a "free trial" anywhere in the product), and **Pro Annual** (€79.99/yr, ≈€6.67/mo). A legacy **Student** price (€4.99/mo, originally for `.ac.uk` emails) still exists for pre-existing subscribers but is no longer offered on new checkout. (Verified directly against live Stripe price data, `apps/api/src/modules/billing/providers/stripe.provider.ts`, and `apps/web/src/components/landing/PricingSection.tsx` — RABBIT_NOTEBOOK.md §60. The Stripe account is currently in **test mode**; see §60/§61 for what remains before real payments can be accepted.)
 
 ## Repository Structure
 
