@@ -539,6 +539,14 @@ function clauseIndexOf(position: number, boundaries: readonly number[]): number 
  *     "haven't." This never reaches into a later, independent clause
  *     ("..., but I have experience with Y" is unaffected).
  */
+/** True when two spans' text ranges share any character position. */
+function spansOverlap(
+  a: { index: number; length: number },
+  b: { index: number; length: number },
+): boolean {
+  return a.index < b.index + b.length && b.index < a.index + a.length;
+}
+
 function findClaimSpans(sentence: string): ClaimSpan[] {
   const rawSpans: ClaimSpan[] = [];
   const collect = (patterns: readonly RegExp[], tier: ClaimTier) => {
@@ -554,8 +562,37 @@ function findClaimSpans(sentence: string): ClaimSpan[] {
   collect(IMPLIED_EXISTING_SKILL_PATTERNS, 'experience');
   collect(KNOWLEDGE_CLAIM_PATTERNS, 'knowledge');
 
-  const exemptSpans = rawSpans.filter((s) => isExemptTier(s.tier));
-  const withoutNestedMatches = rawSpans.filter((span) => {
+  // V7 (RABBIT_NOTEBOOK.md §59): general precedence fix — a weaker
+  // OVERLAPPING claim span must never govern territory a stronger claim
+  // pattern also covers. Production example: "I have a STRONG UNDERSTANDING
+  // of Java, C++, and Python" (bare skills-list evidence only, no
+  // experienceText). The strict EXPERIENCE pattern `strong ... understanding`
+  // matches "strong ... understanding" (index at "strong"); the separate,
+  // looser KNOWLEDGE pattern `understanding of` ALSO matches, starting at
+  // "understanding" — a position INSIDE the experience span's own range,
+  // since "understanding" is the shared word both patterns anchor on. Before
+  // this fix, resolveGoverningTier()'s "nearest PRECEDING span wins" rule
+  // (itself a deliberate, still-needed fix — see this function's own header
+  // comment on whole-sentence over-classification) picked the KNOWLEDGE span
+  // simply because it starts later/closer to the named terms, silently
+  // downgrading an experience-tier claim to knowledge-tier and letting a
+  // bare skills-list entry wrongly ground it. This is a narrower, targeted
+  // fix scoped to genuine text OVERLAP only (not mere proximity) — two
+  // spans covering physically overlapping text are, by construction, two
+  // readings of the SAME underlying claim, so the strictest applicable tier
+  // must win. Two spans that merely sit near each other but cover disjoint
+  // text (e.g. a separate, genuinely independent knowledge-only mention
+  // elsewhere in the sentence) are NOT affected — that case is exactly what
+  // "nearest preceding" still correctly handles unchanged.
+  const nonExemptSpans = rawSpans.filter((s) => !isExemptTier(s.tier));
+  const strongSpans = nonExemptSpans.filter((s) => s.tier === 'experience');
+  const withoutOverriddenKnowledge = rawSpans.filter((span) => {
+    if (span.tier !== 'knowledge') return true;
+    return !strongSpans.some((strong) => spansOverlap(span, strong));
+  });
+
+  const exemptSpans = withoutOverriddenKnowledge.filter((s) => isExemptTier(s.tier));
+  const withoutNestedMatches = withoutOverriddenKnowledge.filter((span) => {
     if (isExemptTier(span.tier)) return true;
     return !exemptSpans.some((e) => span.index >= e.index && span.index < e.index + e.length);
   });

@@ -855,4 +855,96 @@ describe('findUnsupportedPossessionClaims()', () => {
       ).toBeGreaterThan(0);
     });
   });
+
+  // ─── V7 (RABBIT_NOTEBOOK.md §59): a weaker OVERLAPPING claim span must
+  // never override a stronger one covering the same text. Production
+  // follow-up to V6 (§58): a real letter said "I have a strong understanding
+  // of Java, C++, and Python" for the same bare "Programming Languages: ..."
+  // skills-list-only CV. The named technologies genuinely ARE on the
+  // candidate's list — this is NOT a fabricated-technology defect, it is an
+  // unsupported PROFICIENCY-LEVEL defect: "strong understanding" is a
+  // strict, experience-tier strength claim (same bar as "expert in"/
+  // "well-versed in"), but the separate, looser "understanding of" knowledge
+  // pattern also matched the same word and — being nearer to the named
+  // terms — silently governed instead, letting the bare list wrongly ground
+  // a claim of STRONG understanding rather than merely "some" understanding.
+  describe('V7 — a weaker overlapping claim pattern must not override a stronger one', () => {
+    const BARE_LANGUAGE_LIST_EVIDENCE: CvEvidence = {
+      experienceText: 'IT Officer at Toyota Tanzania. Managed internal databases.',
+      skillsOnlyTerms: ['Programming Languages: HTML, CSS, Java, C++, Python'],
+    };
+
+    it('flags the exact real "I have a strong understanding of ... Java ... Python" sentence', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I have a strong understanding of several programming languages, including Java, C++, ' +
+          'Python, HTML, and CSS, which align well with the technological needs of Acme Corp.',
+        BARE_LANGUAGE_LIST_EVIDENCE,
+      );
+      expect(violations.some((v) => v.includes('java'))).toBe(true);
+      expect(violations.some((v) => v.includes('python'))).toBe(true);
+    });
+
+    it('still accepts "strong understanding of X" when the CV genuinely describes experience using X', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I have a strong understanding of Python.',
+        {
+          experienceText: 'Built production services in Python for three years.',
+          skillsOnlyTerms: [],
+        },
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('a bare skills-list entry remains sufficient for the plain, non-overlapping "understanding of X" (no strength adjective)', () => {
+      const violations = findUnsupportedPossessionClaims('I have an understanding of Python.', {
+        experienceText: '',
+        skillsOnlyTerms: ['Python'],
+      });
+      expect(violations).toEqual([]);
+    });
+
+    it('genuine learning-intent wording ("eager to develop my understanding of X") remains exempt', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am eager to develop my understanding of Kubernetes.',
+        { experienceText: '', skillsOnlyTerms: [] },
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('genuine learning-intent wording ("expanding my proficiency in X", §57) remains exempt', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'I am enthusiastic about expanding my proficiency in Kubernetes.',
+        { experienceText: '', skillsOnlyTerms: [] },
+      );
+      expect(violations).toEqual([]);
+    });
+
+    it('an explicit negation ("I don\'t have a strong understanding of X yet") is never flagged', () => {
+      const violations = findUnsupportedPossessionClaims(
+        "I don't have a strong understanding of Kubernetes yet.",
+        { experienceText: '', skillsOnlyTerms: [] },
+      );
+      expect(violations).toEqual([]);
+    });
+
+    // Regression guard for the ORIGINAL V2.1.1 fix this precedence change
+    // must not undo: a genuinely separate, non-overlapping knowledge-only
+    // mention elsewhere in the sentence must stay knowledge-tier even though
+    // an unrelated experience-tier phrase ("a strong foundation") appears
+    // later in the same sentence — "nearest preceding wins" for
+    // NON-overlapping spans is unchanged; only genuinely overlapping spans
+    // now resolve to the stronger tier.
+    it('does not let a distant, non-overlapping experience-tier phrase retroactively strengthen an earlier, separate knowledge-only mention', () => {
+      const violations = findUnsupportedPossessionClaims(
+        'My familiarity with Python, Java, and REST APIs, along with my knowledge of database ' +
+          'design and MySQL, provides a strong foundation for tackling the responsibilities of ' +
+          'this role.',
+        {
+          experienceText: '',
+          skillsOnlyTerms: ['Python', 'Java', 'REST APIs', 'database design', 'MySQL'],
+        },
+      );
+      expect(violations).toEqual([]);
+    });
+  });
 });
