@@ -386,15 +386,54 @@ export class BillingService {
     );
   }
 
+  // RABBIT_NOTEBOOK.md §62: production confirmed — twice, 100% of the
+  // pro_monthly signups that have ever occurred — that Stripe delivers
+  // `invoice.payment_succeeded` for a brand-new trial subscription's intro
+  // charge BEFORE `checkout.session.completed` (the only event carrying
+  // `metadata.internalUserId`, and so the only one that creates this user's
+  // `subscriptions` row). Observed gap was ~1 real second both times, but
+  // this must not assume Stripe guarantees ANY particular order or timing —
+  // it explicitly does not (docs.stripe.com/webhooks#event-ordering). A
+  // short, bounded in-process retry resolves the overwhelmingly common case
+  // (the dependency showing up within a few seconds) without waiting on
+  // Stripe's own, much coarser webhook-retry schedule; if the subscription
+  // still doesn't exist after this budget is exhausted, throwing (rather
+  // than the previous silent `return`) makes this webhook delivery fail
+  // with a 5xx, so Stripe's own at-least-once retry delivers it again later
+  // instead of the payment being lost permanently. Total budget ~7.75s —
+  // comfortably above the ~1s gap observed twice, short enough that a
+  // webhook response is still returned well within Stripe's own delivery
+  // timeout.
+  private static readonly PAYMENT_SUBSCRIPTION_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000];
+
+  private async findSubscriptionForPaymentWithRetry(
+    providerCustomerId: string,
+  ): Promise<SubscriptionEntity | null> {
+    const delays = BillingService.PAYMENT_SUBSCRIPTION_RETRY_DELAYS_MS;
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      const sub = await this.subscriptionRepo.findOneBy({ providerCustomerId });
+      if (sub) return sub;
+      if (attempt < delays.length) {
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
+    return null;
+  }
+
   private async onPaymentSucceeded(event: InternalBillingEvent): Promise<void> {
     if (!event.providerPaymentId || !event.providerCustomerId) return;
 
-    const sub = await this.subscriptionRepo.findOneBy({
-      providerCustomerId: event.providerCustomerId,
-    });
+    const sub = await this.findSubscriptionForPaymentWithRetry(event.providerCustomerId);
     if (!sub) {
-      this.logger.warn(`No subscription found for provider customer ${event.providerCustomerId}`);
-      return;
+      // Exhausted the bounded retry above — genuinely not here yet (or
+      // never will be). Throw, not return: see this method's own doc
+      // comment above for why a 5xx here (triggering Stripe's own webhook
+      // retry) is the correct outcome, not a silently dropped payment.
+      const message =
+        `No subscription found yet for provider customer ${event.providerCustomerId} after ` +
+        `bounded retry (payment ${event.providerPaymentId}) — deferring to Stripe's webhook retry`;
+      this.logger.error(message);
+      throw new Error(message);
     }
 
     try {

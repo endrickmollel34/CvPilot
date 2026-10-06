@@ -1137,6 +1137,77 @@ describe('BillingService', () => {
       ).resolves.toBeUndefined();
     });
 
+    // §62 fix: Stripe confirmed (twice, in production) to deliver
+    // invoice.payment_succeeded for a brand-new trial subscription BEFORE
+    // checkout.session.completed — the only event that creates this user's
+    // subscriptions row. onPaymentSucceeded must tolerate that ordering
+    // instead of silently dropping the payment.
+    describe('payment.succeeded — subscription-not-yet-created race (§62)', () => {
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('retries a bounded number of times when the subscription row does not exist yet, and succeeds once it appears', async () => {
+        jest.useFakeTimers();
+
+        mockSubscriptionRepo.findOneBy
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(mockSub('pro', 'trialing'));
+
+        const promise = fireEvent({
+          type: 'payment.succeeded',
+          provider: 'STRIPE',
+          providerCustomerId: 'cus_1',
+          providerPaymentId: 'pi_intro_race',
+          paymentStatus: 'succeeded',
+          paymentMethod: 'CARD',
+          amountMinorUnits: 299,
+          currency: 'EUR',
+        });
+
+        await jest.advanceTimersByTimeAsync(10_000);
+        await promise;
+
+        expect(mockSubscriptionRepo.findOneBy).toHaveBeenCalledTimes(3);
+        expect(mockPaymentRepo.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            userId: 'user-1',
+            providerPaymentId: 'pi_intro_race',
+            amount: 299,
+            currency: 'EUR',
+          }),
+          { conflictPaths: ['providerPaymentId'] },
+        );
+      });
+
+      it('throws (so Stripe retries the webhook later) instead of silently dropping the payment once the bounded retry is exhausted', async () => {
+        jest.useFakeTimers();
+
+        mockSubscriptionRepo.findOneBy.mockResolvedValue(null);
+
+        const promise = fireEvent({
+          type: 'payment.succeeded',
+          provider: 'STRIPE',
+          providerCustomerId: 'cus_never_created',
+          providerPaymentId: 'pi_never',
+          paymentStatus: 'succeeded',
+          paymentMethod: 'CARD',
+          amountMinorUnits: 299,
+          currency: 'EUR',
+        });
+        // Attach the rejection assertion before advancing timers, so Jest
+        // never sees an unhandled rejection while the retry loop is still
+        // in flight under fake timers.
+        const assertion = expect(promise).rejects.toThrow(/No subscription found/);
+
+        await jest.advanceTimersByTimeAsync(10_000);
+        await assertion;
+
+        expect(mockPaymentRepo.upsert).not.toHaveBeenCalled();
+      });
+    });
+
     it('a null (unhandled) parsed webhook event is a no-op', async () => {
       mockStripeProvider.verifyAndParseWebhook.mockResolvedValue(null);
 
