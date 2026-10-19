@@ -1,0 +1,93 @@
+# Render Blueprint — CVPilot API recovery environment (RABBIT_NOTEBOOK.md §65).
+#
+# Zero-cost: both resources below use plan: free. Render's free web service
+# requires NO payment method (confirmed via official docs before choosing
+# Render over Northflank, whose Sandbox requires one for every account).
+#
+# This replaces Railway (trial expired, project suspended) as the apps/api
+# host. PostgreSQL (Neon) and file storage (Cloudflare R2) are unaffected —
+# both are independent third-party services, never hosted on Railway, and
+# are reused here unchanged. Only compute (this API process) and the Redis
+# queue/rate-limit store move.
+#
+# Deploy steps (manual — Render account creation and GitHub repo access
+# cannot be completed without browser/OAuth access this environment doesn't
+# have): sign in to Render, "New +" → "Blueprint", connect the
+# endrickmollel34/CvPilot GitHub repo, Render reads this file automatically.
+# Every envVar below is `sync: false` — Render will prompt for each value
+# once during setup; paste from the secure local backup
+# (C:\Users\molle\CVPilot-Backups\railway-env-vars-2026-10-19.json — the
+# DATABASE_URL value is unchanged from Railway's, since Neon is independent).
+# Do not set a card on file; do not accept any paid-plan upgrade prompt.
+
+services:
+  - name: cvpilot-api
+    type: web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    # Mirrors Railway's own preDeployCommand exactly — same WORKDIR (/app)
+    # inside the same built image, just a different platform running it.
+    preDeployCommand: cd apps/api && npm run migration:run
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: REDIS_URL
+        fromService:
+          name: cvpilot-redis
+          type: keyvalue
+          property: connectionString
+      # Unchanged from Railway — Neon is independent of either host.
+      - key: DATABASE_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_WEBHOOK_SECRET
+        sync: false
+      - key: CLOUDFLARE_R2_ENDPOINT
+        sync: false
+      - key: CLOUDFLARE_R2_ACCESS_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: CLOUDFLARE_R2_BUCKET_NAME
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_PRO_MONTHLY_INTRO
+        sync: false
+      - key: STRIPE_PRICE_PRO_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_PRO_ANNUAL
+        sync: false
+      - key: STRIPE_PRICE_STUDENT_MONTHLY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+      - key: CONTACT_RECIPIENT_EMAIL
+        sync: false
+      # Reserved (empty) — matches CLAUDE.md's "prepared but not live" Sentry
+      # status; leave blank unless a real project DSN exists.
+      - key: SENTRY_DSN
+        sync: false
+
+  - name: cvpilot-redis
+    type: keyvalue
+    plan: free
+    ipAllowList:
+      # Render's own documented example for same-account service access;
+      # the Key Value instance's own connection-string password is the real
+      # access control here. Revisit if Render's dashboard offers a
+      # narrower "internal services only" option once this is set up.
+      - source: 0.0.0.0/0
+        description: allow-all (free plan; access gated by connection password)
